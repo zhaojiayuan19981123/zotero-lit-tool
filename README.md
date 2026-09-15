@@ -8,6 +8,24 @@
 
 ---
 
+## 下载安装（Windows）
+
+无需安装开发环境，直接下载 Windows 安装程序即可使用。
+
+- **下载地址**：[最新版本下载](https://github.com/zhaojiayuan19981123/zotero-lit-tool/releases/latest)
+
+> 或手动访问 [Releases 页面](https://github.com/zhaojiayuan19981123/zotero-lit-tool/releases)，下载最新版 `一站式科研终端-<版本>-安装版.exe`。
+
+**安装说明**：
+
+1. 下载 `一站式科研终端-<版本>-安装版.exe` 并双击运行
+2. 按向导选择安装位置（默认会创建桌面快捷方式）
+3. 安装完成后启动，首次打开会有新手引导，按提示完成 AI 密钥等初始设置
+
+> 首次运行若被 Windows SmartScreen 拦截（未签名应用），点「更多信息 → 仍要运行」即可。
+
+---
+
 ## 功能特性
 
 | 模块 | 说明 |
@@ -177,6 +195,20 @@ zotero-lit-tool/
 - 前端：原生 HTML/CSS/JS 多维表格 UI（列宽可拖拽调节）；pdf.js（本地 vendor）缩略图与内嵌阅读器
 - 桌面交付：Electron + electron-builder（NSIS 安装程序）
 - 存储：本地 JSON 文件（零数据库依赖，开箱即用）
+
+## 发布新版本（GitHub Releases）
+
+打包完成后，把 exe 上传到 GitHub Releases，让上面的下载链接指向最新版本：
+
+1. 本地打包：`npm run dist`，得到 `dist/一站式科研终端-<版本>-安装版.exe`
+2. 打开 GitHub 仓库页面 → 右侧 **Releases** → **Draft a new release**
+3. **Tag** 填版本号（如 `v1.0.0`）→ **Release title** 填 `v1.0.0`
+4. 在「Attach binaries」里拖入那个 exe 文件
+5. 点 **Publish release**
+
+发布后，上面「下载安装」里的 `releases/latest` 链接会自动指向这个版本，用户点进去即可下载 exe。
+
+> 上传 exe 前记得先 push 代码并确认版本号与 `package.json` 一致。
 
 ## License
 
