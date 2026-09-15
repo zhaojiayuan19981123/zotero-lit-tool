@@ -9,7 +9,9 @@
     "dev": "node server.js",
     "electron": "electron .",
     "dist": "electron-builder --win",
-    "dist:dir": "electron-builder --win dir"
+    "dist:dir": "electron-builder --win dir",
+    "dist:mac": "electron-builder --mac",
+    "dist:mac:arm64": "electron-builder --mac --arm64"
   },
   "keywords": ["zotero", "literature", "pdf", "ai", "research"],
   "author": "SciTerminal",
@@ -41,6 +43,22 @@
       "!node_modules/canvas/**",
       "!node_modules/**/canvas/**"
     ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.productivity",
+      "target": [
+        { "target": "dmg", "arch": ["arm64"] }
+      ],
+      "artifactName": "一站式科研终端-${version}-macOS-arm64.dmg"
+    },
+    "dmg": {
+      "title": "一站式科研终端",
+      "icon": "build/icon.icns",
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    },
     "win": {
       "icon": "build/icon.ico",
       "target": [
