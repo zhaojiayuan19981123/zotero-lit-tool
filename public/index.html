@@ -17,6 +17,23 @@
     </div>
     <div class="topbar-actions">
       <input type="search" id="searchInput" class="search" placeholder="🔍 搜索标题 / 作者 / 关键词…" />
+      <div class="model-switch">
+        <button id="btnModelSwitch" class="btn model-btn" title="切换当前使用的 AI 模型">
+          <span class="model-dot" id="modelDot"></span>
+          <span class="model-btn-text" id="modelBtnText">未配置模型</span>
+          <span class="model-caret">▾</span>
+        </button>
+        <div id="modelPanel" class="model-panel hidden">
+          <div class="model-panel-head">
+            <span>切换 AI 模型</span>
+            <span class="model-panel-count" id="modelPanelCount"></span>
+          </div>
+          <div id="modelPanelBody" class="model-panel-body"></div>
+          <div class="model-panel-foot">
+            <button id="btnModelManage" class="btn btn-ghost btn-sm">⚙ 管理模型配置</button>
+          </div>
+        </div>
+      </div>
       <button id="btnParseAll" class="btn btn-primary">▶ 解析全部</button>
       <button id="btnRefreshRanks" class="btn">🏅 更新期刊等级</button>
       <button id="btnExport" class="btn">导出</button>
@@ -42,6 +59,7 @@
         <div class="nav-item" data-view="projects"><span class="nav-ico">📂</span>项目管理</div>
         <div class="nav-item" data-view="tasks"><span class="nav-ico">✅</span>任务安排</div>
         <div class="nav-item" data-view="papers"><span class="nav-ico">📮</span>论文进度</div>
+        <div class="nav-item" data-view="mail"><span class="nav-ico">📧</span>邮箱<span id="navMailBadge" class="nav-badge hidden">0</span></div>
         <div class="nav-item" data-view="notes"><span class="nav-ico">🧪</span>研究记录</div>
         <div class="nav-item" data-view="ai"><span class="nav-ico">🤖</span>AI 助手</div>
         <div class="nav-item" data-view="worldlib"><span class="nav-ico">🌍</span>世图下载助手</div>
@@ -151,6 +169,21 @@
           <div class="tab-spacer"></div>
           <span id="statBadge" class="stat-badge"></span>
         </nav>
+
+        <div class="bulk-bar hidden" id="bulkBar">
+          <span class="bulk-info"><b id="bulkCount">0</b> 篇已选中<span id="bulkHint" class="bulk-hint"></span></span>
+          <div class="bulk-acts">
+            <button class="tb-btn" id="btnBulkParse">▶ 解析选中</button>
+            <button class="tb-btn" id="btnBulkReparse" title="忽略解析状态，强制对选中文献重新跑一遍 AI 解析">↻ 批量重新解析</button>
+            <button class="tb-btn" id="btnBulkProgress">◔ 标记进度</button>
+            <button class="tb-btn" id="btnBulkRank" title="按当前期刊名重新查询 easyScholar 等级">🏅 更新等级</button>
+            <button class="tb-btn danger" id="btnBulkDelete">🗑 批量删除</button>
+          </div>
+          <div class="bulk-right">
+            <button class="tb-btn ghost" id="btnBulkInvert">反选</button>
+            <button class="tb-btn ghost" id="btnBulkClear">取消选择</button>
+          </div>
+        </div>
 
         <div class="toolbar">
           <button id="btnAddRecord" class="tb-btn accent">＋ 添加记录</button>
@@ -267,6 +300,39 @@
             <button class="btn btn-primary" id="btnWlImport" disabled>📥 下载勾选并导入</button>
           </div>
           <div id="wlList" class="wl-list"></div>
+        </div>
+      </section>
+
+      <!-- ===== 视图：邮箱 ===== -->
+      <section id="viewMail" class="view hidden">
+        <div class="mail-wrap">
+          <!-- 左栏：账户与文件夹 -->
+          <aside class="mail-side">
+            <div class="mail-side-head">
+              <b>📧 邮箱</b>
+              <button class="btn-ghost as-link" id="btnMailManage">＋ 账户管理</button>
+            </div>
+            <div id="mailAccounts" class="mail-accounts"></div>
+            <div class="mail-side-sep"></div>
+            <div id="mailFolders" class="mail-folders"></div>
+          </aside>
+
+          <!-- 中栏：邮件列表 -->
+          <div class="mail-list-col">
+            <div class="mail-list-head">
+              <input id="mailSearch" class="tb-input mail-search" placeholder="搜索主题 / 发件人，回车确认…" />
+              <button class="tb-btn" id="btnMailRefresh" title="刷新当前文件夹">⟳</button>
+              <button class="tb-btn" id="btnMailCompose" title="写邮件">✎ 写邮件</button>
+            </div>
+            <div id="mailListHead" class="mail-list-title"></div>
+            <div id="mailList" class="mail-list"></div>
+            <div id="mailPager" class="mail-pager"></div>
+          </div>
+
+          <!-- 右栏：邮件详情 -->
+          <div class="mail-detail-col">
+            <div id="mailDetail" class="mail-detail"></div>
+          </div>
         </div>
       </section>
 
@@ -531,6 +597,79 @@
   </div>
 
   <!-- AI 设置弹窗 -->
+  <!-- 邮箱账户管理 -->
+  <div id="mailAccountModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog modal-wide">
+      <div class="modal-head"><h3>📧 邮箱账户管理</h3><button class="modal-close" id="btnMaClose">✕</button></div>
+      <div class="modal-body">
+        <p class="modal-desc">支持添加多个邮箱账户（如个人 163 邮箱 + 学校邮箱），随时切换查看。不需要邮箱也可以留空，不影响其他功能。<br />账号与授权码仅保存在<b>本机数据目录</b>（mail.json），不会上传到任何服务器。</p>
+        <div id="maList" class="ma-list"></div>
+
+        <div class="field-sep"></div>
+        <h4 class="ma-form-title" id="maFormTitle">添加邮箱账户</h4>
+        <div class="prof-grid">
+          <label class="field"><span>邮箱服务商</span>
+            <select id="maProvider" class="tb-select"></select>
+          </label>
+          <label class="field"><span>备注名称（可留空）</span>
+            <input id="maLabel" class="tb-input" placeholder="如：个人邮箱 / 学校邮箱" />
+          </label>
+          <label class="field"><span>邮箱地址 *</span>
+            <input id="maEmail" class="tb-input" placeholder="xxx@163.com" autocomplete="off" />
+          </label>
+          <label class="field"><span>授权码 / 密码 *</span>
+            <input id="maPassword" type="password" class="tb-input" placeholder="网易/QQ 邮箱填授权码" autocomplete="new-password" />
+          </label>
+        </div>
+        <p class="modal-desc" id="maNote"></p>
+
+        <details class="ma-advanced">
+          <summary>高级设置（服务器地址与端口，一般无需修改）</summary>
+          <div class="prof-grid">
+            <label class="field"><span>IMAP 服务器</span><input id="maImapHost" class="tb-input" placeholder="imap.163.com" /></label>
+            <label class="field"><span>IMAP 端口</span><input id="maImapPort" class="tb-input" placeholder="993" /></label>
+            <label class="field"><span>SMTP 服务器</span><input id="maSmtpHost" class="tb-input" placeholder="smtp.163.com" /></label>
+            <label class="field"><span>SMTP 端口</span><input id="maSmtpPort" class="tb-input" placeholder="465" /></label>
+          </div>
+          <div class="ma-checks">
+            <label><input type="checkbox" id="maImapSecure" checked /> IMAP 使用 SSL/TLS</label>
+            <label><input type="checkbox" id="maSmtpSecure" checked /> SMTP 使用 SSL/TLS</label>
+            <label><input type="checkbox" id="maSelfSigned" /> 忽略证书校验（学校/企业自建邮箱）</label>
+          </div>
+        </details>
+        <div id="maTestResult" class="ma-test-result hidden"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="btnMaTest" class="btn">🔌 测试连接</button>
+        <span class="ob-spacer"></span>
+        <button id="btnMaSave" class="btn btn-primary">保存账户</button>
+        <button id="btnMaCancel" class="btn">取消编辑</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 写邮件 -->
+  <div id="mailComposeModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog modal-wide">
+      <div class="modal-head"><h3>✎ 写邮件</h3><button class="modal-close" id="btnMcClose">✕</button></div>
+      <div class="modal-body">
+        <div class="prof-grid">
+          <label class="field"><span>发件账户</span><select id="mcFrom" class="tb-select"></select></label>
+          <label class="field"><span>收件人 *</span><input id="mcTo" class="tb-input" placeholder="多个收件人用英文逗号分隔" /></label>
+          <label class="field"><span>抄送</span><input id="mcCc" class="tb-input" placeholder="可留空" /></label>
+          <label class="field"><span>主题</span><input id="mcSubject" class="tb-input" placeholder="邮件主题" /></label>
+        </div>
+        <label class="field"><span>正文</span><textarea id="mcBody" rows="10" placeholder="在此输入邮件内容…"></textarea></label>
+      </div>
+      <div class="modal-foot">
+        <button id="btnMcSend" class="btn btn-primary">发送</button>
+        <button id="btnMcCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
   <div id="settingsModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog">
@@ -539,22 +678,92 @@
         <button class="modal-close" id="btnSettingsClose">✕</button>
       </div>
       <div class="modal-body">
-        <p class="modal-desc">配置大模型后可获得精准的「研究背景 / 方法 / 结果 / 创新点」分点解析；同一密钥同时驱动 AI 助手对话与划词翻译。配置 easyScholar 密钥可自动查询期刊等级。</p>
-        <label class="field"><span>AI 提供方</span>
-          <select id="setProvider" class="tb-select w100">
-            <option value="siliconflow">硅基流动 SiliconFlow（DeepSeek）</option>
-            <option value="openai">其他 OpenAI 兼容接口</option>
-            <option value="none">不使用 AI（规则离线提取）</option>
-          </select>
-        </label>
-        <label class="field"><span>接口地址 Base URL</span><input id="setBaseURL" class="tb-input" placeholder="https://api.siliconflow.cn/v1" /></label>
-        <label class="field"><span>API 密钥（硅基流动，用户自填）</span><input id="setApiKey" class="tb-input" type="password" placeholder="sk-..." /></label>
-        <label class="field"><span>模型名称</span><input id="setModel" class="tb-input" placeholder="deepseek-ai/DeepSeek-V4-Flash" /></label>
+        <p class="modal-desc">配置大模型后可获得精准的「研究背景 / 方法 / 结果 / 创新点」分点解析；模型同时驱动 AI 助手对话、论文对话与划词翻译。<b>可以添加多个模型</b>（例如：硅基流动的 DeepSeek 做日常解析 + 通义的 Qwen-VL 专门看图表），在<b>主界面顶栏一键切换</b>。</p>
+
+        <div class="ml-section">
+          <div class="ml-head">
+            <span class="ml-title">🧩 已配置的模型 <b id="mlCount">0</b>/20</span>
+            <span class="ml-hint">点「使用中」的卡片可切换激活模型；同一时刻只有一个生效</span>
+          </div>
+          <div id="mlList" class="ml-list"></div>
+          <div class="ml-actions">
+            <button type="button" id="btnMlAdd" class="btn btn-ghost btn-sm">＋ 添加模型</button>
+            <button type="button" id="btnMlAddPreset" class="btn btn-ghost btn-sm">⚡ 一键添加常用模型</button>
+          </div>
+        </div>
+
+        <!-- 两段式看图：给「看不了图的模型」配一双眼睛 -->
+        <div class="ml-section">
+          <div class="ml-head">
+            <span class="ml-title">👁 两段式看图</span>
+            <span class="ml-hint">当前模型不支持图片时，先用它把图转成文字再回答</span>
+          </div>
+          <p class="ml-desc">
+            DeepSeek 这类纯文本模型收到图片会直接报错。指定一个<b>视觉模型</b>后，发图提问时会先让它
+            「看图并写成详细文字描述」，再把描述交给当前模型回答；每条模型的“图片能力”可在编辑时自行覆盖。
+            <b>留空则自动选用你已配置且被判定为支持视觉的模型。</b>
+          </p>
+          <label class="field"><span>视觉模型（看图的那一双眼睛）</span>
+            <select id="setVisionProfile" class="tb-select"></select>
+          </label>
+          <div id="setVisionHint" class="ml-vision-hint"></div>
+        </div>
+
+        <!-- 模型编辑表单（新增 / 编辑共用） -->
+        <div id="mlEditor" class="ml-editor hidden">
+          <div class="ml-editor-head">
+            <b id="mlEditorTitle">添加模型</b>
+            <span class="ml-editor-sub">填错也不影响已有的其他模型</span>
+          </div>
+          <div class="prof-grid">
+            <label class="field"><span>供应商</span>
+              <select id="mlProvider" class="tb-select"></select>
+            </label>
+            <label class="field"><span>备注名称（可留空）</span>
+              <input id="mlLabel" class="tb-input" placeholder="如：DeepSeek 日常 / Qwen-VL 看图" />
+            </label>
+          </div>
+          <label class="field"><span>接口地址 Base URL *</span>
+            <input id="mlBaseURL" class="tb-input" placeholder="https://api.siliconflow.cn/v1" />
+          </label>
+          <label class="field"><span>API 密钥 *</span>
+            <input id="mlApiKey" class="tb-input" type="password" placeholder="sk-..." autocomplete="new-password" />
+          </label>
+          <label class="field"><span>模型名称 *</span>
+            <div class="ml-model-row">
+              <input id="mlModel" class="tb-input" list="mlModelList" placeholder="deepseek-ai/DeepSeek-V4-Flash" />
+              <datalist id="mlModelList"></datalist>
+              <button type="button" id="btnMlFetch" class="tb-btn" title="填入供应商的推荐模型">常用</button>
+            </div>
+          </label>
+          <label class="field"><span>图片能力</span>
+            <select id="mlVisionOverride" class="tb-select">
+              <option value="auto">自动判断（按内置模型目录）</option>
+              <option value="yes">支持图片（强制按视觉模型处理）</option>
+              <option value="no">不支持图片（强制走视觉模型转述）</option>
+            </select>
+            <small class="ml-field-hint">你可以覆盖内置判断；尤其适合供应商新增模型、模型名称变更或兼容接口。</small>
+          </label>
+          <div id="mlModelChips" class="ml-chips"></div>
+          <div id="mlTestResult" class="ml-test-result hidden"></div>
+          <div class="ml-editor-foot">
+            <button type="button" id="btnMlTest" class="btn btn-ghost btn-sm">🔌 测试连接</button>
+            <span class="ob-spacer"></span>
+            <button type="button" id="btnMlSave" class="btn btn-primary btn-sm">保存这条配置</button>
+            <button type="button" id="btnMlCancel" class="btn btn-sm">取消</button>
+          </div>
+        </div>
+
+        <div class="field-sep"></div>
         <label class="field"><span>提取结果语言</span>
           <select id="setLanguage" class="tb-select w100">
             <option value="zh">简体中文</option>
             <option value="en">English</option>
           </select>
+        </label>
+        <label class="field">
+          <span>AI 总开关</span>
+          <label class="ml-switch"><input type="checkbox" id="setAiEnabled" /> 启用 AI（关闭后全部走规则离线提取，不消耗额度）</label>
         </label>
         <div class="field-sep"></div>
         <p class="modal-desc" style="background:#fff7e6">easyScholar 期刊等级查询（免费开放接口，需 SecretKey，仅保留中科院/新锐/ABS/SSCI 分区）。</p>
@@ -606,6 +815,23 @@
         <div class="field-sep"></div>
         <p class="modal-desc" style="background:#e6f6ec">数据保存位置（默认存在<b>系统用户数据目录</b>，与安装位置分离，<b>升级/覆盖安装不会丢失</b>文献与配置；也可手动指定自定义目录）。</p>
         <label class="field"><span>数据保存目录</span><input id="setDataDir" class="tb-input" placeholder="留空 = 系统用户数据目录；例如 D:\文献库" /></label>
+
+        <div class="field-sep"></div>
+        <div class="bk-section">
+          <div class="bk-head">
+            <span class="bk-head-title">🗄 数据备份与恢复</span>
+            <span class="bk-head-hint">每次启动自动备份，保留最近 10 份</span>
+          </div>
+          <p class="modal-desc">重装或升级前不必担心：应用每次启动都会把文献、配置、邮箱账户与 PDF 附件快照到数据目录下的 <code>backups/</code>。误删文献或配置出错时，可从这里一键恢复。</p>
+          <div class="bk-actions">
+            <button id="btnBkCreate" class="btn btn-ghost btn-sm">＋ 立即备份</button>
+            <button id="btnBkExport" class="btn btn-ghost btn-sm">⬇ 导出整包数据</button>
+            <button id="btnBkOpenDir" class="btn btn-ghost btn-sm">📂 打开数据目录</button>
+          </div>
+          <div id="bkListWrap" class="bk-list-wrap">
+            <div class="bk-loading">正在读取备份列表…</div>
+          </div>
+        </div>
       </div>
       <div class="modal-foot">
         <button id="btnReplayOnboarding" class="btn btn-ghost">🎓 重新查看新手引导</button>
@@ -633,6 +859,9 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
+
+  <!-- 新邮件提醒：右上角浮出，点击可直接跳到该邮件 -->
+  <div id="mailNotifStack" class="mail-notif-stack"></div>
 
   <!-- 拖拽上传覆盖层 -->
   <div id="dragOverlay" class="drag-overlay hidden">
@@ -669,10 +898,16 @@
       <div class="pr-main">
         <div id="prPages" class="pr-pages"></div>
       </div>
-      <!-- 右：翻译面板（Zotero 样式） -->
+      <!-- 右：功能面板（划词翻译 / 解析结果 / AI 对话） -->
       <aside class="pr-trans-panel">
-        <div class="pr-panel-head">🌐 划词翻译</div>
-        <div class="pr-panel-body">
+        <div class="pr-tabs" id="prTabs">
+          <button class="pr-tab active" data-prtab="translate">🌐 划词翻译</button>
+          <button class="pr-tab" data-prtab="analysis">📋 解析结果</button>
+          <button class="pr-tab" data-prtab="chat">🤖 AI 对话</button>
+        </div>
+
+        <!-- ---------- 划词翻译 ---------- -->
+        <div class="pr-panel-body pr-pane" data-prpane="translate">
           <textarea id="prSourceText" class="pr-src" placeholder="在左侧 PDF 中选中文字即可自动翻译；也可在此直接粘贴文本…"></textarea>
           <div class="pr-lang-row">
             <select id="prLangFrom" class="tb-select">
@@ -697,6 +932,28 @@
           <div class="pr-panel-sep"></div>
           <div class="pr-panel-sub">📝 笔记与高亮 <span class="side-count" id="prNotesCount">0</span></div>
           <div id="prNotesList" class="pr-notes-list"></div>
+        </div>
+
+        <!-- ---------- 解析结果（与左侧阅读的文献同步） ---------- -->
+        <div class="pr-panel-body pr-pane hidden" data-prpane="analysis">
+          <div class="pr-analysis-head">
+            <span id="prAnTitle" class="pr-an-title">—</span>
+            <button id="btnPrAnRefresh" class="btn btn-ghost btn-sm" title="重新解析这篇文献">↻ 重新解析</button>
+          </div>
+          <div id="prAnalysisBody" class="pr-an-body"></div>
+        </div>
+
+        <!-- ---------- 论文 AI 对话（支持文本 + 图片） ---------- -->
+        <div class="pr-pane pr-pane-chat hidden" data-prpane="chat">
+          <div id="prChatMsgs" class="pr-chat-msgs"></div>
+          <div id="prChatAttach" class="pr-chat-attach"></div>
+          <div class="pr-chat-input-row">
+            <button id="btnPrChatImg" class="pr-chat-icon-btn" title="上传图片（截图 / 图表 / 手写笔记），AI 会看图回答">🖼️</button>
+            <button id="btnPrChatText" class="pr-chat-icon-btn" title="把当前页文字附给 AI">📄</button>
+            <input id="prChatFile" type="file" accept="image/*" multiple class="hidden" />
+            <textarea id="prChatInput" class="pr-chat-input" rows="1" placeholder="就这篇论文提问，Enter 发送 / Shift+Enter 换行。可粘贴或上传图片…"></textarea>
+            <button id="btnPrChatSend" class="btn btn-primary pr-chat-send">发送</button>
+          </div>
         </div>
       </aside>
     </div>

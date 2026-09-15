@@ -1,8 +1,45 @@
 // electron/main.cjs —— Electron 主进程：启动内嵌 Express 后端 + 桌面窗口
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, shell, Notification } = require('electron');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const fs = require('fs');
+
+// Windows 上桌面通知必须设置 AppUserModelID，否则系统不会显示气泡通知。
+// 需与 electron-builder 配置里的 appId 保持一致。
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.research.sciterminal');
+}
+
+// ★ 固定 userData 目录，避免「重装/升级后数据消失」再次发生。
+// Electron 默认把 userData 放在 %APPDATA%\<package.json 的 name>，而安装包身份用的是
+// build.appId。两者一旦不一致（改过 name、换过打包方式、从开发版切到安装版），
+// 默认目录就会变，用户数据看起来就「凭空消失」——这正是之前踩过的坑。
+// 这里显式钉死一个稳定的目录名，保证任何版本升级都读写同一处。
+// 必须在 app.whenReady() 之前调用才生效。
+const USERDATA_MARKER = '.sciterminal-home'; // 标记文件：记录「这个目录就是家」
+function resolveUserDataRoot() {
+  const appData = app.getPath('appData'); // Windows: %APPDATA%
+  const stableRoot = path.join(appData, 'SciTerminal');
+  const legacyRoot = path.join(appData, 'zotero-lit-tool');
+  const hasData = (d) => {
+    try { return fs.existsSync(path.join(d, 'data', 'literature.json')); } catch (_) { return false; }
+  };
+  // 1) 已经认过门的目录优先（标记文件 + 有数据），保证认路稳定、绝不来回横跳
+  for (const root of [stableRoot, legacyRoot]) {
+    try {
+      if (fs.existsSync(path.join(root, USERDATA_MARKER)) && hasData(root)) return root;
+    } catch (_) { /* ignore */ }
+  }
+  // 2) 老目录有真实数据 -> 继续沿用（老用户升级不丢数据）
+  if (hasData(legacyRoot) && !hasData(stableRoot)) return legacyRoot;
+  // 3) 其余情况用新的稳定目录
+  return stableRoot;
+}
+try {
+  app.setPath('userData', resolveUserDataRoot());
+} catch (e) {
+  console.error('设置数据目录失败，将使用默认位置：', e.message);
+}
 
 let mainWindow = null;
 let backendPort = null;
@@ -37,6 +74,19 @@ function writeAppConfig(patch) {
     const next = { ...readAppConfig(), ...patch };
     fs.writeFileSync(cfgPath, JSON.stringify(next, null, 2), 'utf-8');
   } catch (e) { console.error('写入应用配置失败：', e.message); }
+}
+
+// 后端成功启动后写下「家目录」标记。之后无论 package.json 的 name 或 appId 怎么变，
+// 启动时都会优先认这个打过标记的目录，用户的邮箱/任务/待办/设置不会再丢。
+function markHome() {
+  try {
+    const root = app.getPath('userData');
+    fs.mkdirSync(root, { recursive: true });
+    const marker = path.join(root, USERDATA_MARKER);
+    if (!fs.existsSync(marker)) {
+      fs.writeFileSync(marker, JSON.stringify({ markedAt: new Date().toISOString(), app: '一站式科研终端' }, null, 2), 'utf-8');
+    }
+  } catch (e) { console.error('写入数据目录标记失败：', e.message); }
 }
 
 // 默认数据目录：统一放在 Electron 的 userData（系统用户数据目录），
@@ -76,6 +126,86 @@ function migrateLegacyInstallData(defaultDataDir) {
   }
 }
 
+// 数据目录安全校验：数据绝对不能落在「安装目录」内部（NSIS 覆盖安装会整目录替换，
+// 导致用户数据被清空）。若用户误将数据目录设到安装目录下，自动回退到默认的 userData。
+function isInsideInstallDir(dir) {
+  try {
+    const installDir = path.resolve(path.dirname(app.getPath('exe')));
+    const target = path.resolve(dir);
+    const rel = path.relative(installDir, target);
+    // rel 不以 .. 开头且非绝对路径 => target 在 installDir 内
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  } catch (_) { return false; }
+}
+
+// 自救：若上次把数据目录设到了安装目录内（老版本允许这么做，会导致覆盖安装丢数据），
+// 启动时把里面还能读到的数据搬到默认目录，再清掉这个危险配置。
+// 返回抢救成功的数据目录，无需要抢救则返回 null。
+function rescueDataFromInstallDir(defaultDataDir) {
+  try {
+    const installDir = path.resolve(path.dirname(app.getPath('exe')));
+    if (!fs.existsSync(installDir)) return null;
+    const names = ['literature.json', 'settings.json', 'mail.json', 'tasks.json',
+      'projects.json', 'notes.json', 'profile.json', 'papers.json', 'chat.json', 'conversations.json'];
+    const found = names.filter((n) => fs.existsSync(path.join(installDir, n)));
+    if (!found.length) return null;
+
+    fs.mkdirSync(defaultDataDir, { recursive: true });
+    let saved = 0;
+    for (const n of found) {
+      const dst = path.join(defaultDataDir, n);
+      try {
+        // 默认目录已有同名文件时不覆盖（避免用安装目录里的旧/残缺数据盖掉好数据）
+        if (fs.existsSync(dst)) continue;
+        fs.copyFileSync(path.join(installDir, n), dst);
+        saved++;
+      } catch (_) { /* 单个失败不影响其他 */ }
+    }
+    // 附件也一并抢救
+    try {
+      const upOld = path.join(installDir, 'uploads');
+      if (fs.existsSync(upOld)) {
+        const upNew = path.join(defaultDataDir, 'uploads');
+        fs.mkdirSync(upNew, { recursive: true });
+        for (const n of fs.readdirSync(upOld)) {
+          const s = path.join(upOld, n);
+          const d = path.join(upNew, n);
+          if (fs.statSync(s).isFile() && !fs.existsSync(d)) fs.copyFileSync(s, d);
+        }
+      }
+    } catch (_) { /* ignore */ }
+
+    console.warn(`[数据救援] 检测到数据曾被存放在安装目录内（覆盖安装会清空），已抢救 ${saved} 个文件到：${defaultDataDir}`);
+    return saved ? defaultDataDir : null;
+  } catch (e) {
+    console.error('[数据救援] 失败（忽略）：', e.message);
+    return null;
+  }
+}
+
+// 启动前自检：确认数据目录存在且关键文件可读，必要时给出明确日志（不阻塞启动）
+function verifyDataDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const lit = path.join(dir, 'literature.json');
+    if (fs.existsSync(lit)) {
+      const raw = fs.readFileSync(lit, 'utf-8');
+      JSON.parse(raw); // 能解析说明文件完好
+      const n = (JSON.parse(raw).items || []).length;
+      console.log(`[数据] 数据目录：${dir}（文献 ${n} 条）`);
+    } else {
+      console.log(`[数据] 数据目录：${dir}（尚未初始化）`);
+    }
+    const bk = path.join(dir, 'backups');
+    if (fs.existsSync(bk)) {
+      const n = fs.readdirSync(bk, { withFileTypes: true }).filter((d) => d.isDirectory()).length;
+      console.log(`[数据] 已有 ${n} 份自动备份`);
+    }
+  } catch (e) {
+    console.error('[数据] 数据目录自检失败：', e.message);
+  }
+}
+
 // 动态加载 ESM 后端（server.js），启动 Express，返回端口
 async function startBackend() {
   const serverEntry = path.join(__dirname, '..', 'server.js');
@@ -84,6 +214,8 @@ async function startBackend() {
   const userData = app.getPath('userData');
   const defaultDataDir = resolveDefaultDataDir(userData);
   migrateLegacyInstallData(defaultDataDir);
+  // 兜底自救：老版本允许把数据目录设到安装目录里，这里把尚存的数据搬回来
+  rescueDataFromInstallDir(defaultDataDir);
   const cfg = readAppConfig();
 
   // 上次设置过自定义数据目录且目录仍存在 → 沿用；否则回退默认目录
@@ -91,10 +223,16 @@ async function startBackend() {
   if (cfg.dataDir && typeof cfg.dataDir === 'string') {
     try {
       if (fs.existsSync(cfg.dataDir) && path.resolve(cfg.dataDir) !== path.resolve(defaultDataDir)) {
-        dataDir = path.resolve(cfg.dataDir);
+        if (isInsideInstallDir(cfg.dataDir)) {
+          console.warn('[数据] 自定义数据目录位于安装目录内，覆盖安装会清空数据，已回退到用户数据目录');
+          writeAppConfig({ dataDir: '' });
+        } else {
+          dataDir = path.resolve(cfg.dataDir);
+        }
       }
     } catch (_) { /* ignore */ }
   }
+  verifyDataDir(dataDir);
   const uploadDir = path.join(dataDir, 'uploads');
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -102,9 +240,13 @@ async function startBackend() {
   const { port } = await startServer({
     dataDir, uploadDir, port: 0, defaultDataDir,
     defaultUploadDir: path.join(dataDir, 'uploads'),
+    installDir: path.dirname(app.getPath('exe')),
     // 设置里切换数据目录成功后，主进程把新目录持久化，下次启动沿用
     onDataDirChange: (dir) => writeAppConfig({ dataDir: dir === defaultDataDir ? '' : dir }),
+    // 「打开数据目录」按钮：交给系统文件管理器
+    openPath: (dir) => shell.openPath(dir),
   });
+  markHome();
   return port;
 }
 

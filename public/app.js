@@ -61,6 +61,8 @@
   // 当前文库（侧边栏选中）：类型 + 分类（null = 全部文献）
   let lib = { type: 'empirical', collectionId: null };
   let colWidths = {}; // 用户调节的列宽 { key: px }（持久化到后端 settings，跨启动保留）
+  const selectedIds = new Set(); // 文献中心勾选的记录 id（批量操作的目标集合）
+  let lastCheckedId = null; // Shift 区间选择的锚点
   let colWidthsSaveTimer = null;
   function persistColWidths() {
     clearTimeout(colWidthsSaveTimer);
@@ -82,6 +84,13 @@
   let activeSummary = '';  // 当前会话的早期对话摘要
   let convLoaded = false;
   let chatBusy = false;
+  // 多模型：供应商目录 + 已配置的模型列表 + 当前激活项（顶栏切换用）
+  let providers = [];       // [{id,name,baseURL,keyHint,models:[{id,name,vision}]}]
+  let profiles = [];        // 已保存的模型配置
+  let activeProfileId = '';
+  let activeModelInfo = null; // {id,label,providerName,model,vision}
+  let activeVisionInfo = null; // 「两段式看图」实际生效的视觉模型（后端已按「指定 → 自动兜底」判定）
+  let editingProfileId = null; // 设置弹窗里正在编辑的配置 id（null = 新增）
   // 科研日历状态
   let calYear = new Date().getFullYear();
   let calMonth = new Date().getMonth(); // 0-based
@@ -91,6 +100,7 @@
   const el = {
     searchInput: $('searchInput'), statusFilter: $('statusFilter'), sortField: $('sortField'),
     theadRow: $('theadRow'), tbody: $('tbody'), emptyState: $('emptyState'), statBadge: $('statBadge'),
+    bulkBar: $('bulkBar'), bulkCount: $('bulkCount'), bulkHint: $('bulkHint'),
     gridWrap: $('gridWrap'), fieldsPop: $('fieldsPop'), toast: $('toast'),
     fileInput: $('fileInput'), cellFileInput: $('cellFileInput'),
     drawer: $('drawer'), drawerMask: $('drawerMask'), drawerBody: $('drawerBody'), drawerFilename: $('drawerFilename'),
@@ -106,6 +116,62 @@
     return data;
   }
   function isAbortError(e) { return e && (e.name === 'AbortError' || e.code === 20); }
+
+  // ============ 流式请求（SSE） ============
+  // 后端逐字返回 `data: {json}`，最后一条固定 `data: [DONE]`。
+  // onEvent(obj) 每条回调一次；signal 用于「停止生成」。
+  // 返回 { full, error, aborted }，不抛异常，调用方只需看返回值。
+  async function streamSSE(path, body, { onEvent, signal } = {}) {
+    let res;
+    try {
+      res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (e) {
+      if (isAbortError(e)) return { full: '', aborted: true };
+      return { full: '', error: '网络请求失败：' + e.message };
+    }
+
+    // 业务错误（缺 Key / 参数错）走普通 JSON，不走 SSE
+    if (!res.ok && !/event-stream/i.test(res.headers.get('content-type') || '')) {
+      const d = await res.json().catch(() => ({}));
+      return { full: '', error: d.error || `请求失败 (${res.status})` };
+    }
+    if (!res.body) return { full: '', error: '当前环境不支持流式响应' };
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let full = '';
+    let aborted = false;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          const s = line.trim();
+          if (!s.startsWith('data:')) continue;
+          const payload = s.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+          let obj;
+          try { obj = JSON.parse(payload); } catch (_) { continue; }
+          if (obj.delta) full += obj.delta;
+          if (onEvent) onEvent(obj);
+        }
+      }
+    } catch (e) {
+      if (isAbortError(e)) aborted = true;
+      else return { full, error: '读取流式响应失败：' + e.message };
+    }
+    return { full, aborted };
+  }
+
   let toastTimer = null;
   function toast(msg, type = '') {
     el.toast.textContent = msg;
@@ -120,8 +186,7 @@
   async function loadItems() { items = await api('/api/literature'); render(); }
   async function loadSettings() {
     settings = await api('/api/settings');
-    fillSettingsForm();
-    // 恢复用户调节过的表格列宽
+    fillSettingsForm();    // 恢复用户调节过的表格列宽
     if (settings.colWidths && typeof settings.colWidths === 'object' && !Array.isArray(settings.colWidths)) {
       colWidths = { ...settings.colWidths };
     }
@@ -303,7 +368,7 @@
   }
 
   function render() {
-    renderHead(); renderBody();
+    renderHead(); renderBody(); renderBulkBar();
     const scope = items.filter((i) => (i.docType || 'empirical') === lib.type);
     const done = scope.filter((i) => i.status === 'done').length;
     const libName = lib.collectionId
@@ -311,6 +376,25 @@
       : LIB_META[lib.type].label;
     el.statBadge.textContent = `${libName} · ${scope.length} 条 · 已完成 ${done}`;
   }
+
+  // ============ 批量选择 ============
+  // 选中集合跨分类/筛选保留（用户勾选后再切 tab，勾选不会莫名丢失）；
+  // 但渲染时只反映当前可见列表的选中情况。
+  function renderBulkBar() {
+    if (!el.bulkBar) return;
+    const list = filteredItems();
+    const visiblePicked = list.filter((i) => selectedIds.has(i.id)).length;
+    el.bulkBar.classList.toggle('hidden', selectedIds.size === 0);
+    if (el.bulkCount) el.bulkCount.textContent = String(selectedIds.size);
+    if (el.bulkHint) {
+      const extra = selectedIds.size - visiblePicked;
+      el.bulkHint.textContent = extra > 0 ? `（其中 ${extra} 篇在当前筛选外）` : '';
+    }
+  }
+  function setSelected(id, on) { if (on) selectedIds.add(id); else selectedIds.delete(id); render(); }
+  function selectAllVisible(on) { filteredItems().forEach((i) => { if (on) selectedIds.add(i.id); else selectedIds.delete(i.id); }); render(); }
+  function invertVisible() { filteredItems().forEach((i) => { if (selectedIds.has(i.id)) selectedIds.delete(i.id); else selectedIds.add(i.id); }); render(); }
+  function clearSelection() { selectedIds.clear(); render(); }
 
   function renderHead() {
     const cols = buildColumns();
@@ -325,14 +409,22 @@
     const widths = [44, 40, ...cols.map((c) => c.w)];
     colgroup.innerHTML = widths.map((w) => `<col style="width:${w}px" />`).join('');
     grid.style.width = widths.reduce((a, b) => a + b, 0) + 'px';
+    // 表头复选框反映当前「已选中 / 全选 / 半选」状态
+    const list = filteredItems();
+    const picked = list.filter((i) => selectedIds.has(i.id)).length;
+    const allChecked = list.length > 0 && picked === list.length;
+    const indeterminate = picked > 0 && !allChecked;
     el.theadRow.innerHTML =
-      `<th class="cell-check"><input type="checkbox" disabled /></th>` +
+      `<th class="cell-check"><input type="checkbox" id="chkAll" title="全选 / 取消全选当前列表"${allChecked ? ' checked' : ''} /></th>` +
       `<th class="cell-num">#</th>` +
       cols.map((c) => `
         <th data-col="${c.key}" title="${esc(c.label)}（拖动右缘调宽，双击手柄复位）"><div class="th-inner">
           <span class="th-ico">${typeIcon(c.type)}</span><span class="th-name">${esc(c.label)}</span>
           ${c.ai ? '<span class="col-ai">AI 生成</span>' : ''}
         </div><span class="col-resize" data-resize="${c.key}"></span></th>`).join('');
+    // innerHTML 重建后 indeterminate 会丢失，必须重新赋一次
+    const chkAll = el.theadRow.querySelector('#chkAll');
+    if (chkAll) chkAll.indeterminate = indeterminate;
   }
   function typeIcon(t) { return { title: 'ⓐ', attach: '📎', progress: '◔', rating: '☆', text: '⃝', md: '≡', status: '◉', actions: '⚙', rank: '🏅' }[t] || '⃝'; }
 
@@ -347,7 +439,8 @@
       tr.dataset.id = it.id;
       tr.draggable = true;
       if (it.status === 'parsing') tr.classList.add('uploading');
-      tr.innerHTML = `<td class="cell-check"><input type="checkbox" data-check /></td>` +
+      if (selectedIds.has(it.id)) tr.classList.add('row-selected');
+      tr.innerHTML = `<td class="cell-check"><input type="checkbox" data-check${selectedIds.has(it.id) ? ' checked' : ''} /></td>` +
         `<td class="cell-num">${idx + 1}</td>` +
         cols.map((c) => `<td>${renderCell(c, it)}</td>`).join('');
       tr.addEventListener('dragstart', (e) => {
@@ -429,7 +522,10 @@
   function mdLines(v) { return String(v).split('\n').map((l) => l.trim()).filter(Boolean); }
   function mdInline(v) {
     return mdLines(v).map((line) => {
-      const b = esc(line).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+      const b = esc(line)
+        .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+        .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
+        .replace(/(^|[^_\w])_([^_\n]+)_(?![_\w])/g, '$1<i>$2</i>');
       if (/^[-•*]\s*/.test(line)) return `<div class="md-line"><span class="dot">•</span><span>${b.replace(/^[-•*]\s*/, '')}</span></div>`;
       return `<div>${b}</div>`;
     }).join('');
@@ -558,6 +654,14 @@
   // ============ 表格事件 ============
   function bindGrid() {
     el.tbody.addEventListener('click', (e) => {
+      // 行复选框：点击复选框本身只切换选中，不触发行内其他操作
+      const chk = e.target.closest('[data-check]');
+      if (chk) {
+        e.stopPropagation();
+        const id = chk.closest('tr').dataset.id;
+        setSelected(id, chk.checked);
+        return;
+      }
       const rr = e.target.closest('[data-refreshrank]');
       if (rr) { e.stopPropagation(); refreshLitRank(rr.dataset.refreshrank); return; }
       const star = e.target.closest('[data-star]');
@@ -575,7 +679,31 @@
         else if (act.dataset.act === 'del') deleteItem(id);
         return;
       }
+      // 按住 Shift 点击行 = 区间选择；按住 Ctrl/Cmd 点击行 = 追加选择
+      const tr = e.target.closest('tr[data-id]');
+      if (tr && (e.shiftKey || e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        const rowId = tr.dataset.id;
+        if (e.shiftKey) {
+          const list = filteredItems().map((i) => i.id);
+          const anchor = lastCheckedId && list.indexOf(lastCheckedId) >= 0 ? lastCheckedId : rowId;
+          const a = list.indexOf(anchor), b = list.indexOf(rowId);
+          if (a >= 0 && b >= 0) for (let k = Math.min(a, b); k <= Math.max(a, b); k++) selectedIds.add(list[k]);
+        } else {
+          if (selectedIds.has(rowId)) selectedIds.delete(rowId); else selectedIds.add(rowId);
+        }
+        lastCheckedId = rowId;
+        render();
+        return;
+      }
       const open = e.target.closest('[data-open]'); if (open) openDrawer(open.dataset.open);
+    });
+    // 表头全选框
+    el.theadRow.addEventListener('click', (e) => {
+      const all = e.target.closest('#chkAll');
+      if (!all) return;
+      e.stopPropagation();
+      selectAllVisible(all.checked);
     });
     el.tbody.addEventListener('dragover', (e) => { const c = e.target.closest('.cell-attach'); if (c) { e.preventDefault(); c.classList.add('dragover'); } });
     el.tbody.addEventListener('dragleave', (e) => { const c = e.target.closest('.cell-attach'); if (c) c.classList.remove('dragover'); });
@@ -610,7 +738,134 @@
     if (!confirm('确认删除该文献记录及其 PDF？')) return;
     await api('/api/literature/' + id, { method: 'DELETE' });
     if (currentId === id) closeDrawer();
+    selectedIds.delete(id);
     await loadItems(); await loadCollections(); toast('已删除', 'success');
+  }
+
+  // ============ 批量操作 ============
+  function pickIdsOrWarn(minCount) {
+    const ids = [...selectedIds];
+    if (ids.length < (minCount || 1)) { toast('请先勾选要操作的文献', 'error'); return null; }
+    return ids;
+  }
+
+  // 批量删除：真实删除记录 + 各自的 PDF 文件，删完清空选中
+  async function batchDelete() {
+    const ids = pickIdsOrWarn();
+    if (!ids) return;
+    const withPdf = items.filter((i) => ids.includes(i.id) && i.filePath).length;
+    const ok = confirm(
+      `确认删除选中的 ${ids.length} 篇文献？\n\n` +
+      `· 记录将从文库中永久移除\n` +
+      `· 其中 ${withPdf} 篇的 PDF 附件文件也会一并删除\n\n` +
+      `此操作不可撤销，删除后如需恢复必须重新导入 PDF。`
+    );
+    if (!ok) return;
+    try {
+      const r = await api('/api/literature/batch-delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }),
+      });
+      if (currentId && r.deleted?.includes(currentId)) closeDrawer();
+      r.deleted?.forEach((id) => selectedIds.delete(id));
+      await loadItems(); await loadCollections();
+      let msg = `已删除 ${r.deleted?.length || 0} 篇文献`;
+      if (r.filesRemoved) msg += `，清理 PDF 文件 ${r.filesRemoved} 个`;
+      if (r.notFound?.length) msg += `（${r.notFound.length} 篇已不存在）`;
+      toast(msg, 'success');
+    } catch (e) { toast('批量删除失败：' + e.message, 'error'); }
+  }
+
+  // 解析选中：只解析勾选的文献，且跳过已完成/解析中的（增量补齐）
+  async function batchParse() {
+    const ids = pickIdsOrWarn();
+    if (!ids) return;
+    const all = items.filter((i) => ids.includes(i.id));
+    const todo = all.filter((i) => i.status !== 'done' && i.status !== 'parsing');
+    const skipped = all.length - todo.length;
+    if (!todo.length) {
+      toast(`选中的 ${all.length} 篇都已解析完成。若需重跑请用「批量重新解析」`, 'error');
+      return;
+    }
+    const ok = confirm(
+      `将对选中的 ${todo.length} 篇文献执行 AI 解析。\n` +
+      (skipped ? `（已跳过 ${skipped} 篇已完成/解析中的文献）\n` : '') +
+      `\n解析会调用大模型接口，可能产生费用与等待时间。确认继续？`
+    );
+    if (!ok) return;
+    toast(`开始解析 ${todo.length} 篇…`);
+    await parseIds(todo.map((i) => i.id));
+  }
+
+  // 批量重新解析：忽略解析状态，强制重跑（含已完成的）
+  async function batchReparse() {
+    const ids = pickIdsOrWarn();
+    if (!ids) return;
+    const all = items.filter((i) => ids.includes(i.id));
+    const parsing = all.filter((i) => i.status === 'parsing').length;
+    const ok = confirm(
+      `将对选中的 ${all.length} 篇文献强制重新解析。\n\n` +
+      `· 已有的解析结果会被新一轮结果覆盖\n` +
+      `· 你手动编辑过的字段也会被 AI 覆盖\n` +
+      (parsing ? `· 其中 ${parsing} 篇正在解析中，将自动跳过\n` : '') +
+      `\n确认继续？`
+    );
+    if (!ok) return;
+    try {
+      toast(`开始重新解析 ${all.length} 篇…`);
+      const r = await api('/api/literature/batch-reparse', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, docType: lib.type }),
+      });
+      await loadItems();
+      const total = r.total ?? 0;
+      const failed = r.failed ?? 0;
+      const skippedTip = r.skipped?.length ? `，跳过 ${r.skipped.length} 篇（解析中）` : '';
+      if (total === 0) toast(r.message || '没有可重新解析的文献', 'error');
+      else if (failed) toast(`重新解析完成：成功 ${total - failed} 篇，失败 ${failed} 篇${skippedTip}`, 'error');
+      else toast(`批量重新解析完成，共 ${total} 篇${skippedTip}`, 'success');
+    } catch (e) { toast('批量重新解析失败：' + e.message, 'error'); await loadItems(); }
+  }
+
+  // 批量标记阅读进度
+  async function batchProgress() {
+    const ids = pickIdsOrWarn();
+    if (!ids) return;
+    const pick = prompt(`将选中的 ${ids.length} 篇标记为阅读进度：\n\n1 = 未阅读\n2 = 阅读中\n3 = 已阅读\n\n请输入 1 / 2 / 3`, '1');
+    if (pick === null) return;
+    const map = { 1: '未阅读', 2: '阅读中', 3: '已阅读' };
+    const progress = map[String(pick).trim()];
+    if (!progress) { toast('请输入 1、2 或 3', 'error'); return; }
+    try {
+      await api('/api/literature/batch-progress', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, readingProgress: progress }),
+      });
+      await loadItems();
+      toast(`已将 ${ids.length} 篇标记为「${progress}」`, 'success');
+    } catch (e) { toast('标记失败：' + e.message, 'error'); }
+  }
+
+  // 批量更新期刊等级：复用单条刷新接口，串行并显示进度
+  async function batchRank() {
+    const ids = pickIdsOrWarn();
+    if (!ids) return;
+    const targets = items.filter((i) => ids.includes(i.id) && String(i.journal || '').trim());
+    const noJournal = ids.length - targets.length;
+    if (!targets.length) { toast('选中的文献都没有期刊名，请先解析或手动填写「期刊/会议」', 'error'); return; }
+    const ok = confirm(
+      `将为选中的 ${targets.length} 篇文献重新查询期刊等级。\n` +
+      (noJournal ? `（${noJournal} 篇没有期刊名，将跳过）\n` : '') +
+      `\n查询需要逐条调用 easyScholar 接口，请稍候。确认继续？`
+    );
+    if (!ok) return;
+    let done = 0, fail = 0;
+    for (const it of targets) {
+      try { const r = await refreshLitRank(it.id, { silent: true }); if (r) done++; else fail++; }
+      catch (_) { fail++; }
+      toast(`更新期刊等级… ${done + fail}/${targets.length}`);
+    }
+    await loadItems();
+    if (fail) toast(`期刊等级更新完成：成功 ${done} 篇，失败 ${fail} 篇`, 'error');
+    else toast(`期刊等级更新完成，共 ${done} 篇`, 'success');
   }
 
   // ============ 期刊等级：手动单独更新（文献中心） ============
@@ -733,7 +988,6 @@
 
   // ============ 世图科研下载助手 ============
   let wlItems = [];            // 解析结果 [{ title, url, checked, done, imported }]
-  const wlImportedKeys = new Set(); // 本会话已导入标记（doi 或 title 小写）
 
   // 解析「标题：xxx 链接地址：xxx」文本（标题与链接可跨行或同行，支持多条）
   function parseWorldlibText(text) {
@@ -757,12 +1011,16 @@
       return;
     }
     box.innerHTML = wlItems.map((it, i) => {
-      const imported = it.imported || wlImportedKeys.has(it.title.toLowerCase());
+      // 用「文献中心当前是否真的存在这篇」判断，而不是会话标记：
+      // 这样用户误删后，条目会自动回到「可下载并导入」状态，能重新导入。
+      const imported = wlInLibrary(it);
       let state = '';
       if (it.state === 'downloading') state = '<span class="wl-done">⏳ 下载中…</span>';
       else if (it.state === 'error') state = `<span class="wl-err" title="${esc(it.error || '')}">✗ 失败</span>`;
-      else if (imported) state = '<span class="wl-imported">📥 已导入（含PDF）</span>';
-      else state = `<button class="tb-btn" data-wldl="${i}">⬇ 下载并导入</button>`;
+      else if (imported) {
+        state = '<span class="wl-imported">📥 已在文献中心</span>'
+          + `<button class="tb-btn" data-wlredl="${i}" title="重新下载 PDF 并覆盖导入（文献中心里已删除时可恢复）">↻ 重新导入</button>`;
+      } else state = `<button class="tb-btn" data-wldl="${i}">⬇ 下载并导入</button>`;
       return `<div class="wl-item${it.state === 'error' ? ' wl-item-error' : ''}">
         <input type="checkbox" data-wlchk="${i}" ${it.checked ? 'checked' : ''} />
         <span class="wl-item-title" title="${esc(it.title)}">${esc(it.title)}</span>
@@ -777,6 +1035,37 @@
       const it = wlItems[parseInt(b.dataset.wldl, 10)];
       wlDownloadOne(it, true);
     }));
+    // 重新导入：先把该条在文献中心的旧记录清掉（若还在），再重新下载写入
+    box.querySelectorAll('[data-wlredl]').forEach((b) => b.addEventListener('click', () => {
+      const it = wlItems[parseInt(b.dataset.wlredl, 10)];
+      wlRedownloadOne(it);
+    }));
+  }
+
+  // 判断某条世图条目当前是否已存在于文献中心（按标题 / DOI 匹配真实数据，非会话标记）
+  function wlInLibrary(it) {
+    const key = String(it?.title || '').trim().toLowerCase();
+    if (!key) return false;
+    return items.some((r) => {
+      const t = String(r.title || '').trim().toLowerCase();
+      const d = String(r.doi || '').trim().toLowerCase();
+      return t === key || (d && d === key);
+    });
+  }
+
+  // 重新导入：清理文献中心里同标题/同 DOI 的旧记录后重新下载
+  async function wlRedownloadOne(it) {
+    if (!it?.url || it.state === 'downloading') return;
+    if (!confirm(`「${it.title.slice(0, 40)}」已在文献中心。\n\n重新导入会先删除文献中心里的同名旧记录（含其 PDF），再重新下载一份。\n\n确认继续？`)) return;
+    // 删除文献中心里的同名旧记录
+    const key = String(it.title || '').trim().toLowerCase();
+    const stale = items.filter((r) => String(r.title || '').trim().toLowerCase() === key
+      || (String(r.doi || '').trim().toLowerCase() && String(r.doi || '').trim().toLowerCase() === key));
+    for (const r of stale) {
+      try { await api('/api/literature/' + r.id, { method: 'DELETE' }); } catch (_) { /* ignore */ }
+    }
+    if (stale.length) await loadItems();
+    await wlDownloadOne(it, true);
   }
 
   // 下载单条：由后端直接抓取 PDF（自动解析中转页拿到真实直链），下载完成后
@@ -788,10 +1077,9 @@
     try {
       const res = await api('/api/worldlib/download', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: it.title, url: it.url }),
+        body: JSON.stringify({ title: it.title, url: it.url, overwrite: true }),
       });
       it.state = 'done'; it.imported = true;
-      wlImportedKeys.add(String(res.record?.doi || it.title).toLowerCase());
       if (refresh) await loadItems();
       toast(`「${it.title.slice(0, 24)}…」已下载 PDF 并导入文献中心`, 'success');
     } catch (e) {
@@ -803,10 +1091,11 @@
 
   // 批量：逐条下载并导入（len 传 null 表示处理全部未完成条目）
   async function wlDownloadImport(onlyChecked) {
-    const all = wlItems.filter((x) => !x.imported && x.state !== 'done');
+    // 以「文献中心真实是否存在」为准：误删过的条目会被视为待导入，可以补回来
+    const all = wlItems.filter((x) => !wlInLibrary(x) && x.state !== 'downloading');
     const list = onlyChecked ? all.filter((x) => x.checked) : all;
     if (!list.length) {
-      toast(onlyChecked ? '没有已勾选的待下载条目' : '所有条目都已下载导入', 'error');
+      toast(onlyChecked ? '没有已勾选且需要导入的条目' : '所有条目都已在文献中心', 'error');
       return;
     }
     let ok = 0, fail = 0;
@@ -948,10 +1237,6 @@
 
   // ============ 设置 ============
   function fillSettingsForm() {
-    $('setProvider').value = settings.aiProvider || 'siliconflow';
-    $('setBaseURL').value = settings.baseURL || '';
-    $('setApiKey').value = settings.apiKey || '';
-    $('setModel').value = settings.model || '';
     $('setLanguage').value = settings.language || 'zh';
     $('setEasyKey').value = settings.easyScholarKey || '';
     $('setTranslateProvider').value = settings.translateProvider || 'siliconflow';
@@ -959,13 +1244,21 @@
     $('setDataDir').value = settings.dataDir || '';
     $('setAppFont').value = settings.appFont || '';
     $('setFontSize').value = settings.fontSize || 'medium';
+    $('setAiEnabled').checked = settings.aiProvider !== 'none';
+    // 供应商下拉 + 已配置模型列表
+    renderProviderOptions();
+    renderProfileList();
+    renderVisionOptions();
+    closeMlEditor();
   }
   async function saveSettingsFromForm() {
+    // 编辑中的那条若还没保存，先提示（避免用户以为已经存了）
+    if (editingProfileId !== null && !$('mlEditor').classList.contains('hidden')) {
+      const ok = confirm('还有一条模型配置正在编辑中且未保存，是否放弃并保存其他设置？');
+      if (!ok) return;
+    }
     const next = {
-      aiProvider: $('setProvider').value,
-      baseURL: $('setBaseURL').value.trim(),
-      apiKey: $('setApiKey').value.trim(),
-      model: $('setModel').value.trim(),
+      aiProvider: $('setAiEnabled').checked ? (settings.aiProvider === 'none' ? 'siliconflow' : settings.aiProvider) : 'none',
       language: $('setLanguage').value,
       easyScholarKey: $('setEasyKey').value.trim(),
       translateProvider: $('setTranslateProvider').value,
@@ -973,13 +1266,391 @@
       dataDir: $('setDataDir').value.trim(),
       appFont: $('setAppFont').value,
       fontSize: $('setFontSize').value,
+      modelProfiles: profiles,
+      activeProfileId,
+      visionProfileId: $('setVisionProfile') ? $('setVisionProfile').value : (settings.visionProfileId || ''),
     };
     try {
       settings = await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) });
       el.settingsModal.classList.add('hidden');
+      await loadModels();
+      renderModelSwitcher();
       toast('设置已保存' + (settings.dataDir ? '，数据目录已切换' : ''), 'success');
       await loadItems(); await loadCollections();
     } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ============ 多模型配置 ============
+  async function loadModels() {
+    try {
+      const d = await api('/api/models');
+      providers = d.providers || [];
+      profiles = d.profiles || [];
+      activeProfileId = d.activeProfileId || '';
+      activeModelInfo = d.active || null;
+      activeVisionInfo = d.activeVision || null;
+      // 后端返回的才是权威值，回填到 settings，避免设置页渲染时用的是旧配置
+      if (settings) settings.visionProfileId = d.visionProfileId || '';
+    } catch (_) { /* 首次启动后端未就绪时忽略 */ }
+  }
+
+  function providerById(id) { return providers.find((p) => p.id === id) || null; }
+  function modelMeta(providerId, modelId) {
+    const p = providerById(providerId);
+    const m = p?.models.find((x) => x.id === modelId);
+    return m || null;
+  }
+  function profileTitle(p) {
+    return p.label || modelMeta(p.provider, p.model)?.name || p.model || p.provider || '未命名模型';
+  }
+
+  // 顶栏切换器：显示当前激活的模型
+  function renderModelSwitcher() {
+    const txt = $('modelBtnText');
+    const dot = $('modelDot');
+    if (!txt || !dot) return;
+    if (activeModelInfo) {
+      txt.textContent = `${activeModelInfo.providerName} · ${activeModelInfo.model}`;
+      dot.className = 'model-dot on';
+    } else if (!profiles.length) {
+      txt.textContent = '未配置模型';
+      dot.className = 'model-dot warn';
+    } else if (settings.aiProvider === 'none') {
+      txt.textContent = 'AI 已关闭';
+      dot.className = 'model-dot warn';
+    } else {
+      txt.textContent = '缺少 API 密钥';
+      dot.className = 'model-dot warn';
+    }
+  }
+
+  // 顶栏下拉面板：按供应商分组列出所有已配置模型
+  function renderModelPanel() {
+    const body = $('modelPanelBody');
+    if (!body) return;
+    $('modelPanelCount').textContent = profiles.length ? `共 ${profiles.length} 个` : '';
+    if (!profiles.length) {
+      body.innerHTML = `<div class="mp-empty">还没有配置任何模型。<br />点下面的「管理模型配置」添加，<br />可以同时配多个供应商的模型。</div>`;
+      return;
+    }
+    const groups = new Map();
+    for (const p of profiles) {
+      const key = p.provider;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(p);
+    }
+    let html = '';
+    for (const [pid, list] of groups) {
+      const pname = providerById(pid)?.name || '自定义';
+      html += `<div class="mp-group-title">${esc(pname)}</div>`;
+      for (const p of list) {
+        const meta = modelMeta(p.provider, p.model);
+        const isActive = p.id === activeProfileId && settings.aiProvider !== 'none';
+        const vision = profileVision(p);
+        html += `<button class="mp-item${isActive ? ' active' : ''}" data-mpid="${esc(p.id)}">
+          <span class="mp-info">
+            <span class="mp-name">${esc(profileTitle(p))}</span>
+            <span class="mp-sub">${esc(p.model || '未填写模型名')}</span>
+          </span>
+          ${visionBadge(p)}
+          ${isActive ? '<span class="mp-tag on">使用中</span>' : ''}
+        </button>`;
+      }
+    }
+    body.innerHTML = html;
+    body.querySelectorAll('[data-mpid]').forEach((b) => b.addEventListener('click', () => switchActiveModel(b.dataset.mpid)));
+  }
+
+  async function switchActiveModel(id) {
+    if (id === activeProfileId && settings.aiProvider !== 'none') { hideModelPanel(); return; }
+    try {
+      const d = await api('/api/models/active', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+      activeProfileId = d.activeProfileId;
+      activeModelInfo = d.active;
+      settings.aiProvider = settings.aiProvider === 'none' ? 'siliconflow' : settings.aiProvider;
+      renderModelSwitcher();
+      renderModelPanel();
+      const label = activeModelInfo ? `${activeModelInfo.providerName} · ${activeModelInfo.model}` : '未配置';
+      toast('已切换到 ' + label, 'success');
+    } catch (e) { toast(e.message, 'error'); }
+    hideModelPanel();
+  }
+
+  function showModelPanel() {
+    renderModelPanel();
+    $('modelPanel').classList.remove('hidden');
+  }
+  function hideModelPanel() { $('modelPanel')?.classList.add('hidden'); }
+
+  // ---- 设置弹窗内的模型列表 ----
+  function renderProviderOptions() {
+    const sel = $('mlProvider');
+    if (!sel) return;
+    if (!sel.options.length) {
+      sel.innerHTML = providers.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+    }
+  }
+
+  // 模型图片能力：允许用户覆盖内置目录判断。
+  // auto = 目录判断；yes = 强制支持；no = 强制不支持。
+  function normalizeVisionOverride(value) {
+    if (value === true) return 'yes';
+    if (value === false) return 'no';
+    const v = String(value ?? '').trim().toLowerCase();
+    if (['yes', 'true', '1', 'vision', 'supported'].includes(v)) return 'yes';
+    if (['no', 'false', '0', 'text', 'unsupported'].includes(v)) return 'no';
+    return 'auto';
+  }
+  function visionCapable() {
+    return profiles.filter((p) => String(p.apiKey || '').trim() && profileVision(p));
+  }
+  function profileVisionState(p) {
+    const mode = normalizeVisionOverride(p?.visionOverride);
+    if (mode === 'yes') return true;
+    if (mode === 'no') return false;
+    const m = modelMeta(p?.provider, p?.model);
+    return m ? !!m.vision : null;
+  }
+  function profileVision(p) { return profileVisionState(p) === true; }
+  function visionBadge(p) {
+    const mode = normalizeVisionOverride(p?.visionOverride);
+    const state = profileVisionState(p);
+    if (state === true) return `<span class="mp-tag vision">👁 看图${mode === 'yes' ? ' · 手动' : ''}</span>`;
+    if (state === false) return '<span class="mp-tag text">文字模型</span>';
+    return '<span class="mp-tag auto">待判断</span>';
+  }
+  function profileName(p) {
+    return p.label || (providerById(p.provider)?.name || p.provider) + ' · ' + (p.model || '');
+  }
+  function renderVisionOptions() {
+    const sel = $('setVisionProfile');
+    if (!sel) return;
+    const able = visionCapable();
+    const cur = settings.visionProfileId || '';
+    sel.innerHTML = [
+      `<option value="">自动选择（${able.length ? able.length + ' 个可用' : '暂无可用'}）</option>`,
+      ...able.map((p) => `<option value="${esc(p.id)}">${esc(profileName(p))}</option>`),
+    ].join('');
+    // 指定的那条被删掉 / 改坏了，就退回「自动」，避免下拉框显示空白
+    sel.value = able.some((p) => p.id === cur) ? cur : '';
+    if (sel.value !== cur) settings.visionProfileId = sel.value;
+
+    const hint = $('setVisionHint');
+    if (!hint) return;
+    const active = profiles.find((p) => p.id === activeProfileId);
+    const activeVision = active ? profileVision(active) : false;
+    if (!able.length) {
+      hint.className = 'ml-vision-hint warn';
+      hint.textContent = '还没有可用的视觉模型：先在上方添加一个支持视觉的模型（如 Kimi-K2.7-Code、Qwen3.8-27B、GLM-4.5V）并填写密钥。';
+    } else if (activeVision) {
+      hint.className = 'ml-vision-hint ok';
+      hint.textContent = `当前模型「${profileName(active)}」本身就能看图，发图时会直接识别，无需转述。此项留作备用。`;
+    } else {
+      // 以「后端实际会用哪个」为准，而不是前端自己猜，避免两边判断不一致
+      const real = activeVisionInfo || able[0];
+      const isDesignated = !!settings.visionProfileId && settings.visionProfileId === real?.id;
+      hint.className = 'ml-vision-hint ok';
+      hint.textContent = `发图提问时将先由「${real.label || real.model}」转述图片内容，再交给当前模型回答`
+        + `（${isDesignated ? '按你的指定' : '自动选择'}）。`;
+    }
+  }
+
+  function renderProfileList() {
+    const box = $('mlList');
+    if (!box) return;
+    $('mlCount').textContent = String(profiles.length);
+    if (!profiles.length) {
+      box.innerHTML = '<div class="ml-empty">还没有模型。点「＋ 添加模型」手动配置，或点「⚡ 一键添加常用模型」快速开始。</div>';
+      return;
+    }
+    box.innerHTML = profiles.map((p) => {
+      const on = p.id === activeProfileId;
+      const meta = modelMeta(p.provider, p.model);
+      const keyState = String(p.apiKey || '').trim() ? '' : ' · <span style="color:#c0392b">未填密钥</span>';
+      return `<div class="ml-item${on ? ' active' : ''}">
+        <div class="ml-item-main">
+          <div class="ml-item-name">
+            ${esc(profileTitle(p))}
+            ${on ? '<span class="ml-badge">使用中</span>' : '<span class="ml-badge none">待用</span>'}
+            ${visionBadge(p)}
+          </div>
+          <div class="ml-item-sub">${esc(providerById(p.provider)?.name || '自定义')} · ${esc(p.model || '未填模型名')}${keyState}</div>
+        </div>
+        <div class="ml-item-acts">
+          ${on ? '' : `<button type="button" class="tb-btn" data-mluse="${esc(p.id)}">设为使用</button>`}
+          <button type="button" class="tb-btn" data-mledit="${esc(p.id)}">编辑</button>
+          <button type="button" class="tb-btn" data-mldel="${esc(p.id)}">删除</button>
+        </div>
+      </div>`;
+    }).join('');
+    box.querySelectorAll('[data-mluse]').forEach((b) => b.addEventListener('click', () => switchActiveModel(b.dataset.mluse)));
+    box.querySelectorAll('[data-mledit]').forEach((b) => b.addEventListener('click', () => openMlEditor(b.dataset.mledit)));
+    box.querySelectorAll('[data-mldel]').forEach((b) => b.addEventListener('click', () => deleteProfile(b.dataset.mldel)));
+  }
+
+  function openMlEditor(id) {
+    editingProfileId = id || null;
+    const p = id ? profiles.find((x) => x.id === id) : null;
+    $('mlEditorTitle').textContent = p ? '编辑模型配置' : '添加模型';
+    renderProviderOptions();
+    $('mlProvider').value = p?.provider || providers[0]?.id || 'siliconflow';
+    // 编辑时不回填密钥原文：留空表示「保持不变」，避免明文密钥反复出现在屏幕上
+    $('mlApiKey').value = '';
+    $('mlApiKey').placeholder = p && p.apiKey ? '已保存密钥（留空则保持不变）' : 'sk-...';
+    $('mlLabel').value = p?.label || '';
+    $('mlBaseURL').value = p?.baseURL || providerById($('mlProvider').value)?.baseURL || '';
+    $('mlModel').value = p?.model || '';
+    $('mlVisionOverride').value = normalizeVisionOverride(p?.visionOverride);
+    $('mlTestResult').classList.add('hidden');
+    renderModelChips();
+    $('mlEditor').classList.remove('hidden');
+    $('mlProvider').focus();
+  }
+
+  function closeMlEditor() {
+    editingProfileId = null;
+    $('mlEditor')?.classList.add('hidden');
+    $('mlTestResult')?.classList.add('hidden');
+  }
+
+  // 供应商的推荐模型做成可点的小胶囊，点一下直接填入
+  function renderModelChips() {
+    const box = $('mlModelChips');
+    const list = $('mlModelList');
+    const p = providerById($('mlProvider').value);
+    const models = p?.models || [];
+    if (list) list.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('');
+    if (!box) return;
+    if (!models.length) { box.innerHTML = ''; return; }
+    box.innerHTML = models.map((m) => `<button type="button" class="ml-chip${m.vision ? ' vision' : ''}" data-mlmodel="${esc(m.id)}" title="${esc(m.note || m.name)}">${esc(m.name)}</button>`).join('');
+    box.querySelectorAll('[data-mlmodel]').forEach((b) => b.addEventListener('click', () => {
+      $('mlModel').value = b.dataset.mlmodel;
+    }));
+  }
+
+  function currentMlForm() {
+    const provider = $('mlProvider').value;
+    return {
+      provider,
+      label: $('mlLabel').value.trim(),
+      baseURL: $('mlBaseURL').value.trim(),
+      apiKey: $('mlApiKey').value.trim(),
+      model: $('mlModel').value.trim(),
+      visionOverride: normalizeVisionOverride($('mlVisionOverride').value),
+    };
+  }
+
+  async function saveMlProfile() {
+    const f = currentMlForm();
+    if (!f.baseURL) { toast('请填写接口地址 Base URL', 'error'); return; }
+    if (!f.model) { toast('请填写模型名称', 'error'); return; }
+    const editing = editingProfileId ? profiles.find((p) => p.id === editingProfileId) : null;
+    if (!editing && !f.apiKey) { toast('请填写 API 密钥', 'error'); return; }
+
+    if (editing) {
+      editing.provider = f.provider;
+      editing.label = f.label || editing.label;
+      editing.baseURL = f.baseURL;
+      editing.model = f.model;
+      editing.visionOverride = f.visionOverride;
+      if (f.apiKey) editing.apiKey = f.apiKey; // 留空 = 保持原密钥
+    } else {
+      const p = { id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), ...f, createdAt: new Date().toISOString() };
+      profiles.push(p);
+      // 第一条配置自动设为使用中
+      if (!activeProfileId || !profiles.some((x) => x.id === activeProfileId)) activeProfileId = p.id;
+    }
+    await persistProfiles('模型配置已保存');
+    closeMlEditor();
+    renderProfileList();
+  }
+
+  async function deleteProfile(id) {
+    const p = profiles.find((x) => x.id === id);
+    if (!p) return;
+    if (!confirm(`确定删除「${profileTitle(p)}」这条模型配置吗？`)) return;
+    profiles = profiles.filter((x) => x.id !== id);
+    if (activeProfileId === id) activeProfileId = profiles[0]?.id || '';
+    await persistProfiles('已删除');
+    renderProfileList();
+    if (editingProfileId === id) closeMlEditor();
+  }
+
+  async function persistProfiles(msg) {
+    try {
+      settings = await api('/api/settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          modelProfiles: profiles,
+          activeProfileId,
+          aiProvider: $('setAiEnabled').checked ? 'siliconflow' : 'none',
+          // 模型增删后原本指定的视觉模型可能已不存在，这里带上最新选择让后端保持一致
+          visionProfileId: $('setVisionProfile') ? $('setVisionProfile').value : (settings.visionProfileId || ''),
+        }),
+      });
+      profiles = settings.modelProfiles || profiles;
+      activeProfileId = settings.activeProfileId || activeProfileId;
+      await loadModels();
+      renderModelSwitcher();
+      renderVisionOptions();
+      if (msg) toast(msg, 'success');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // 一键添加常用模型：DeepSeek 日常解析 + 当前视觉模型，需要用户补 Key
+  async function addCommonPresets() {
+    const want = [
+      { provider: 'siliconflow', model: 'deepseek-ai/DeepSeek-V4-Flash', label: 'DeepSeek 日常解析' },
+      { provider: 'siliconflow', model: 'zai-org/GLM-4.5V', label: 'GLM-4.5V 看图', visionOverride: 'yes' },
+      { provider: 'siliconflow', model: 'Qwen/Qwen3.8-27B', label: 'Qwen3.8-27B 看图', visionOverride: 'yes' },
+      { provider: 'siliconflow', model: 'moonshotai/Kimi-K2.7-Code', label: 'Kimi-K2.7-Code 看图', visionOverride: 'yes' },
+      { provider: 'siliconflow', model: 'Pro/moonshotai/Kimi-K2.6', label: 'Kimi-K2.6 Pro 看图', visionOverride: 'yes' },
+      { provider: 'siliconflow', model: 'Qwen/Qwen3.6-35B-A3B', label: 'Qwen3.6-35B-A3B 看图', visionOverride: 'yes' },
+      { provider: 'deepseek', model: 'deepseek-chat', label: 'DeepSeek 官方' },
+    ];
+    let added = 0;
+    for (const w of want) {
+      if (profiles.some((p) => p.provider === w.provider && p.model === w.model)) continue;
+      profiles.push({
+        id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+        label: w.label, provider: w.provider,
+        baseURL: providerById(w.provider)?.baseURL || '', apiKey: '', model: w.model,
+        visionOverride: w.visionOverride || 'auto',
+        createdAt: new Date().toISOString(),
+      });
+      added++;
+    }
+    if (!added) { toast('常用模型都已经添加过了', 'error'); return; }
+    if (!activeProfileId) activeProfileId = profiles[0].id;
+    await persistProfiles(`已添加 ${added} 个常用模型，请逐个补填 API 密钥`);
+    renderProfileList();
+  }
+
+  async function testMlProfile() {
+    const box = $('mlTestResult');
+    const f = currentMlForm();
+    const editing = editingProfileId ? profiles.find((p) => p.id === editingProfileId) : null;
+    const apiKey = f.apiKey || editing?.apiKey || '';
+    if (!apiKey) { toast('请先填写 API 密钥（或先保存该配置）', 'error'); return; }
+    box.className = 'ml-test-result';
+    box.textContent = '正在测试连接…';
+    const btn = $('btnMlTest');
+    btn.disabled = true;
+    try {
+      const r = await api('/api/models/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: f.provider, baseURL: f.baseURL, apiKey, model: f.model }),
+      });
+      box.className = 'ml-test-result ' + (r.ok ? 'ok' : 'err');
+      box.textContent = r.ok
+        ? `✅ 连接成功（${r.cost} ms）模型回复：${r.reply}`
+        : `❌ 连接失败（${r.cost} ms）：${r.error}`;
+    } catch (e) {
+      box.className = 'ml-test-result err';
+      box.textContent = '❌ ' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   // ============ 事件绑定 ============
@@ -1022,6 +1693,32 @@
       const pending = filteredItems().filter((i) => i.status !== 'done');
       if (!pending.length) { toast('没有待解析的文献', 'error'); return; }
       toast(`开始解析 ${pending.length} 篇…`); parseIds(pending.map((i) => i.id));
+    });
+
+    // 批量操作栏
+    $('btnBulkParse').addEventListener('click', batchParse);
+    $('btnBulkReparse').addEventListener('click', batchReparse);
+    $('btnBulkProgress').addEventListener('click', batchProgress);
+    $('btnBulkRank').addEventListener('click', batchRank);
+    $('btnBulkDelete').addEventListener('click', batchDelete);
+    $('btnBulkInvert').addEventListener('click', invertVisible);
+    $('btnBulkClear').addEventListener('click', clearSelection);
+    // Ctrl/Cmd+A 全选当前列表（焦点在输入框时不拦截）
+    document.addEventListener('keydown', (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'a') return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if ($('viewLibrary').classList.contains('hidden')) return;
+      e.preventDefault();
+      selectAllVisible(true);
+    });
+    // Esc 取消选择
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !selectedIds.size) return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if ($('viewLibrary').classList.contains('hidden')) return;
+      clearSelection();
     });
     $('btnExport').addEventListener('click', () => window.open('/api/export?format=csv', '_blank'));
 
@@ -1121,7 +1818,6 @@
       let added = 0;
       for (const it of parsed) {
         if (exist.has(it.url)) continue;
-        if (wlImportedKeys.has(it.title.toLowerCase())) it.imported = true;
         wlItems.push(it); added++;
       }
       renderWlList();
@@ -1139,12 +1835,30 @@
     $('btnThemeApply').addEventListener('click', applyThemeFromInput);
     $('themeColorInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') applyThemeFromInput(); });
     $('btnThemeReset').addEventListener('click', () => applyTheme(DEFAULT_THEME, true));
-    $('setProvider').addEventListener('change', () => {
-      if ($('setProvider').value === 'siliconflow') {
-        if (!$('setBaseURL').value.trim() || /api\.openai\.com/.test($('setBaseURL').value)) $('setBaseURL').value = 'https://api.siliconflow.cn/v1';
-        if (!$('setModel').value.trim()) $('setModel').value = 'deepseek-ai/DeepSeek-V4-Flash';
-      }
+    // ---- 多模型配置 ----
+    $('btnMlAdd').addEventListener('click', () => openMlEditor(null));
+    $('btnMlAddPreset').addEventListener('click', addCommonPresets);
+    $('btnMlSave').addEventListener('click', saveMlProfile);
+    $('btnMlCancel').addEventListener('click', closeMlEditor);
+    $('btnMlTest').addEventListener('click', testMlProfile);
+    // 切供应商时自动带出官方 Base URL（用户手动改过则不动）
+    $('mlProvider').addEventListener('change', () => {
+      const p = providerById($('mlProvider').value);
+      const cur = $('mlBaseURL').value.trim();
+      const known = providers.map((x) => x.baseURL).filter(Boolean);
+      if (p?.baseURL && (!cur || known.includes(cur))) $('mlBaseURL').value = p.baseURL;
+      renderModelChips();
     });
+    $('mlModel').addEventListener('input', () => {});
+
+    // ---- 顶栏模型切换器 ----
+    $('btnModelSwitch').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if ($('modelPanel').classList.contains('hidden')) showModelPanel(); else hideModelPanel();
+    });
+    $('btnModelManage').addEventListener('click', () => { hideModelPanel(); openSettingsModal(); });
+    $('modelPanel').addEventListener('click', (e) => e.stopPropagation());
+    document.addEventListener('click', () => hideModelPanel());
 
     // 分类弹窗
     $('btnColClose').addEventListener('click', () => el.colModal.classList.add('hidden'));
@@ -1178,19 +1892,359 @@
     pageSizes: [],   // [{w,h}] 每页 scale=1 尺寸
     rendered: new Set(), // 已渲染页码
     observer: null,
+    tab: 'translate',    // 当前右侧面板页签
+    chat: [],            // 本篇论文的 AI 对话消息 [{role,content,images:[dataURL]}]
+    chatBusy: false,
+    chatAbort: null,     // 流式生成中用于「停止」的 AbortController
   };
+  const prChatImages = []; // 待发送图片 [{name, dataUrl}]（按论文重置）
+
+  // ---------- 右侧页签切换 ----------
+  function switchPrTab(name) {
+    pr.tab = name || 'translate';
+    document.querySelectorAll('.pr-tab').forEach((b) => b.classList.toggle('active', b.dataset.prtab === pr.tab));
+    document.querySelectorAll('.pr-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.prpane !== pr.tab));
+    if (pr.tab === 'analysis') renderPrAnalysis();
+    if (pr.tab === 'chat') { renderPrChat(); setTimeout(() => $('prChatInput')?.focus(), 60); }
+  }
+
+  // ---------- 解析结果面板（与左侧正在阅读的文献同步） ----------
+  // 复用文献中心的字段体系与渲染函数，保证「阅读时看到的解析」与列表完全一致。
+  function renderPrAnalysis() {
+    const box = $('prAnalysisBody');
+    if (!box) return;
+    const it = items.find((x) => x.id === pr.recordId);
+    if (!it) {
+      $('prAnTitle').textContent = '—';
+      box.innerHTML = '<div class="pr-an-empty">未找到对应的文献记录。</div>';
+      return;
+    }
+    $('prAnTitle').textContent = it.title || '（未命名）';
+    $('prAnTitle').title = it.title || '';
+
+    const sections = [];
+    // 「基本信息」单独成块展示（这些是元数据，不适合当作解析结果条目）
+    const META_KEYS = new Set(['importedAt', 'title', 'authors', 'journal', 'year', 'doi']);
+    const basics = [
+      ['作者', it.authors], ['期刊/会议', it.journal], ['年份', it.year],
+      ['DOI', it.doi], ['关键词', it.keywords],
+    ].filter(([, v]) => String(v || '').trim());
+    if (basics.length) {
+      sections.push({
+        label: '基本信息', icon: '📌',
+        html: basics.map(([k, v]) => `<div style="margin-bottom:3px"><b style="color:var(--text-3);font-weight:600">${esc(k)}：</b>${esc(v)}</div>`).join(''),
+      });
+    }
+
+    // 其余内容字段按当前文库类型的顺序展示（我的思考已在 TYPE_ORDER 内，不重复追加）
+    const order = TYPE_ORDER[it.docType || 'empirical'] || [];
+    const cols = order.map((k) => CONTENT_COLS[k]).filter((c) => c && !META_KEYS.has(c.key));
+    for (const c of cols) {
+      const v = it[c.key];
+      if (!String(v || '').trim()) continue;
+      const rendered = c.type === 'md' ? mdInline(String(v)) : esc(String(v)).replace(/\n/g, '<br />');
+      sections.push({ label: c.label, icon: typeIcon(c.type), html: rendered, ai: c.ai });
+    }
+
+    // 解析状态提示
+    const statusHtml = it.status === 'done'
+      ? ''
+      : `<div class="pr-an-empty" style="padding:14px;text-align:left">
+           ${it.status === 'parsing' ? '⏳ 该文献正在解析中，稍后刷新可看到结果。'
+             : it.status === 'error' ? `⚠️ 解析失败：${esc(it.error || '未知错误')}`
+             : '📭 这篇文献还没有解析结果。点下方「开始解析」，AI 会自动读全文并填写字段。'}
+         </div>`;
+
+    // 有解析结果但内容字段全为空时，给一句明确提示，而不是一片空白
+    const noContent = it.status === 'done' && sections.length === 0;
+    const emptyTip = noContent
+      ? '<div class="pr-an-empty">该文献已解析，但内容字段都为空。<br />可点下方「重新解析这篇」重跑一次。</div>'
+      : '';
+
+    box.innerHTML = statusHtml + emptyTip + sections.map((s) => `
+      <div class="pr-an-sec">
+        <div class="pr-an-label">${s.icon || '⃝'} ${esc(s.label)}${s.ai ? '<span class="col-ai">AI 生成</span>' : ''}</div>
+        <div class="pr-an-value">${s.html}</div>
+      </div>`).join('')
+      + `<div class="pr-an-actions">
+           <button class="btn btn-primary btn-sm" id="prAnParse">${it.status === 'done' ? '↻ 重新解析这篇' : '▶ 开始解析这篇'}</button>
+           <button class="btn btn-ghost btn-sm" id="prAnEdit">✎ 编辑字段</button>
+           <button class="btn btn-ghost btn-sm" id="prAnOpenLib">⤢ 在文献中心查看</button>
+         </div>`;
+
+    $('prAnParse')?.addEventListener('click', async () => {
+      toast('开始解析…');
+      await parseIds([it.id]);
+      renderPrAnalysis();
+    });
+    $('prAnEdit')?.addEventListener('click', () => { currentId = it.id; openEdit(); });
+    $('prAnOpenLib')?.addEventListener('click', () => { closePdfReader(); switchView('library'); openDrawer(it.id); });
+  }
+
+  // ==================== 论文 AI 对话（文本 + 图片多模态） ====================
+  // 与文献中心的 AI 助手共用同一套模型配置，但走 /api/paper-chat（非流式、不落库），
+  // 并把「当前论文的解析结果」作为强上下文，把用户上传的图片按 OpenAI 多模态
+  // content 数组格式一并提交，从而支持「文字 + 图片」混合提问。
+  function prChatMessageHtml(m) {
+    const imgs = (m.images || []).length
+      ? `<div class="pr-msg-attach">${m.images.map((u) => `<img src="${u}" alt="附图" />`).join('')}</div>`
+      : '';
+    const body = m.pending
+      ? '<span class="pr-typing"><i></i><i></i><i></i></span>'
+      : (m.role === 'assistant' ? mdInline(m.content || '') : esc(m.content || '').replace(/\n/g, '<br />'));
+    // 「两段式看图」完成后，折叠展示视觉模型的原始转述，方便用户核对 AI 是否看错图
+    const vnote = (m.visions || []).length
+      ? `<div class="pr-vision-note">👁 <b>图片已由 ${esc(m.visions[0].label || '视觉模型')} 转述</b>`
+        + `<details><summary>查看转述内容</summary><pre>${esc(m.visions.map((v) => v.text).join('\n\n'))}</pre></details></div>`
+      : '';
+    return `<div class="pr-msg ${m.role === 'user' ? 'user' : 'ai'}">
+      <div class="pr-msg-avatar">${m.role === 'user' ? '👤' : '🤖'}</div>
+      <div class="pr-msg-body">
+        <div class="pr-msg-role">${m.role === 'user' ? '我' : 'AI 助手'}</div>
+        ${imgs}
+        ${vnote}
+        <div class="pr-msg-bubble">${body}</div>
+      </div>
+    </div>`;
+  }
+
+  function renderPrChat() {
+    const box = $('prChatMsgs');
+    if (!box) return;
+    if (!pr.chat.length) {
+      const it = items.find((x) => x.id === pr.recordId);
+      box.innerHTML = `<div class="pr-chat-empty">
+        基于《${esc((it?.title || '当前论文').slice(0, 24))}》提问吧。<br />我会结合这篇论文的解析结果回答，也可以看图。
+        <div class="pr-chat-hints">
+          <button class="pr-chat-hint" data-prq="用三句话概括这篇论文的核心贡献与结论。">用三句话概括核心贡献与结论</button>
+          <button class="pr-chat-hint" data-prq="这篇论文的研究方法/模型是什么？请分步骤讲清楚它的逻辑链条。">拆解研究方法/模型的逻辑链条</button>
+          <button class="pr-chat-hint" data-prq="这篇论文有哪些局限性？作者自己承认的和我可能忽略的分别是什么？">找出论文的局限性</button>
+          <button class="pr-chat-hint" data-prq="如果我要在自己的研究中复现或借鉴这篇论文，需要注意哪些关键细节？">如何复现/借鉴这篇论文</button>
+          <button class="pr-chat-hint" data-prq="这篇论文有哪些地方写得含糊或证据不足，我可以在综述中如何质疑它？">哪些结论证据不足</button>
+        </div>
+      </div>`;
+      box.querySelectorAll('[data-prq]').forEach((b) => b.addEventListener('click', () => {
+        $('prChatInput').value = b.dataset.prq;
+        sendPrChat();
+      }));
+      renderPrAttach();
+      return;
+    }
+    box.innerHTML = pr.chat.map(prChatMessageHtml).join('');
+    renderPrAttach();
+    box.scrollTop = box.scrollHeight;
+  }
+
+  // 待发送图片缩略图
+  function renderPrAttach() {
+    const box = $('prChatAttach');
+    if (!box) return;
+    box.innerHTML = prChatImages.map((im, i) => `
+      <div class="pr-attach-chip">
+        <img src="${im.dataUrl}" alt="${esc(im.name)}" title="${esc(im.name)}" />
+        <button data-prattdel="${i}" title="移除">✕</button>
+      </div>`).join('');
+    box.querySelectorAll('[data-prattdel]').forEach((b) => b.addEventListener('click', () => {
+      prChatImages.splice(parseInt(b.dataset.prattdel, 10), 1);
+      renderPrAttach();
+    }));
+  }
+
+  function readPrChatImage(file) {
+    return new Promise((resolve) => {
+      const r = new FileReader();
+      r.onload = () => resolve({ name: file.name || 'image', dataUrl: String(r.result || '') });
+      r.onerror = () => resolve(null);
+      r.readAsDataURL(file);
+    });
+  }
+
+  async function addPrChatImages(files) {
+    const list = [...(files || [])].filter((f) => /^image\//i.test(f.type));
+    if (!list.length) { toast('请上传图片文件', 'error'); return; }
+    for (const f of list.slice(0, 6)) {
+      if (f.size > 6 * 1024 * 1024) { toast(`「${f.name}」超过 6MB，已跳过`, 'error'); continue; }
+      const im = await readPrChatImage(f);
+      if (im) prChatImages.push(im);
+    }
+    renderPrAttach();
+  }
+
+  // 组装论文上下文：解析字段 + 当前页附近文字，让 AI 的回答贴合这篇论文
+  function buildPaperContext() {
+    const it = items.find((x) => x.id === pr.recordId);
+    if (!it) return '';
+    const order = TYPE_ORDER[it.docType || 'empirical'] || [];
+    const cols = order.map((k) => CONTENT_COLS[k]).filter(Boolean);
+    const lines = [it.title ? `标题：${it.title}` : '', it.authors ? `作者：${it.authors}` : '',
+      it.journal ? `期刊/会议：${it.journal}` : '', it.year ? `年份：${it.year}` : '',
+      it.doi ? `DOI：${it.doi}` : ''].filter(Boolean);
+    for (const c of cols) {
+      const v = String(it[c.key] || '').trim();
+      if (v) lines.push(`${c.label}：${v.length > 900 ? v.slice(0, 900) + '…' : v}`);
+    }
+    if (String(it.thoughts || '').trim()) lines.push(`我的思考：${String(it.thoughts).slice(0, 400)}`);
+    return lines.join('\n');
+  }
+
+  // 取当前页及相邻页的纯文字（用于「附上当前页文字」）
+  async function currentPageText() {
+    try {
+      if (!pr.doc) return '';
+      const p = await pr.doc.getPage(pr.pageNum || 1);
+      const tc = await p.getTextContent();
+      return (tc.items || []).map((i) => i.str).join(' ').replace(/\s+/g, ' ').trim().slice(0, 2000);
+    } catch (_) { return ''; }
+  }
+
+  // 发送并流式接收回答：逐字追加到 pending 气泡，支持中途「停止」
+  async function sendPrChat() {
+    if (pr.chatBusy) return;
+    const input = $('prChatInput');
+    const text = String(input?.value || '').trim();
+    if (!text && !prChatImages.length) { toast('请输入问题或上传图片', 'error'); return; }
+    const it = items.find((x) => x.id === pr.recordId);
+    if (!it) { toast('未找到对应的文献记录', 'error'); return; }
+
+    const imgs = prChatImages.map((x) => x.dataUrl);
+    pr.chat.push({ role: 'user', content: text, images: imgs });
+    const holder = { role: 'assistant', content: '', pending: true, streaming: true };
+    pr.chat.push(holder);
+    prChatImages.length = 0;
+    input.value = '';
+    input.style.height = '';
+    renderPrChat();
+    pr.chatBusy = true;
+    setPrChatBusyUI(true);
+
+    const ctx = buildPaperContext();
+    const sys = '你是一位严谨的科研助理。用户正在精读一篇文献，请只围绕这篇论文回答，'
+      + '回答要具体、可核查，必要时指明依据来自论文的哪一部分。如果论文上下文里没有相关信息，'
+      + '请明确说「论文解析结果中没有提到」，不要编造。用简体中文回答。\n\n【当前论文解析结果】\n' + (ctx || '（这篇文献还没有解析结果）');
+    // 组织为多模态 content：文本 + 图片
+    const userContent = imgs.length
+      ? [{ type: 'text', text: text || '请分析这些图片，并结合这篇论文回答我的问题。' },
+         ...imgs.map((u) => ({ type: 'image_url', image_url: { url: u } }))]
+      : text;
+
+    // 每 ~60ms 重绘一次，避免每个 token 都重建 DOM
+    let lastPaint = 0;
+    const paint = (force) => {
+      const now = performance.now();
+      if (!force && now - lastPaint < 60) return;
+      lastPaint = now;
+      const box = $('prChatMsgs');
+      const bubbles = box?.querySelectorAll('.pr-msg.ai .pr-msg-bubble');
+      const last = bubbles?.[bubbles.length - 1];
+      if (!last) return;
+      // 「看图」阶段还没有正文：显示一行进度提示，让等待可见
+      if (holder.stage === 'vision') {
+        last.innerHTML = `<span class="pr-vision-stage"><span class="pr-vision-spin"></span>`
+          + `正在用「${esc(holder.visionLabel || '视觉模型')}」识别 ${holder.visionCount || ''} 张图片…</span>`;
+      } else if (holder.content) {
+        last.innerHTML = mdInline(holder.content) + '<span class="pr-caret"></span>';
+      }
+      if (holder.stage === 'vision' || holder.content) {
+        if (box.scrollHeight - box.scrollTop - box.clientHeight < 120) box.scrollTop = box.scrollHeight;
+      }
+    };
+
+    pr.chatAbort = new AbortController();
+    const r = await streamSSE('/api/paper-chat', {
+      messages: [
+        { role: 'system', content: sys },
+        ...pr.chat.filter((m) => !m.pending).slice(-9, -1).map((m) => ({ role: m.role, content: m.content })),
+        { role: 'user', content: userContent },
+      ],
+    }, {
+      signal: pr.chatAbort.signal,
+      onEvent: (o) => {
+        if (o.model) {
+          holder.modelLabel = `${o.model.providerName} · ${o.model.model}`;
+          holder.modelVision = o.model.vision;
+        }
+        // 第一段：视觉模型正在看图 —— 在气泡里显示进度，用户知道为什么还没出字
+        if (o.stage === 'vision') {
+          holder.stage = 'vision';
+          holder.visionLabel = o.visionModel ? `${o.visionModel.providerName} · ${o.visionModel.model}` : '';
+          holder.visionCount = o.imageCount || 0;
+          paint(true);
+        }
+        // 第二段：图已转成文字，开始真正回答
+        if (o.stage === 'answer') {
+          holder.stage = 'answer';
+          holder.visions = (holder.visions || []).concat([{ label: holder.visionLabel, text: o.description || '' }]);
+          paint(true);
+        }
+        if (o.delta) {
+          if (holder.stage === 'vision') holder.stage = 'answer';
+          holder.content += o.delta;
+          paint(false);
+        }
+        if (o.error) holder.error = o.error;
+      },
+    });
+    pr.chatAbort = null;
+
+    // pending 标记去掉，转成正式消息
+    delete holder.pending;
+    delete holder.streaming;
+    delete holder.stage;
+    if (!holder.content) {
+      holder.content = holder.error
+        ? '请求失败：' + holder.error
+        : (r.aborted ? '（已停止生成）' : '（AI 没有返回内容，请重试）');
+    } else if (r.error) {
+      holder.content += '\n\n⚠️ ' + r.error;
+    } else if (r.aborted) {
+      holder.content += '\n\n_（已停止生成）_';
+    }
+    // 只有在「当前模型看不了图、而且后端也没找到视觉模型」时才是真问题；
+    // 后端能自动转述时不应再吓唬用户（v1 的写法会把正常流程误报成不支持）。
+    if (imgs.length && holder.modelVision === false && !holder.visions?.length && !holder.error) {
+      holder.content += `\n\n💡 当前模型「${holder.modelLabel || ''}」不支持图片输入，且没有可用的视觉模型。`
+        + '可到「AI 设置 → 两段式看图」指定一个视觉模型（如 GLM-4.5V 或 Qwen3.8-27B），或在顶栏直接切换。';
+    }
+    if (holder.visions?.length) holder.visionNote = true;
+
+    pr.chatBusy = false;
+    setPrChatBusyUI(false);
+    renderPrChat();
+  }
+
+  // 生成中把「发送」按钮变成「停止」，让用户能中断长回答
+  function setPrChatBusyUI(busy) {
+    const btn = $('btnPrChatSend');
+    if (!btn) return;
+    btn.classList.toggle('stop', !!busy);
+    btn.textContent = busy ? '■ 停止' : '发送';
+    btn.title = busy ? '停止生成' : '发送（Enter）';
+  }
+
+  function stopPrChat() {
+    if (pr.chatAbort) { try { pr.chatAbort.abort(); } catch (_) { /* ignore */ } }
+  }
 
   function openPdfReader(id) {
     const it = items.find((x) => x.id === id);
     if (!it?.filename) { toast('该文献还没有 PDF 附件', 'error'); return; }
     pr.recordId = id;
     pr.open = true;
+    // 切换文献时终止上一篇的流式生成，并重置对话与待发图片（对话是「按论文」的）
+    stopPrChat();
+    pr.chatBusy = false;
+    setPrChatBusyUI(false);
+    pr.chat = [];
+    prChatImages.length = 0;
     $('pdfReader').classList.remove('hidden');
     $('prFilename').textContent = it.originalName || '';
     $('prTransResult').innerHTML = '<div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>';
     $('prSourceText').value = '';
     $('prThoughts').value = it.thoughts || '';
     $('prThoughtsState').textContent = it.thoughts ? '已保存' : '';
+    // 右侧「解析结果」与正在阅读的文献同步刷新
+    renderPrAnalysis();
+    switchPrTab(pr.tab || 'translate');
     loadPdfDocument('/uploads/' + encodeURIComponent(it.filename));
   }
 
@@ -1199,6 +2253,9 @@
     pr.doc = null;
     pr.rendered.clear();
     if (pr.observer) { pr.observer.disconnect(); pr.observer = null; }
+    // 关窗时终止仍在进行的流式回答，避免后台白白跑完
+    stopPrChat();
+    pr.chatBusy = false;
     $('pdfReader').classList.add('hidden');
     $('prPages').innerHTML = '';
   }
@@ -1589,6 +2646,59 @@
 
   function bindPdfReader() {
     $('prClose').addEventListener('click', closePdfReader);
+
+    // 右侧页签：划词翻译 / 解析结果 / AI 对话
+    document.querySelectorAll('.pr-tab').forEach((b) => b.addEventListener('click', () => switchPrTab(b.dataset.prtab)));
+    $('btnPrAnRefresh').addEventListener('click', async () => {
+      const it = items.find((x) => x.id === pr.recordId);
+      if (!it) return;
+      toast('开始解析…');
+      await parseIds([it.id]);
+      renderPrAnalysis();
+    });
+
+    // 论文 AI 对话：发送 / 停止 / 换行 / 传图 / 附当前页文字
+    $('btnPrChatSend').addEventListener('click', () => {
+      if (pr.chatBusy) stopPrChat(); else sendPrChat();
+    });
+    $('prChatInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!pr.chatBusy) sendPrChat(); }
+    });
+    $('prChatInput').addEventListener('input', () => {
+      const n = $('prChatInput');
+      n.style.height = 'auto';
+      n.style.height = Math.min(120, n.scrollHeight) + 'px';
+    });
+    // 粘贴图片直接进入待发送区
+    $('prChatInput').addEventListener('paste', (e) => {
+      const files = [...(e.clipboardData?.items || [])]
+        .filter((i) => i.kind === 'file' && /^image\//i.test(i.type))
+        .map((i) => i.getAsFile())
+        .filter(Boolean);
+      if (files.length) { e.preventDefault(); addPrChatImages(files); }
+    });
+    $('btnPrChatImg').addEventListener('click', () => { $('prChatFile').value = ''; $('prChatFile').click(); });
+    $('prChatFile').addEventListener('change', () => addPrChatImages($('prChatFile').files));
+    $('btnPrChatText').addEventListener('click', async () => {
+      const t = await currentPageText();
+      if (!t) { toast('当前页没有提取到文字（可能是扫描版 PDF）', 'error'); return; }
+      const box = $('prChatInput');
+      box.value = (box.value ? box.value + '\n\n' : '')
+        + `【第 ${pr.pageNum} 页原文摘录】\n${t}\n\n请基于以上原文回答：`;
+      box.focus();
+      box.dispatchEvent(new Event('input'));
+      toast(`已附上第 ${pr.pageNum} 页文字`, 'success');
+    });
+    // 拖拽图片到对话面板
+    const chatPane = document.querySelector('[data-prpane="chat"]');
+    if (chatPane) {
+      chatPane.addEventListener('dragover', (e) => { e.preventDefault(); });
+      chatPane.addEventListener('drop', (e) => {
+        const files = [...(e.dataTransfer?.files || [])].filter((f) => /^image\//i.test(f.type));
+        if (files.length) { e.preventDefault(); e.stopPropagation(); addPrChatImages(files); }
+      });
+    }
+
     $('prPageInput').addEventListener('change', () => {
       const n = parseInt($('prPageInput').value, 10);
       if (n >= 1 && n <= pr.totalPages) {
@@ -1704,21 +2814,26 @@
   async function switchView(v) {
     view = v;
     document.querySelectorAll('.nav-item[data-view]').forEach((n) => n.classList.toggle('active', n.dataset.view === v));
-    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', ai: 'viewAI', worldlib: 'viewWorldlib' };
+    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
     for (const [key, id] of Object.entries(map)) $(id).classList.toggle('hidden', key !== v);
     const isLib = v === 'library';
     // 文献中心：主区固定不滚动，表格容器内滚动（横向滚动条贴可视区底部）
     document.querySelector('.main-area').classList.toggle('lib-mode', isLib);
+    // 邮箱：三栏铺满视口，各自内部滚动
+    document.querySelector('.main-area').classList.toggle('mail-mode', v === 'mail');
     $('searchInput').classList.toggle('hidden', !isLib);
     $('btnParseAll').classList.toggle('hidden', !isLib);
     $('btnRefreshRanks').classList.toggle('hidden', !isLib);
     $('btnExport').classList.toggle('hidden', !isLib);
+    // 离开文献中心时收起批量操作栏（选中集合保留，回来还在）
+    if (el.bulkBar) el.bulkBar.classList.toggle('hidden', !isLib || selectedIds.size === 0);
     if (v === 'home') renderHome();
     if (v === 'projects') renderProjects();
     if (v === 'tasks') renderTasks();
     if (v === 'papers') { renderPaperTab(); }
     if (v === 'worldlib') renderWlList();
     if (v === 'notes') renderNotes();
+    if (v === 'mail') await enterMailView();
     if (v === 'ai') {
       renderChatMeta();
       if (!convLoaded) {
@@ -2794,12 +3909,799 @@
     loadConversations();
   }
 
+  // ============ 邮箱（多账户 IMAP / SMTP） ============
+  let mailAccounts = [];
+  let mailProviders = null;
+  let mailCur = { accountId: '', folder: 'INBOX', folderName: '收件箱', page: 1, pageSize: 25, search: '' };
+  let mailFolders = [];
+  let mailFoldersOwner = '';
+  let mailMessages = [];
+  let mailTotal = 0;
+  let mailDetail = null;
+  let mailMaEditId = null;
+  let mailInited = false;
+
+  const FOLDER_ICONS = { '\\Inbox': '📥', '\\Sent': '📤', '\\Drafts': '📝', '\\Trash': '🗑', '\\Junk': '🚫', '\\Archive': '📦' };
+
+  // 邮箱徽标：优先用域名首字母，数字域名（如 163.com）用 📧
+  function mailBadge(email) {
+    const d = String(email || '').split('@')[1] || '';
+    const c = (d[0] || '').toUpperCase();
+    return /[A-Z]/.test(c) ? c : '📧';
+  }
+
+  async function ensureMailProviders() {
+    if (mailProviders) return mailProviders;
+    try { mailProviders = await api('/api/mail/providers'); } catch { mailProviders = {}; }
+    return mailProviders;
+  }
+
+  async function loadMailAccounts() {
+    mailAccounts = await api('/api/mail/accounts');
+    return mailAccounts;
+  }
+
+  // ============ 新邮件提醒（轮询 + 桌面通知 + 未读角标） ============
+  // 设计要点：
+  //  · 每个账户记录「上次已看到的最高 uid」作为基线，存 localStorage，重启后不回到零。
+  //  · 首次运行没有基线时只记录基线、不弹提醒，避免把邮箱里的历史邮件一次性全弹出来。
+  //  · uid 变大且未读 => 新邮件 => 应用内浮层 + 系统桌面通知。
+  //  · 同一 uid 只提醒一次（notifiedUids 去重），避免轮询反复弹。
+  const MAIL_SINCE_KEY = 'sci_mail_seen_uids';
+  const NOTIFY_INTERVAL = 60 * 1000; // 轮询间隔：60 秒
+  let mailNotifyTimer = null;
+  let mailNotifyBusy = false;
+  let mailNotifyEnabled = true;
+  const notifiedUids = new Set(); // `${accountId}:${uid}` 已提醒过的邮件
+
+  function readMailSince() {
+    try { return JSON.parse(localStorage.getItem(MAIL_SINCE_KEY) || '{}') || {}; } catch { return {}; }
+  }
+  function writeMailSince(map) {
+    try { localStorage.setItem(MAIL_SINCE_KEY, JSON.stringify(map)); } catch (_) { /* ignore */ }
+  }
+
+  // 侧边栏「邮箱」未读角标
+  function renderNavMailBadge(totalUnread) {
+    const n = parseInt(totalUnread, 10) || 0;
+    const badge = $('navMailBadge');
+    if (!badge) return;
+    badge.textContent = n > 99 ? '99+' : String(n);
+    badge.classList.toggle('hidden', n <= 0);
+  }
+
+  // 应用内新邮件浮层（可点击跳转）
+  function showMailNotification(acc, msg) {
+    const stack = $('mailNotifStack');
+    if (!stack) return;
+    const el2 = document.createElement('div');
+    el2.className = 'mail-notif';
+    el2.innerHTML = `
+      <div class="mail-notif-ico">📬</div>
+      <div class="mail-notif-body">
+        <div class="mail-notif-title">新邮件 · ${esc(acc.label || acc.email)}</div>
+        <div class="mail-notif-subject">${esc(String(msg.subject || '(无主题)').slice(0, 80))}</div>
+        <div class="mail-notif-from">${esc(msg.fromName || msg.fromAddress || '未知发件人')}</div>
+      </div>
+      <button class="mail-notif-close" title="关闭">✕</button>`;
+    const close = () => { el2.classList.add('out'); setTimeout(() => el2.remove(), 220); };
+    el2.querySelector('.mail-notif-close').addEventListener('click', (e) => { e.stopPropagation(); close(); });
+    // 点击浮层：切到邮箱视图并打开这封邮件
+    el2.addEventListener('click', async () => {
+      close();
+      try {
+        await switchView('mail');
+        await selectMailAccount(acc.id);
+        if (mailCur.folder !== 'INBOX') await openMailFolder(acc.id, 'INBOX', '收件箱');
+        await openMailMessage(msg.uid);
+      } catch (e) { toast('打开邮件失败：' + e.message, 'error'); }
+    });
+    stack.appendChild(el2);
+    // 12 秒后自动收起（点击/关闭不受影响）
+    setTimeout(close, 12000);
+  }
+
+  // 系统级桌面通知（Electron / 浏览器原生）
+  function showDesktopNotification(acc, msg) {
+    try {
+      if (typeof Notification === 'undefined') return;
+      if (Notification.permission !== 'granted') return;
+      const n = new Notification('📬 新邮件 · ' + (acc.label || acc.email), {
+        body: `${msg.fromName || msg.fromAddress || '未知发件人'}\n${msg.subject || '(无主题)'}`,
+        tag: `mail-${acc.id}-${msg.uid}`,
+      });
+      n.onclick = () => { try { window.focus(); } catch (_) {} n.close(); };
+    } catch (_) { /* 通知失败不影响功能 */ }
+  }
+
+  function requestNotifyPermission() {
+    try {
+      if (typeof Notification === 'undefined') return;
+      if (Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+    } catch (_) { /* ignore */ }
+  }
+
+  // 单轮轮询
+  async function checkNewMail() {
+    if (mailNotifyBusy || !mailNotifyEnabled) return;
+    mailNotifyBusy = true;
+    try {
+      const since = readMailSince();
+      const data = await api('/api/mail/notify?since=' + encodeURIComponent(JSON.stringify(since)));
+      renderNavMailBadge(data.totalUnread || 0);
+
+      const nextSince = { ...since };
+      let changed = false;
+      for (const a of data.accounts || []) {
+        if (a.error) continue;
+        const prev = parseInt(since[a.id], 10);
+        const hadBaseline = Number.isFinite(prev);
+        // 推进基线到当前最大 uid
+        if (!hadBaseline || (a.newestUid || 0) > prev) { nextSince[a.id] = a.newestUid || 0; changed = true; }
+        if (!hadBaseline) continue; // 首次不提醒历史邮件
+        for (const m of a.fresh || []) {
+          const key = a.id + ':' + m.uid;
+          if (notifiedUids.has(key)) continue;
+          notifiedUids.add(key);
+          showMailNotification(a, m);
+          showDesktopNotification(a, m);
+        }
+      }
+      if (changed) writeMailSince(nextSince);
+    } catch (_) {
+      // 网络/离线/账户报错时静默，下一轮再试
+    } finally {
+      mailNotifyBusy = false;
+    }
+  }
+
+  function startMailNotify() {
+    if (mailNotifyTimer) return;
+    requestNotifyPermission();
+    checkNewMail();
+    mailNotifyTimer = setInterval(checkNewMail, NOTIFY_INTERVAL);
+  }
+  function stopMailNotify() {
+    if (mailNotifyTimer) { clearInterval(mailNotifyTimer); mailNotifyTimer = null; }
+  }
+  // 调试/自动化钩子：便于手动触发一轮检查或临时改间隔
+  window.__mailNotifyTick = () => checkNewMail();
+  window.__mailNotifySetInterval = (ms) => {
+    stopMailNotify();
+    mailNotifyTimer = setInterval(checkNewMail, Math.max(3000, parseInt(ms, 10) || NOTIFY_INTERVAL));
+  };
+  // 调试/自动化钩子：直接打开某篇文献的 PDF 阅读器、切换右侧页签、读取当前模型
+  window.__openReader = (id) => openPdfReader(id);
+  window.__setPrTab = (t) => switchPrTab(t);
+  window.__activeModel = () => ({
+    activeProfileId, active: activeModelInfo,
+    profiles: profiles.map((p) => ({ id: p.id, label: p.label, provider: p.provider, model: p.model })),
+  });
+
+  function fmtMailDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
+      return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+    if (d.getFullYear() === now.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日`;
+    return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+  }
+  function fmtMailFullDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  function fmtSize(n) {
+    const b = Number(n) || 0;
+    if (b < 1024) return b + ' B';
+    if (b < 1024 * 1024) return (b / 1024).toFixed(0) + ' KB';
+    return (b / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  // ---------- 三栏渲染 ----------
+  function renderMailView() {
+    renderMailSide();
+    if (!mailCur.accountId) {
+      renderMailListHead();
+      $('mailList').innerHTML = mailAccounts.length
+        ? '<div class="mail-empty">选择左侧邮箱账户开始收信</div>'
+        : mailGuideHtml();
+      $('mailPager').innerHTML = '';
+      renderMailDetail();
+    }
+  }
+  function mailGuideHtml() {
+    return `<div class="mail-guide">
+      <div class="mail-guide-ico">📧</div>
+      <b>还没有登录邮箱</b>
+      <p>登录邮箱后可以在这里直接收发与阅读邮件，多个邮箱可以同时管理（例如个人 163 邮箱 + 学校邮箱）。</p>
+      <p class="mail-guide-dim">暂时不登录也没关系，其他功能不受影响，随时可以在左侧「＋ 账户管理」里添加。</p>
+      <button class="btn btn-primary" id="btnMailGuideAdd">＋ 添加邮箱账户</button>
+    </div>`;
+  }
+
+  function renderMailSide() {
+    const accBox = $('mailAccounts');
+    accBox.innerHTML = mailAccounts.length
+      ? mailAccounts.map((a) => `
+        <div class="mail-acc${a.id === mailCur.accountId ? ' active' : ''}" data-acc="${a.id}" title="${esc(a.email)}">
+          <span class="mail-badge">${mailBadge(a.email)}</span>
+          <div class="mail-acc-info">
+            <b>${esc(a.label || a.email)}</b>
+            <span>${esc(a.email)}</span>
+          </div>
+        </div>`).join('')
+      : '<div class="mail-empty-side">尚未添加邮箱账户</div>';
+
+    const fBox = $('mailFolders');
+    if (!mailCur.accountId) { fBox.innerHTML = ''; return; }
+    fBox.innerHTML = mailFolders.length
+      ? mailFolders.map((f) => `
+        <div class="mail-folder${f.path === mailCur.folder ? ' active' : ''}" data-folder="${esc(f.path)}" data-foldername="${esc(f.name)}">
+          <span class="mail-folder-ico">${FOLDER_ICONS[f.specialUse] || '📁'}</span><span class="mail-folder-name">${esc(f.name)}</span>
+        </div>`).join('')
+      : '<div class="mail-empty-side">暂无文件夹</div>';
+  }
+
+  function renderMailListHead() {
+    const box = $('mailListHead');
+    if (!mailCur.accountId) { box.innerHTML = ''; return; }
+    const acc = mailAccounts.find((a) => a.id === mailCur.accountId);
+    const scope = mailCur.search ? `搜索「${esc(mailCur.search)}」` : esc(mailCur.folderName || mailCur.folder);
+    box.innerHTML = `<span class="mail-title-main">${scope}</span>
+      <span class="mail-title-sub">${esc(acc ? (acc.label || acc.email) : '')} · 共 ${mailTotal} 封</span>`;
+  }
+
+  function renderMailMessages() {
+    const box = $('mailList');
+    if (!mailMessages.length) {
+      box.innerHTML = `<div class="mail-empty">${mailCur.search ? '没有找到匹配的邮件' : '这个文件夹还没有邮件'}</div>`;
+    } else {
+      box.innerHTML = mailMessages.map((m) => `
+        <div class="mail-item${m.seen ? '' : ' unread'}${mailDetail && mailDetail.uid === m.uid ? ' active' : ''}" data-mail="${m.uid}">
+          <span class="mail-dot"></span>
+          <div class="mail-item-main">
+            <div class="mail-item-row1">
+              <span class="mail-from" title="${esc(m.fromAddress)}">${esc(m.fromName || m.fromAddress || '(未知发件人)')}</span>
+              <span class="mail-date">${esc(fmtMailDate(m.date))}</span>
+            </div>
+            <div class="mail-item-row2">
+              <span class="mail-subject" title="${esc(m.subject)}">${esc(m.subject)}</span>
+              ${m.hasAttachments ? '<span class="mail-attach-ico" title="含附件">📎</span>' : ''}
+            </div>
+          </div>
+        </div>`).join('');
+    }
+    renderMailPager();
+    renderMailListHead();
+  }
+
+  function renderMailPager() {
+    const box = $('mailPager');
+    if (!mailCur.accountId) { box.innerHTML = ''; return; }
+    const pages = Math.max(1, Math.ceil(mailTotal / mailCur.pageSize));
+    const p = Math.min(mailCur.page, pages);
+    box.innerHTML = `
+      <button class="tb-btn" data-mail-page="prev"${p <= 1 ? ' disabled' : ''}>‹ 上一页</button>
+      <span class="mail-page-info">${p} / ${pages}</span>
+      <button class="tb-btn" data-mail-page="next"${p >= pages ? ' disabled' : ''}>下一页 ›</button>
+      <span class="mail-page-size">
+        <select class="tb-select" id="mailPageSize">
+          ${[25, 50, 100].map((n) => `<option value="${n}"${n === mailCur.pageSize ? ' selected' : ''}>每页 ${n} 封</option>`).join('')}
+        </select>
+      </span>`;
+  }
+
+  // 邮件 HTML 正文：注入基础样式（自适应宽度 / 图片不溢出 / 字体统一），并清理未替换的内嵌图片引用
+  function mailFrameDoc(html) {
+    let s = String(html || '');
+    s = s.replace(/(src|href)\s*=\s*(["'])cid:[^"']*\2/gi, '$1=$2data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7$2');
+    const inject = `<base target="_blank">
+<style>
+html, body { margin: 0; padding: 12px 16px; font-size: 14px; line-height: 1.75; word-break: break-word;
+  font-family: "Times New Roman", "Microsoft YaHei", "PingFang SC", sans-serif; color: #241b2b; background: #fff; }
+img { max-width: 100%; height: auto; }
+table { max-width: 100% !important; }
+pre { white-space: pre-wrap; }
+a { color: #81308C; }
+</style>`;
+    if (/<head[^>]*>/i.test(s)) return s.replace(/<head[^>]*>/i, (m) => m + inject);
+    if (/<html[^>]*>/i.test(s)) return s.replace(/<html[^>]*>/i, (m) => m + inject);
+    return inject + s;
+  }
+
+  function renderMailDetail() {
+    const box = $('mailDetail');
+    if (!mailDetail) {
+      box.innerHTML = '<div class="mail-placeholder">📬 选中一封邮件后在此阅读</div>';
+      return;
+    }
+    const d = mailDetail;
+    const accId = mailCur.accountId;
+    const folderQ = encodeURIComponent(mailCur.folder);
+    const atts = (d.attachments || []).filter((a) => !a.inline);    box.innerHTML = `
+      <div class="mail-detail-head">
+        <div class="mail-detail-subject">${esc(d.subject)}</div>
+        <div class="mail-detail-meta">
+          <span class="mail-detail-from">${esc(d.fromName || d.fromAddress)}</span>
+          <span class="mail-detail-addr">&lt;${esc(d.fromAddress)}&gt;</span>
+          <span class="ob-spacer"></span>
+          <span class="mail-detail-date">${esc(fmtMailFullDate(d.date))}</span>
+        </div>
+        <div class="mail-detail-to">收件人：${esc(d.to || '')}${d.cc ? `　抄送：${esc(d.cc)}` : ''}</div>
+        <div class="mail-detail-ops">
+          <button class="tb-btn" data-mail-reply="1">↩ 回复</button>
+          <button class="tb-btn" data-mail-unread="1">标记未读</button>
+          <button class="tb-btn" data-mail-del="1">🗑 删除</button>
+        </div>
+        ${atts.length ? `<div class="mail-atts">${atts.map((a) => `
+          <a class="mail-att" href="/api/mail/accounts/${accId}/messages/${d.uid}/attachments/${a.index}?folder=${folderQ}" title="${esc(a.filename)}">
+            <span class="mail-att-ico">📎</span>
+            <span class="mail-att-name">${esc(a.filename)}</span>
+            <span class="mail-att-size">${fmtSize(a.size)}</span>
+          </a>`).join('')}</div>` : ''}
+      </div>
+      <div class="mail-body">${d.html
+        ? `<iframe class="mail-frame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" srcdoc="${esc(mailFrameDoc(d.html))}"></iframe>`
+        : `<pre class="mail-text">${esc(d.text || '(无正文)')}</pre>`}</div>`;
+  }
+
+  // ---------- 数据加载 ----------
+  async function ensureMailFolders(accountId, force = false) {
+    if (!force && mailFoldersOwner === accountId && mailFolders.length) { renderMailSide(); return; }
+    mailFoldersOwner = accountId;
+    try {
+      mailFolders = await api(`/api/mail/accounts/${accountId}/folders`);
+    } catch (e) {
+      mailFolders = [];
+      toast('读取文件夹失败：' + e.message, 'error');
+    }
+    renderMailSide();
+  }
+
+  async function openMailFolder(accountId, folder, name, page = 1) {
+    if (!accountId) return;
+    mailCur.accountId = accountId;
+    mailCur.folder = folder || 'INBOX';
+    mailCur.folderName = name || folder || '收件箱';
+    mailCur.page = page;
+    mailDetail = null;
+    renderMailSide();
+    renderMailDetail();
+    await loadMailMessages();
+  }
+
+  async function selectMailAccount(id) {
+    if (!id || (mailCur.accountId === id && mailMessages.length)) return;
+    mailMessages = []; mailTotal = 0; mailDetail = null;
+    $('mailSearch').value = '';
+    mailCur = { accountId: id, folder: 'INBOX', folderName: '收件箱', page: 1, pageSize: mailCur.pageSize, search: '' };
+    await ensureMailFolders(id, true);
+    // 优先定位到真正的收件箱文件夹（不同邮箱命名可能不同）
+    const inbox = mailFolders.find((f) => f.specialUse === '\\Inbox') || mailFolders.find((f) => f.path === 'INBOX');
+    await openMailFolder(id, inbox ? inbox.path : 'INBOX', inbox ? inbox.name : '收件箱', 1);
+  }
+
+  async function loadMailMessages() {
+    if (!mailCur.accountId) return;
+    $('mailList').innerHTML = '<div class="mail-loading">正在收取邮件…</div>';
+    renderMailListHead();
+    const q = new URLSearchParams({ folder: mailCur.folder, page: String(mailCur.page), pageSize: String(mailCur.pageSize) });
+    if (mailCur.search) q.set('search', mailCur.search);
+    try {
+      const data = await api(`/api/mail/accounts/${mailCur.accountId}/messages?${q.toString()}`);
+      mailMessages = data.messages || [];
+      mailTotal = data.total || 0;
+      renderMailMessages();
+    } catch (e) {
+      mailMessages = []; mailTotal = 0;
+      $('mailList').innerHTML = `<div class="mail-error">收取失败：${esc(e.message)}<div><button class="btn" data-mail-retry="1">重试</button></div></div>`;
+      renderMailPager();
+    }
+  }
+
+  async function openMailMessage(uid) {
+    const id = mailCur.accountId;
+    $('mailDetail').innerHTML = '<div class="mail-loading">正在打开邮件…</div>';
+    try {
+      const d = await api(`/api/mail/accounts/${id}/messages/${uid}?folder=${encodeURIComponent(mailCur.folder)}`);
+      mailDetail = d;
+      renderMailDetail();
+      const item = mailMessages.find((m) => m.uid === Number(uid));
+      if (item && !item.seen) {
+        item.seen = true;
+        api(`/api/mail/accounts/${id}/messages/${uid}/seen`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ seen: true, folder: mailCur.folder }),
+        }).catch(() => { /* 标记失败不影响阅读 */ });
+      }
+      renderMailMessages();
+    } catch (e) {
+      mailDetail = null;
+      $('mailDetail').innerHTML = `<div class="mail-error">打开失败：${esc(e.message)}</div>`;
+    }
+  }
+
+  async function markMailUnread() {
+    if (!mailDetail) return;
+    const uid = mailDetail.uid;
+    try {
+      await api(`/api/mail/accounts/${mailCur.accountId}/messages/${uid}/seen`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seen: false, folder: mailCur.folder }),
+      });
+      const it = mailMessages.find((m) => m.uid === uid);
+      if (it) it.seen = false;
+      renderMailMessages();
+      toast('已标记为未读', 'success');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function removeMailMessage() {
+    if (!mailDetail) return;
+    if (!confirm('确认删除这封邮件？删除后无法恢复。')) return;
+    const uid = mailDetail.uid;
+    try {
+      await api(`/api/mail/accounts/${mailCur.accountId}/messages/${uid}?folder=${encodeURIComponent(mailCur.folder)}`, { method: 'DELETE' });
+      mailDetail = null;
+      renderMailDetail();
+      await loadMailMessages();
+      toast('邮件已删除', 'success');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ---------- 账户管理 ----------
+  function renderMaProviderOptions() {
+    const sel = $('maProvider');
+    if (sel.dataset.ready) return;
+    sel.innerHTML = Object.entries(mailProviders || {})
+      .map(([key, p]) => `<option value="${esc(key)}">${esc(p.label || key)}</option>`).join('');
+    sel.dataset.ready = '1';
+    sel.value = '163';
+    applyMailProviderPreset();
+  }
+
+  function applyMailProviderPreset() {
+    const p = (mailProviders || {})[$('maProvider').value] || {};
+    $('maNote').textContent = p.note || '';
+    $('maImapHost').value = p.imapHost || '';
+    $('maImapPort').value = p.imapPort || 993;
+    $('maImapSecure').checked = p.imapSecure !== false;
+    $('maSmtpHost').value = p.smtpHost || '';
+    $('maSmtpPort').value = p.smtpPort || 465;
+    $('maSmtpSecure').checked = p.smtpSecure !== false;
+    $('maSelfSigned').checked = false;
+  }
+
+  function resetMailAccountForm() {
+    mailMaEditId = null;
+    $('maFormTitle').textContent = '添加邮箱账户';
+    $('maLabel').value = '';
+    $('maEmail').value = '';
+    $('maPassword').value = '';
+    $('maTestResult').classList.add('hidden');
+    $('maProvider').value = '163';
+    applyMailProviderPreset();
+  }
+
+  function fillMailAccountForm(acc) {
+    if (!acc) return;
+    mailMaEditId = acc.id;
+    $('maFormTitle').textContent = `编辑账户：${acc.label || acc.email}`;
+    $('maProvider').value = acc.provider || 'custom';
+    if (!mailProviders || !mailProviders[acc.provider]) $('maProvider').value = 'custom';
+    $('maLabel').value = acc.label || '';
+    $('maEmail').value = acc.email || '';
+    $('maPassword').value = '';
+    $('maPassword').placeholder = acc.hasPassword ? '留空表示不修改授权码' : '请输入授权码';
+    $('maImapHost').value = acc.imapHost || '';
+    $('maImapPort').value = acc.imapPort || 993;
+    $('maImapSecure').checked = acc.imapSecure !== false;
+    $('maSmtpHost').value = acc.smtpHost || '';
+    $('maSmtpPort').value = acc.smtpPort || 465;
+    $('maSmtpSecure').checked = acc.smtpSecure !== false;
+    $('maSelfSigned').checked = !!acc.allowSelfSigned;
+    $('maNote').textContent = (mailProviders[acc.provider] || {}).note || '';
+    $('maTestResult').classList.add('hidden');
+  }
+
+  function renderMaList() {
+    const box = $('maList');
+    if (!mailAccounts.length) {
+      box.innerHTML = '<div class="ma-empty">还没有添加任何邮箱账户。在下方表单填写信息即可登录，支持同时添加多个邮箱。</div>';
+      return;
+    }
+    box.innerHTML = mailAccounts.map((a) => `
+      <div class="ma-item${a.id === mailMaEditId ? ' active' : ''}">
+        <span class="mail-badge">${mailBadge(a.email)}</span>
+        <div class="ma-item-info">
+          <b>${esc(a.label || a.email)}</b>
+          <span>${esc(a.email)}${a.imapHost ? ' · ' + esc(a.imapHost) : ''}${a.lastSyncAt ? ' · 最近收信 ' + esc(fmtMailFullDate(a.lastSyncAt)) : ''}</span>
+        </div>
+        <div class="ma-item-ops">
+          <button class="tb-btn" data-ma-test="${a.id}">测试</button>
+          <button class="tb-btn" data-ma-edit="${a.id}">编辑</button>
+          <button class="tb-btn danger" data-ma-del="${a.id}">删除</button>
+        </div>
+      </div>`).join('');
+  }
+
+  async function openMailAccountModal(id) {
+    await ensureMailProviders();
+    renderMaProviderOptions();
+    mailMaEditId = id || null;
+    renderMaList();
+    if (id) fillMailAccountForm(mailAccounts.find((a) => a.id === id));
+    else resetMailAccountForm();
+    renderMaList();
+    $('maTestResult').classList.add('hidden');
+    $('mailAccountModal').classList.remove('hidden');
+  }
+
+  function mailAccFormData() {
+    return {
+      provider: $('maProvider').value,
+      label: $('maLabel').value.trim(),
+      email: $('maEmail').value.trim(),
+      password: $('maPassword').value,
+      imapHost: $('maImapHost').value.trim(),
+      imapPort: $('maImapPort').value.trim(),
+      imapSecure: $('maImapSecure').checked,
+      smtpHost: $('maSmtpHost').value.trim(),
+      smtpPort: $('maSmtpPort').value.trim(),
+      smtpSecure: $('maSmtpSecure').checked,
+      allowSelfSigned: $('maSelfSigned').checked,
+    };
+  }
+
+  async function testMailAccountForm() {
+    const box = $('maTestResult');
+    box.className = 'ma-test-result';
+    box.classList.remove('hidden');
+    box.textContent = '正在连接邮件服务器…';
+    const btn = $('btnMaTest');
+    btn.disabled = true;
+    try {
+      const r = await api('/api/mail/test', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(mailAccFormData()),
+      });
+      box.classList.add('ok');
+      box.textContent = `✅ 连接成功：收件箱 ${r.inboxMessages} 封邮件，共 ${r.folderCount} 个文件夹`;
+    } catch (e) {
+      box.classList.add('err');
+      box.textContent = '❌ ' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function saveMailAccountForm() {
+    const data = mailAccFormData();
+    const btn = $('btnMaSave');
+    btn.disabled = true;
+    const editingId = mailMaEditId;
+    try {
+      if (editingId) {
+        await api('/api/mail/accounts/' + editingId, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+        });
+      } else {
+        const created = await api('/api/mail/accounts', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+        });
+        mailMaEditId = created.id;
+      }
+      await loadMailAccounts();
+      const targetId = editingId || mailMaEditId;
+      resetMailAccountForm();
+      renderMaList();
+      renderMailSide();
+      toast(editingId ? '账户已更新' : '账户已添加，正在连接邮箱…', 'success');
+      await selectMailAccount(targetId);
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ---------- 写邮件 ----------
+  function openMailCompose(to = '', subject = '') {
+    if (!mailAccounts.length) {
+      toast('请先添加一个邮箱账户', 'error');
+      openMailAccountModal(null);
+      return;
+    }
+    $('mcFrom').innerHTML = mailAccounts
+      .map((a) => `<option value="${a.id}">${esc(a.label || a.email)}</option>`).join('');
+    if (mailCur.accountId) $('mcFrom').value = mailCur.accountId;
+    $('mcTo').value = to || '';
+    $('mcCc').value = '';
+    $('mcSubject').value = subject || '';
+    $('mcBody').value = '';
+    $('mailComposeModal').classList.remove('hidden');
+    setTimeout(() => { if (!to) $('mcTo').focus(); else $('mcBody').focus(); }, 30);
+  }
+
+  async function sendMailCompose() {
+    const id = $('mcFrom').value;
+    const to = $('mcTo').value.trim();
+    if (!to) return toast('请填写收件人', 'error');
+    const btn = $('btnMcSend');
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = '发送中…';
+    try {
+      await api(`/api/mail/accounts/${id}/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to, cc: $('mcCc').value.trim(),
+          subject: $('mcSubject').value.trim(), text: $('mcBody').value,
+        }),
+      });
+      $('mailComposeModal').classList.add('hidden');
+      toast('邮件已发送', 'success');
+    } catch (e) {
+      toast('发送失败：' + e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  }
+
+  // ---------- 邮箱事件绑定 ----------
+  function bindMailEvents() {
+    $('btnMailManage').addEventListener('click', () => openMailAccountModal(null));
+    $('btnMailCompose').addEventListener('click', () => openMailCompose());
+    $('btnMailRefresh').addEventListener('click', async () => {
+      if (!mailCur.accountId) { toast('请先添加邮箱账户', 'error'); return; }
+      await ensureMailFolders(mailCur.accountId, true);
+      await loadMailMessages();
+      toast('已刷新', 'success');
+    });
+
+    $('mailSearch').addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      if (!mailCur.accountId) return;
+      mailCur.search = $('mailSearch').value.trim();
+      mailCur.page = 1;
+      loadMailMessages();
+    });
+    $('mailSearch').addEventListener('input', (e) => {
+      if (!e.target.value && mailCur.search && mailCur.accountId) {
+        mailCur.search = '';
+        mailCur.page = 1;
+        loadMailMessages();
+      }
+    });
+
+    $('mailAccounts').addEventListener('click', (e) => {
+      const a = e.target.closest('[data-acc]');
+      if (a) selectMailAccount(a.dataset.acc);
+    });
+    $('mailFolders').addEventListener('click', (e) => {
+      const f = e.target.closest('[data-folder]');
+      if (f) openMailFolder(mailCur.accountId, f.dataset.folder, f.dataset.foldername, 1);
+    });
+    $('mailList').addEventListener('click', (e) => {
+      if (e.target.closest('[data-mail-retry]')) { loadMailMessages(); return; }
+      if (e.target.closest('#btnMailGuideAdd')) { openMailAccountModal(null); return; }
+      const item = e.target.closest('[data-mail]');
+      if (item) openMailMessage(Number(item.dataset.mail));
+    });
+    $('mailPager').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-mail-page]');
+      if (!b) return;
+      const pages = Math.max(1, Math.ceil(mailTotal / mailCur.pageSize));
+      if (b.dataset.mailPage === 'prev' && mailCur.page > 1) { mailCur.page--; loadMailMessages(); }
+      if (b.dataset.mailPage === 'next' && mailCur.page < pages) { mailCur.page++; loadMailMessages(); }
+    });
+    $('mailPager').addEventListener('change', (e) => {
+      if (e.target.id === 'mailPageSize') {
+        mailCur.pageSize = parseInt(e.target.value, 10) || 25;
+        mailCur.page = 1;
+        loadMailMessages();
+      }
+    });
+    $('mailDetail').addEventListener('click', (e) => {
+      if (!mailDetail) return;
+      if (e.target.closest('[data-mail-reply]')) {
+        const subj = /^re:/i.test(mailDetail.subject) ? mailDetail.subject : 'Re: ' + mailDetail.subject;
+        openMailCompose(mailDetail.fromAddress, subj);
+      } else if (e.target.closest('[data-mail-unread]')) markMailUnread();
+      else if (e.target.closest('[data-mail-del]')) removeMailMessage();
+    });
+
+    // 账户管理弹窗
+    $('btnMaClose').addEventListener('click', () => $('mailAccountModal').classList.add('hidden'));
+    $('btnMaCancel').addEventListener('click', () => { resetMailAccountForm(); renderMaList(); });
+    $('btnMaSave').addEventListener('click', saveMailAccountForm);
+    $('btnMaTest').addEventListener('click', testMailAccountForm);
+    $('maProvider').addEventListener('change', () => {
+      $('maTestResult').classList.add('hidden');
+      applyMailProviderPreset();
+    });
+    $('maList').addEventListener('click', async (e) => {
+      const ed = e.target.closest('[data-ma-edit]');
+      const del = e.target.closest('[data-ma-del]');
+      const ts = e.target.closest('[data-ma-test]');
+      if (ed) { fillMailAccountForm(mailAccounts.find((a) => a.id === ed.dataset.maEdit)); renderMaList(); return; }
+      if (ts) {
+        const box = $('maTestResult');
+        box.className = 'ma-test-result';
+        box.classList.remove('hidden');
+        box.textContent = '正在连接邮件服务器…';
+        try {
+          const r = await api(`/api/mail/accounts/${ts.dataset.maTest}/test`, { method: 'POST' });
+          box.classList.add('ok');
+          box.textContent = `✅ 连接成功：收件箱 ${r.inboxMessages} 封邮件，共 ${r.folderCount} 个文件夹`;
+        } catch (err) {
+          box.classList.add('err');
+          box.textContent = '❌ ' + err.message;
+        }
+        return;
+      }
+      if (del) {
+        const acc = mailAccounts.find((a) => a.id === del.dataset.maDel);
+        if (!acc) return;
+        if (!confirm(`确认删除邮箱账户「${acc.label || acc.email}」？\n（仅从本软件移除，不会影响邮箱里的邮件）`)) return;
+        try {
+          await api('/api/mail/accounts/' + acc.id, { method: 'DELETE' });
+          await loadMailAccounts();
+          if (mailCur.accountId === acc.id) {
+            mailCur = { accountId: '', folder: 'INBOX', folderName: '收件箱', page: 1, pageSize: mailCur.pageSize, search: '' };
+            mailFolders = []; mailFoldersOwner = ''; mailMessages = []; mailTotal = 0; mailDetail = null;
+            renderMailView();
+          }
+          if (mailMaEditId === acc.id) resetMailAccountForm();
+          renderMaList();
+          renderMailSide();
+          toast('账户已移除', 'success');
+        } catch (err) { toast(err.message, 'error'); }
+      }
+    });
+
+    // 写邮件弹窗
+    $('btnMcClose').addEventListener('click', () => $('mailComposeModal').classList.add('hidden'));
+    $('btnMcCancel').addEventListener('click', () => $('mailComposeModal').classList.add('hidden'));
+    $('btnMcSend').addEventListener('click', sendMailCompose);
+  }
+
+  // 进入邮箱视图（首次进入时懒加载账户，避免拖慢启动）
+  async function enterMailView() {
+    renderMailView();
+    if (mailInited) return;
+    mailInited = true;
+    try {
+      await ensureMailProviders();
+      renderMaProviderOptions();
+      await loadMailAccounts();
+    } catch (e) {
+      toast('读取邮箱账户失败：' + e.message, 'error');
+    }
+    renderMailView();
+    if (mailAccounts.length && !mailCur.accountId) await selectMailAccount(mailAccounts[0].id);
+  }
+
   // ---------- 工作台事件绑定 ----------
   function bindWorkbench() {
     // 侧边栏导航
     document.querySelectorAll('.nav-item[data-view]').forEach((n) => n.addEventListener('click', () => switchView(n.dataset.view)));
     $('btnNavSettings').addEventListener('click', openSettingsModal);
     $('btnSettings').addEventListener('click', openSettingsModal);
+
+    // 邮箱
+    bindMailEvents();
+
+    // 数据备份
+    bindBackupEvents();
 
     // 首页
     $('profileCard').addEventListener('click', openProfileModal);
@@ -3003,9 +4905,88 @@
     });
   }
 
-  function openSettingsModal() {
+  async function openSettingsModal() {
+    // 先拉一次最新配置，避免用设置页改完再进设置时看到旧列表
+    await loadModels();
     fillSettingsForm();
     $('settingsModal').classList.remove('hidden');
+    loadBackupList();
+  }
+
+  // ============ 数据备份与恢复 ============
+  function fmtBytes(n) {
+    const v = Number(n) || 0;
+    if (v < 1024) return v + ' B';
+    if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB';
+    if (v < 1024 * 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + ' MB';
+    return (v / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+
+  // 备份目录名形如 2026-09-16T03-45-12_startup -> 显示成「2026-09-16 03:45:12 · 自动」
+  function fmtBackupName(name) {
+    const m = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})_?(.*)$/.exec(String(name || ''));
+    if (!m) return name;
+    const kind = { startup: '自动', manual: '手动', 'before-restore': '恢复前' }[m[5]] || m[5] || '';
+    return `${m[1]} ${m[2]}:${m[3]}:${m[4]}${kind ? ' · ' + kind : ''}`;
+  }
+
+  async function loadBackupList() {
+    const wrap = $('bkListWrap');
+    if (!wrap) return;
+    wrap.innerHTML = '<div class="bk-loading">正在读取备份列表…</div>';
+    try {
+      const d = await api('/api/backup/list');
+      const list = d.backups || [];
+      const dirLine = `<div class="bk-dir" title="${esc(d.dataDir || '')}">📁 ${esc(d.dataDir || '')}</div>`;
+      if (!list.length) {
+        wrap.innerHTML = dirLine + '<div class="bk-empty">还没有备份。点「立即备份」创建第一份，或重启应用后自动生成。</div>';
+        return;
+      }
+      wrap.innerHTML = dirLine + `<div class="bk-list">${list.map((b) => `
+        <div class="bk-item">
+          <span class="bk-name" title="${esc(b.name)}">${esc(fmtBackupName(b.name))}</span>
+          <span class="bk-size">${fmtBytes(b.size)}</span>
+          <button class="tb-btn" data-bkrestore="${esc(b.name)}">恢复</button>
+        </div>`).join('')}</div>`;
+      wrap.querySelectorAll('[data-bkrestore]').forEach((btn) => btn.addEventListener('click', async () => {
+        const name = btn.dataset.bkrestore;
+        if (!confirm(`确认从备份「${fmtBackupName(name)}」恢复数据？\n\n`
+          + `· 当前的数据会先自动备份一份（标记为「恢复前」），可以再退回来\n`
+          + `· 恢复后建议重启应用，确保所有界面读到新数据`)) return;
+        try {
+          const r = await api('/api/backup/restore', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+          });
+          toast(r.message || '已恢复', 'success');
+          await Promise.all([loadItems(), loadSettings(), loadCollections(), loadWorkbenchData(), loadModels()]);
+          renderModelSwitcher(); render(); loadBackupList();
+        } catch (e) { toast('恢复失败：' + e.message, 'error'); }
+      }));
+    } catch (e) {
+      wrap.innerHTML = `<div class="bk-empty">读取失败：${esc(e.message)}</div>`;
+    }
+  }
+
+  function bindBackupEvents() {
+    $('btnBkCreate')?.addEventListener('click', async () => {
+      try {
+        await api('/api/backup/create', { method: 'POST' });
+        toast('已创建备份', 'success');
+        loadBackupList();
+      } catch (e) { toast('备份失败：' + e.message, 'error'); }
+    });
+    $('btnBkExport')?.addEventListener('click', () => {
+      window.open('/api/backup/export', '_blank');
+      toast('正在导出整包数据…');
+    });
+    $('btnBkOpenDir')?.addEventListener('click', async () => {
+      try {
+        const d = await api('/api/backup/list');
+        if (!d.dataDir) { toast('未获取到数据目录', 'error'); return; }
+        // 交给后端在系统文件管理器中打开
+        await api('/api/open-datadir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir: d.dataDir }) });
+      } catch (e) { toast('打开目录失败：' + e.message, 'error'); }
+    });
   }
 
   async function loadWorkbenchData() {
@@ -3310,10 +5291,16 @@
     bindWorkbench();
     bindPdfReader();
     await Promise.all([loadItems(), loadSettings(), loadCollections(), loadWorkbenchData()]);
+    // 模型列表依赖 settings（其中 visionProfileId 用于「两段式看图」），必须放在其后，
+    // 否则首次渲染设置页时视觉模型下拉会显示成「自动」而丢掉用户已保存的指定。
+    await loadModels();
+    renderModelSwitcher();
     items.filter((i) => i.filename && !i.thumb).slice(0, 10).forEach((i) => ensureThumb(i));
     renderLibBar();
     switchView('home');
     maybeStartOnboarding();
+    // 新邮件提醒：启动后即开始轮询收件箱（未配置邮箱时接口会立即返回，无额外开销）
+    startMailNotify();
   }
 
   init();

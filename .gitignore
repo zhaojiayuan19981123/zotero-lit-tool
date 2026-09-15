@@ -15,6 +15,10 @@ build/icon.ico
 *.log
 test.pdf
 
+# 测试产物
+_vision_ui_test.png
+_vision_*_test_data/
+
 # 系统与编辑器
 .DS_Store
 Thumbs.db
