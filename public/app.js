@@ -109,7 +109,13 @@
   }
 
   async function loadItems() { items = await api('/api/literature'); render(); }
-  async function loadSettings() { settings = await api('/api/settings'); fillSettingsForm(); }
+  async function loadSettings() {
+    settings = await api('/api/settings');
+    fillSettingsForm();
+    // 启动时恢复已保存的主题配色（无保存则用默认紫）
+    renderThemePresets();
+    applyTheme(settings.themeColor || DEFAULT_THEME, false);
+  }
   async function loadCollections() { collections = await api('/api/collections'); renderLibBar(); }
 
   // ============ 文献中心：文库切换条 ============
@@ -613,6 +619,171 @@
     el.editModal.classList.add('hidden'); render(); renderDrawer(); toast('已保存', 'success');
   }
 
+  // ============ 世图科研下载助手 ============
+  let wlItems = [];            // 解析结果 [{ title, url, checked, done, imported }]
+  const wlImportedKeys = new Set(); // 本会话已导入标记（doi 或 title 小写）
+
+  // 解析「标题：xxx 链接地址：xxx」文本（标题与链接可跨行或同行，支持多条）
+  function parseWorldlibText(text) {
+    const out = [];
+    const re = /标题\s*[：:]\s*([\s\S]*?)链接地址\s*[：:]\s*(https?:\/\/[^\s]+)/gi;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const title = m[1].trim();
+      const url = m[2].trim().replace(/[),.;，。；]+$/, '');
+      if (title && url) out.push({ title, url, checked: true, done: false, imported: false });
+    }
+    return out;
+  }
+
+  function renderWlList() {
+    const box = $('wlList');
+    $('btnWlDownloadAll').disabled = !wlItems.length;
+    $('btnWlImport').disabled = !wlItems.length;
+    if (!wlItems.length) {
+      box.innerHTML = '<div class="wl-empty">尚未解析任何条目。把从世图科研复制的「标题 + 链接地址」文本粘贴到上方，点「解析列表」。</div>';
+      return;
+    }
+    box.innerHTML = wlItems.map((it, i) => {
+      const imported = it.imported || wlImportedKeys.has(it.title.toLowerCase());
+      return `<div class="wl-item">
+        <input type="checkbox" data-wlchk="${i}" ${it.checked ? 'checked' : ''} />
+        <span class="wl-item-title" title="${esc(it.title)}">${esc(it.title)}</span>
+        <span class="wl-item-url" title="${esc(it.url)}">${esc(it.url)}</span>
+        <span class="wl-item-actions">
+          ${it.done ? '<span class="wl-done">✓ 已下载</span>' : `<button class="tb-btn" data-wldl="${i}">⬇ 下载</button>`}
+          ${imported ? '<span class="wl-imported">📥 已导入</span>' : ''}
+        </span>
+      </div>`;
+    }).join('');
+    box.querySelectorAll('[data-wlchk]').forEach((c) => c.addEventListener('change', () => { wlItems[parseInt(c.dataset.wlchk, 10)].checked = c.checked; }));
+    box.querySelectorAll('[data-wldl]').forEach((b) => b.addEventListener('click', () => {
+      const it = wlItems[parseInt(b.dataset.wldl, 10)];
+      wlDownloadOne(it);
+      renderWlList();
+    }));
+  }
+
+  // 下载单条：跳转系统浏览器（Electron 主进程会把 window.open 转交系统浏览器），
+  // 由浏览器把 PDF 下载到默认下载文件夹
+  function wlDownloadOne(it) {
+    if (!it?.url) return;
+    window.open(it.url, '_blank');
+    it.done = true;
+  }
+
+  async function wlDownloadAll() {
+    const list = wlItems.filter((x) => !x.done);
+    if (!list.length) { toast('所有条目都已下载过', 'success'); return; }
+    toast(`开始下载 ${list.length} 篇，请在浏览器默认下载文件夹查看`, 'success');
+    for (const it of list) {
+      wlDownloadOne(it);
+      renderWlList();
+      await new Promise((r) => setTimeout(r, 700)); // 间隔打开，避免浏览器卡顿
+    }
+  }
+
+  async function wlImport() {
+    const sel = wlItems.filter((x) => x.checked && !x.imported);
+    if (!sel.length) { toast('请先勾选要导入的文献', 'error'); return; }
+    try {
+      const res = await api('/api/worldlib/import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: sel.map((x) => ({ title: x.title, url: x.url })) }),
+      });
+      (res.records || []).forEach((r) => wlImportedKeys.add(String(r.doi || r.title).toLowerCase()));
+      sel.forEach((x) => { x.imported = true; });
+      renderWlList();
+      await loadItems();
+      toast(`已导入 ${res.imported} 篇到文献中心${res.skipped?.length ? `，跳过 ${res.skipped.length} 篇重复` : ''}。可在文献中心上传对应 PDF 附件`, 'success');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  // ============ 主题配色（一键换色 + 自定义色值） ============
+  const DEFAULT_THEME = '#81308C';
+  const THEME_PRESETS = [
+    { name: '紫韵·默认', primary: '#81308C' },
+    { name: '马卡龙粉', primary: '#e8709a' },
+    { name: '莓果红', primary: '#c94f6d' },
+    { name: '蜜桃橙', primary: '#e07b39' },
+    { name: '琥珀金', primary: '#c98a12' },
+    { name: '薄荷绿', primary: '#2fa376' },
+    { name: '湖水青', primary: '#2a9db5' },
+    { name: '天空蓝', primary: '#3f7fd6' },
+    { name: '深邃蓝', primary: '#4a5fc1' },
+    { name: '葡萄紫', primary: '#7a5cd6' },
+    { name: '岩灰紫', primary: '#6d6a8f' },
+    { name: '石墨灰', primary: '#5b6470' },
+  ];
+
+  function hexToHsl(hex) {
+    const m = String(hex || '').trim().match(/^#?([0-9a-f]{6})$/i);
+    if (!m) return null;
+    const n = parseInt(m[1], 16);
+    const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0; const l = (max + min) / 2;
+    const d = max - min;
+    const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+    if (d !== 0) {
+      if (max === r) h = 60 * (((g - b) / d) % 6);
+      else if (max === g) h = 60 * ((b - r) / d + 2);
+      else h = 60 * ((r - g) / d + 4);
+    }
+    if (h < 0) h += 360;
+    return { h, s: s * 100, l: l * 100 };
+  }
+  function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const k = (n) => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    const to = (x) => Math.round(255 * x).toString(16).padStart(2, '0');
+    return '#' + to(f(0)) + to(f(8)) + to(f(4));
+  }
+
+  // 由主色推导整套协调的界面色（背景、边框、浅底都带同一色相）
+  function deriveTheme(primary) {
+    const c = hexToHsl(primary);
+    if (!c) return null;
+    const cl = (v) => Math.max(0, Math.min(100, v));
+    return {
+      '--primary': primary,
+      '--primary-hover': hslToHex(c.h, cl(c.s + 4), cl(c.l * 0.82)),
+      '--primary-light': hslToHex(c.h, cl(c.s - 6), cl(c.l * 1.18 + 6)),
+      '--primary-soft': hslToHex(c.h, cl(c.s * 0.55), 96),
+      '--bg': hslToHex(c.h, cl(c.s * 0.28), 97.6),
+      '--head-bg': hslToHex(c.h, cl(c.s * 0.22), 98.6),
+      '--border': hslToHex(c.h, cl(c.s * 0.30), 91),
+      '--gray-soft': hslToHex(c.h, cl(c.s * 0.16), 94.5),
+    };
+  }
+
+  function applyTheme(primary, persist) {
+    const vars = deriveTheme(primary);
+    if (!vars) { toast('色值格式不正确，请输入如 #81308C 的色号', 'error'); return; }
+    const root = document.documentElement;
+    for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
+    $('themeColorPicker').value = primary;
+    $('themeColorInput').value = primary;
+    document.querySelectorAll('.theme-swatch').forEach((s) => s.classList.toggle('active', s.dataset.color === primary.toLowerCase()));
+    if (persist) {
+      api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ themeColor: primary }) })
+        .then((s) => { settings = s; })
+        .catch(() => {});
+    }
+  }
+
+  function renderThemePresets() {
+    const box = $('themePresets');
+    box.innerHTML = THEME_PRESETS.map((t) => `
+      <div class="theme-swatch" data-color="${t.primary}" title="${esc(t.name)}（${t.primary}）">
+        <span class="theme-dot" style="background:${t.primary}"></span>
+        <span>${esc(t.name)}</span>
+      </div>`).join('');
+    box.querySelectorAll('.theme-swatch').forEach((s) => s.addEventListener('click', () => applyTheme(s.dataset.color, true)));
+  }
+
   // ============ 设置 ============
   function fillSettingsForm() {
     $('setProvider').value = settings.aiProvider || 'siliconflow';
@@ -730,6 +901,44 @@
     $('btnSettingsClose').addEventListener('click', () => el.settingsModal.classList.add('hidden'));
     $('btnSettingsCancel').addEventListener('click', () => el.settingsModal.classList.add('hidden'));
     $('btnSettingsSave').addEventListener('click', saveSettingsFromForm);
+
+    // 审稿意见一键翻译
+    $('btnTranslateReview').addEventListener('click', translateReview);
+    $('btnReviewTransToggle').addEventListener('click', () => {
+      const wrap = $('reviewTransWrap');
+      const expanded = wrap.classList.toggle('expanded');
+      $('btnReviewTransToggle').textContent = expanded ? '收起' : '展开全文';
+    });
+
+    // 世图科研下载助手
+    $('btnWlParse').addEventListener('click', () => {
+      const text = $('wlInput').value.trim();
+      if (!text) { toast('请先粘贴「标题 + 链接地址」文本', 'error'); return; }
+      const parsed = parseWorldlibText(text);
+      if (!parsed.length) { toast('未解析到有效条目，请检查格式（标题：… / 链接地址：…）', 'error'); return; }
+      // 与已有列表合并去重（按 url）
+      const exist = new Set(wlItems.map((x) => x.url));
+      let added = 0;
+      for (const it of parsed) {
+        if (exist.has(it.url)) continue;
+        if (wlImportedKeys.has(it.title.toLowerCase())) it.imported = true;
+        wlItems.push(it); added++;
+      }
+      renderWlList();
+      toast(`解析完成，新增 ${added} 条${parsed.length - added ? `（重复跳过 ${parsed.length - added} 条）` : ''}`, 'success');
+    });
+    $('btnWlClear').addEventListener('click', () => { $('wlInput').value = ''; wlItems = []; renderWlList(); });
+    $('btnWlDownloadAll').addEventListener('click', wlDownloadAll);
+    $('btnWlImport').addEventListener('click', wlImport);
+
+    // 主题配色
+    $('themeColorPicker').addEventListener('input', () => {
+      $('themeColorInput').value = $('themeColorPicker').value;
+    });
+    const applyThemeFromInput = () => applyTheme($('themeColorInput').value.trim(), true);
+    $('btnThemeApply').addEventListener('click', applyThemeFromInput);
+    $('themeColorInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') applyThemeFromInput(); });
+    $('btnThemeReset').addEventListener('click', () => applyTheme(DEFAULT_THEME, true));
     $('setProvider').addEventListener('change', () => {
       if ($('setProvider').value === 'siliconflow') {
         if (!$('setBaseURL').value.trim() || /api\.openai\.com/.test($('setBaseURL').value)) $('setBaseURL').value = 'https://api.siliconflow.cn/v1';
@@ -1232,7 +1441,7 @@
   async function switchView(v) {
     view = v;
     document.querySelectorAll('.nav-item[data-view]').forEach((n) => n.classList.toggle('active', n.dataset.view === v));
-    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', ai: 'viewAI' };
+    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', ai: 'viewAI', worldlib: 'viewWorldlib' };
     for (const [key, id] of Object.entries(map)) $(id).classList.toggle('hidden', key !== v);
     const isLib = v === 'library';
     $('searchInput').classList.toggle('hidden', !isLib);
@@ -1242,6 +1451,7 @@
     if (v === 'projects') renderProjects();
     if (v === 'tasks') renderTasks();
     if (v === 'papers') { renderPaperTab(); }
+    if (v === 'worldlib') renderWlList();
     if (v === 'notes') renderNotes();
     if (v === 'ai') {
       renderChatMeta();
@@ -1601,7 +1811,31 @@
     $('paperCards').classList.toggle('hidden', !isJournal);
     $('thesisCards').classList.toggle('hidden', isJournal);
     $('btnAddPaper').textContent = isJournal ? '＋ 添加小论文' : '＋ 添加大论文';
-    if (isJournal) renderJournalPapers(); else renderTheses();
+    if (isJournal) { renderJournalPapers(); autoFillPaperRanks(); } else renderTheses();
+  }
+
+  // ----- 期刊等级自动补查：卡片上有期刊名但没有等级时，后台逐个查询（easyScholar 限速，串行执行） -----
+  const wlRankFailed = new Set(); // 本次会话查询失败的期刊名（如未配置 Key），避免反复请求
+  let wlRankRunning = false;
+  async function autoFillPaperRanks() {
+    if (wlRankRunning) return;
+    const need = papers.filter((p) => p.kind === 'journal' && p.journal && !p.rank?.summary && !wlRankFailed.has(p.journal));
+    if (!need.length) return;
+    wlRankRunning = true;
+    for (const p of need) {
+      try {
+        const rank = await api('/api/journal-rank?name=' + encodeURIComponent(p.journal));
+        const updated = await api('/api/papers/' + p.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rank }) });
+        const idx = papers.findIndex((x) => x.id === p.id);
+        if (idx >= 0) papers[idx] = updated;
+        // 原地更新卡片上的等级区，不整表重渲染（避免闪烁）
+        const box = document.querySelector(`[data-rankfor="${p.id}"]`);
+        if (box) box.innerHTML = rankChips(rank.items);
+      } catch (e) {
+        wlRankFailed.add(p.journal);
+      }
+    }
+    wlRankRunning = false;
   }
 
   function statusBadge(s) {
@@ -1630,11 +1864,16 @@
     const t0 = todayStr();
     wrap.innerHTML = list.map((p) => {
       const proj = projects.find((x) => x.id === p.projectId);
-      const last = (p.history || [])[p.history.length - 1];
-      // 停留天数：距最近一次状态变更
+      const hist = p.history || [];
+      const last = hist[hist.length - 1];
+      // 停留天数 = 当前状态已持续的时间。
+      // 历史 ≥2 条 → 从最近一次状态变更日起算；
+      // 仅 1 条（状态自创建/投稿起从未变更）→ 从投稿日起算（更早者），避免刚补录动态就显示 0 天。
       let stay = '';
       if (last?.date) {
-        const d = Math.max(0, Math.floor((Date.now() - new Date(last.date + 'T00:00:00')) / 86400000));
+        let startDate = last.date;
+        if (hist.length <= 1 && p.submitDate && p.submitDate < last.date) startDate = p.submitDate;
+        const d = Math.max(0, Math.floor((Date.now() - new Date(startDate + 'T00:00:00')) / 86400000));
         stay = `<span class="meta-chip">⏱ 当前状态已停留 ${d} 天</span>`;
       }
       // 返修截止提醒
@@ -1648,9 +1887,8 @@
         }
       }
       const rank = p.rank?.summary
-        ? `<div class="paper-rank">${rankChips(p.rank.items)}</div>`
-        : (p.journal ? '<div class="paper-rank"><span class="cell-empty">编辑中可一键查询期刊等级</span></div>' : '');
-      const hist = p.history || [];
+        ? `<div class="paper-rank" data-rankfor="${p.id}">${rankChips(p.rank.items)}</div>`
+        : (p.journal ? `<div class="paper-rank" data-rankfor="${p.id}"><span class="cell-empty">期刊等级自动查询中…</span></div>` : '');
       return `<div class="card paper-card" data-paper="${p.id}" title="点击编辑">
         <div class="paper-card-top">
           <div class="paper-title">《${esc(p.title)}》</div>
@@ -1730,9 +1968,20 @@
     $('paperDeadline').value = p?.revisionDeadline || '';
     $('paperBackup').value = p?.backupJournals || '';
     $('paperNotes').value = p?.notes || '';
-    paperDraft = { history: JSON.parse(JSON.stringify(p?.history || [])), rank: p?.rank ? JSON.parse(JSON.stringify(p.rank)) : null };
+    paperDraft = { history: JSON.parse(JSON.stringify(p?.history || [])), rank: p?.rank ? JSON.parse(JSON.stringify(p.rank)) : null, reviewTranslation: p?.reviewTranslation || null };
     if (!paperDraft.history.length) paperDraft.history = [{ status: $('paperStatus').value, date: todayStr(), note: '创建论文' }];
     $('paperRankChips').innerHTML = paperDraft.rank?.summary ? rankChips(paperDraft.rank.items) : '';
+    // 已有译文则显示，否则收起
+    const rtWrap = $('reviewTransWrap');
+    if (paperDraft.reviewTranslation) {
+      rtWrap.classList.remove('hidden');
+      rtWrap.classList.remove('expanded');
+      $('reviewTransBody').textContent = paperDraft.reviewTranslation;
+      $('btnReviewTransToggle').textContent = '展开全文';
+    } else {
+      rtWrap.classList.add('hidden');
+      $('reviewTransBody').textContent = '';
+    }
     renderPaperHistory();
     $('btnPaperDelete').classList.toggle('hidden', !p);
     $('paperModal').classList.remove('hidden');
@@ -1778,6 +2027,32 @@
     }
   }
 
+  // ----- 审稿意见一键翻译：AI 把英文审稿意见整理成逐条中文（忠于原文，不增不减） -----
+  async function translateReview() {
+    const text = $('paperNotes').value.trim();
+    if (!text) { toast('请先在「审稿意见 / 备注」中粘贴英文审稿意见', 'error'); return; }
+    const btn = $('btnTranslateReview');
+    const wrap = $('reviewTransWrap');
+    const body = $('reviewTransBody');
+    btn.disabled = true; btn.textContent = '翻译中…';
+    wrap.classList.remove('hidden');
+    body.classList.add('rt-loading');
+    body.textContent = '正在用 AI 整理审稿意见（忠于原文、逐条中文、不增不减）…';
+    try {
+      const res = await api('/api/translate-review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+      body.classList.remove('rt-loading');
+      body.textContent = res.translation;
+      paperDraft.reviewTranslation = res.translation;
+      toast('翻译完成，保存论文后生效', 'success');
+    } catch (e) {
+      body.classList.remove('rt-loading');
+      body.textContent = '翻译失败：' + e.message;
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false; btn.textContent = '🈯 一键翻译';
+    }
+  }
+
   async function savePaperModal() {
     const title = $('paperTitle').value.trim();
     if (!title) { toast('请输入论文标题', 'error'); return; }
@@ -1792,6 +2067,7 @@
       projectId: $('paperProject').value || null,
       submitDate: $('paperSubmitDate').value, revisionDeadline: $('paperDeadline').value,
       backupJournals: $('paperBackup').value.trim(), notes: $('paperNotes').value,
+      reviewTranslation: paperDraft.reviewTranslation || '',
       history, rank: paperDraft.rank,
     };
     try {

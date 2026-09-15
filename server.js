@@ -594,6 +594,7 @@ export function createApp({
         projectId: req.body?.projectId || null,
         backupJournals: String(req.body?.backupJournals || '').trim().slice(0, 200),
         notes: String(req.body?.notes || '').slice(0, 2000),
+        reviewTranslation: String(req.body?.reviewTranslation || '').slice(0, 30000),
         history: normalizeHistory(req.body?.history?.length ? req.body.history : [{ status: paper.status, date: new Date().toISOString().slice(0, 10), note: '创建论文' }]),
       });
     } else {
@@ -630,6 +631,7 @@ export function createApp({
       if ('projectId' in req.body) patch.projectId = req.body.projectId || null;
       if ('backupJournals' in req.body) patch.backupJournals = String(req.body.backupJournals).trim().slice(0, 200);
       if ('notes' in req.body) patch.notes = String(req.body.notes).slice(0, 2000);
+      if ('reviewTranslation' in req.body) patch.reviewTranslation = String(req.body.reviewTranslation).slice(0, 30000);
       if ('rank' in req.body) patch.rank = req.body.rank && req.body.rank.summary ? { summary: String(req.body.rank.summary), items: Array.isArray(req.body.rank.items) ? req.body.rank.items : [] } : null;
       if (Array.isArray(req.body.history)) patch.history = normalizeHistory(req.body.history);
     } else {
@@ -920,6 +922,83 @@ export function createApp({
     if (full) conv.messages.push({ id: store.newId(), role: 'assistant', content: full, ts: new Date().toISOString() });
     conv.updatedAt = new Date().toISOString();
     try { store.saveConversations(convList); } catch (_) { /* ignore */ }
+  });
+
+  // ---------- 审稿意见一键翻译（LLM 整理为逐条中文，忠于原文） ----------
+  app.post('/api/translate-review', async (req, res) => {
+    const text = String(req.body?.text || '').trim();
+    if (!text) return res.status(400).json({ error: '请先粘贴审稿意见原文' });
+    const settings = store.getSettings();
+    if (settings.aiProvider === 'none' || !String(settings.apiKey || '').trim()) {
+      return res.status(400).json({ error: '请先在「AI 设置」中填写 API 密钥后再使用一键翻译' });
+    }
+    const base = (settings.baseURL || 'https://api.siliconflow.cn/v1').replace(/\/+$/, '');
+    try {
+      const up = await fetch(base + '/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.apiKey}` },
+        body: JSON.stringify({
+          model: settings.model || 'deepseek-ai/DeepSeek-V4-Flash',
+          messages: [
+            {
+              role: 'system',
+              content: '你是学术论文审稿意见翻译与整理助手。用户会提供一段（通常是英文的）审稿意见，请把它整理成一条一条的简体中文条目。硬性要求：\n' +
+                '1. 忠于原文：不得篡改、夸大、弱化、遗漏或自行补充任何内容；每条意见的完整含义、限定条件、语气（含批评的尖锐程度）必须原样保留；\n' +
+                '2. 逐条编号输出（1. 2. 3.…），一条独立意见编一个号；某条内部若有多个子要点，用「 - 」缩进列在其下；\n' +
+                '3. 意见中提到的术语、变量名、图表编号等保持准确，专业术语首次出现可括注英文原词；\n' +
+                '4. 如果原文明显分为多位审稿人（Reviewer #1 等），先输出「审稿人 X」小标题，再在其下逐条编号；\n' +
+                '5. 只输出整理后的中文条目，不要输出任何解释、总结、评价或与原文无关的内容。',
+            },
+            { role: 'user', content: '请整理以下审稿意见：\n\n' + text.slice(0, 12000) },
+          ],
+          stream: false,
+          temperature: 0.2,
+          max_tokens: 4096,
+        }),
+      });
+      if (!up.ok) {
+        const errText = await up.text().catch(() => '');
+        return res.status(502).json({ error: `AI 接口返回 ${up.status}：${clipText(errText, 200)}` });
+      }
+      const data = await up.json().catch(() => ({}));
+      const out = data.choices?.[0]?.message?.content?.trim();
+      if (!out) return res.status(502).json({ error: 'AI 未返回有效内容，请稍后重试' });
+      res.json({ translation: out });
+    } catch (e) {
+      res.status(502).json({ error: '翻译请求失败：' + e.message });
+    }
+  });
+
+  // ---------- 世图科研下载助手：批量导入到文献中心 ----------
+  app.post('/api/worldlib/import', (req, res) => {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!items.length) return res.status(400).json({ error: '没有可导入的文献' });
+    const list = store.listLiterature();
+    const existDoi = new Set(list.map((r) => String(r.doi || '').trim().toLowerCase()).filter(Boolean));
+    const existTitle = new Set(list.map((r) => String(r.title || '').trim().toLowerCase()).filter(Boolean));
+    let imported = 0;
+    const records = [];
+    const skipped = [];
+    for (const it of items.slice(0, 100)) {
+      const title = String(it?.title || '').trim().slice(0, 200);
+      const url = String(it?.url || '').trim();
+      if (!title) continue;
+      const doiKey = title.toLowerCase();
+      // 去重：DOI（标题即 DOI）或标题已存在则跳过
+      if (existDoi.has(doiKey) || existTitle.has(doiKey)) { skipped.push(title); continue; }
+      const rec = blankRecord();
+      rec.title = title;
+      rec.doi = /^10\.\d{4,9}\//.test(title) ? title : '';
+      rec.source = 'worldlib';
+      rec.worldlibUrl = url.slice(0, 500);
+      store.upsertLiterature(rec);
+      list.push(rec);
+      existTitle.add(doiKey);
+      if (rec.doi) existDoi.add(doiKey);
+      records.push(rec);
+      imported++;
+    }
+    res.json({ imported, skipped, records });
   });
 
   // ---------- 设置 ----------

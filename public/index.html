@@ -43,6 +43,7 @@
         <div class="nav-item" data-view="papers"><span class="nav-ico">📮</span>论文进度</div>
         <div class="nav-item" data-view="notes"><span class="nav-ico">🧪</span>研究记录</div>
         <div class="nav-item" data-view="ai"><span class="nav-ico">🤖</span>AI 助手</div>
+        <div class="nav-item" data-view="worldlib"><span class="nav-ico">🌍</span>世图下载助手</div>
       </nav>
       <div class="side-foot">
         <div class="side-progress-row"><span class="dot dot-done"></span>已阅读 <b id="cntDone">0</b></div>
@@ -243,6 +244,29 @@
         <div id="noteCards" class="note-cards"></div>
       </section>
 
+      <!-- ===== 视图：世图科研下载助手 ===== -->
+      <section id="viewWorldlib" class="view hidden">
+        <div class="worldlib-wrap">
+          <div class="wl-intro card">
+            <b>🌍 世图科研下载助手</b>
+            <p>把从世图科研（worldlib）复制的「标题 + 链接地址」文本粘贴到下方，自动解析成下载列表。支持这两种格式（可多选整段粘贴）：</p>
+            <pre>标题：10.1093/jcr/ucaf065
+链接地址：https://research.worldlib.site/tools/submit_ajax.ashx?action=getdownfile&...=xxx.pdf&uid=...</pre>
+            <p class="wl-hint">「⬇ 下载」会跳转系统浏览器，文件自动保存到浏览器默认下载文件夹；下载后可用「一键导入」把文献导入文献中心，再在文献中心上传 PDF 附件。</p>
+          </div>
+          <label class="field"><span>粘贴文本（支持一次粘贴多条）</span><textarea id="wlInput" rows="6" placeholder="标题：10.1093/jcr/ucaf065
+链接地址：https://research.worldlib.site/..."></textarea></label>
+          <div class="wl-actions">
+            <button class="btn btn-primary" id="btnWlParse">🔍 解析列表</button>
+            <button class="btn" id="btnWlClear">清空</button>
+            <span class="ob-spacer"></span>
+            <button class="btn" id="btnWlDownloadAll" disabled>⬇ 全部下载</button>
+            <button class="btn btn-primary" id="btnWlImport" disabled>📥 一键导入文献中心</button>
+          </div>
+          <div id="wlList" class="wl-list"></div>
+        </div>
+      </section>
+
       <!-- ===== 视图：AI 助手 ===== -->
       <section id="viewAI" class="view hidden">
         <div class="chat-wrap">
@@ -439,7 +463,17 @@
         </div>
         <div id="paperRankChips" class="rank-chips-row"></div>
         <label class="field"><span>备选期刊（拒稿后的转投梯队，用 / 分隔）</span><input id="paperBackup" class="tb-input" placeholder="如：中国工业经济 / 世界经济 / 财经研究" /></label>
-        <label class="field"><span>审稿意见 / 备注</span><textarea id="paperNotes" rows="2" placeholder="记录审稿人核心意见、修改要点、版面费等信息…"></textarea></label>
+        <label class="field"><span>审稿意见 / 备注（可粘贴英文审稿意见）</span>
+          <div class="rank-input-row">
+            <textarea id="paperNotes" rows="3" placeholder="记录审稿人核心意见、修改要点、版面费等信息…"></textarea>
+            <button class="tb-btn" id="btnTranslateReview" title="用 AI 把英文审稿意见整理成逐条中文（忠于原文，不增不减）">🈯 一键翻译</button>
+          </div>
+        </label>
+        <div id="reviewTransWrap" class="review-trans-wrap hidden">
+          <div class="review-trans-head"><b>🈯 审稿意见中文整理</b><span class="side-count">AI 整理 · 忠于原文</span></div>
+          <div id="reviewTransBody" class="review-trans-body"></div>
+          <button class="btn" id="btnReviewTransToggle" title="展开 / 收起">展开全文</button>
+        </div>
         <div class="field-sep"></div>
         <div class="paper-hist-head"><b>📮 投稿时间线</b><span class="side-count" id="paperHistCount">0</span></div>
         <div id="paperHistory" class="paper-history"></div>
@@ -531,6 +565,19 @@
           </select>
         </label>
         <label class="field"><span>DeepL API Key（选 DeepL 时填写）</span><input id="setDeeplKey" class="tb-input" type="password" placeholder="DeepL 密钥，留空则不用 DeepL" /></label>
+        <div class="field-sep"></div>
+        <p class="modal-desc" style="background:#f3eafd">🎨 主题配色（一键换色，全界面生效；也可以直接输入任意色值自定义）。</p>
+        <label class="field"><span>预设配色</span>
+          <div id="themePresets" class="theme-presets"></div>
+        </label>
+        <label class="field"><span>自定义主色（点色块取色或直接输入色号，如 #81308C）</span>
+          <div class="rank-input-row">
+            <input type="color" id="themeColorPicker" class="theme-color-picker" value="#81308C" />
+            <input id="themeColorInput" class="tb-input" placeholder="#81308C" />
+            <button class="tb-btn" id="btnThemeApply">应用</button>
+            <button class="tb-btn" id="btnThemeReset">恢复默认</button>
+          </div>
+        </label>
         <div class="field-sep"></div>
         <p class="modal-desc" style="background:#e6f6ec">数据保存位置（默认存在<b>安装目录下</b>，与软件放一起，方便备份迁移；装在系统盘不可写时会自动存到用户数据目录）。</p>
         <label class="field"><span>数据保存目录</span><input id="setDataDir" class="tb-input" placeholder="留空 = 安装目录下；例如 D:\文献库" /></label>
