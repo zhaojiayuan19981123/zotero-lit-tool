@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>一站式科研终端</title>
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <img src="favicon.png" alt="" class="brand-logo-img" />
+      <h1>一站式科研终端</h1>
+      <span class="ai-badge">AI</span>
+    </div>
+    <div class="topbar-actions">
+      <input type="search" id="searchInput" class="search" placeholder="🔍 搜索标题 / 作者 / 关键词…" />
+      <button id="btnParseAll" class="btn btn-primary">▶ 解析全部</button>
+      <button id="btnExport" class="btn">导出</button>
+      <button id="btnSettings" class="btn">⚙ AI 设置</button>
+    </div>
+  </header>
+
+  <!-- 工作区：应用侧边栏 + 主区 -->
+  <div class="workbench">
+    <!-- 应用级侧边栏 -->
+    <aside class="sidebar" id="sidebar">
+      <div class="profile-card" id="profileCard" title="点击编辑个人资料">
+        <span class="profile-avatar" id="profileAvatar">🎓</span>
+        <div class="profile-info">
+          <b id="profileName">研究生</b>
+          <span id="profileSub">完善个人资料</span>
+        </div>
+        <span class="profile-edit">✎</span>
+      </div>
+      <nav class="side-nav">
+        <div class="nav-item active" data-view="home"><span class="nav-ico">🏠</span>首页</div>
+        <div class="nav-item" data-view="library"><span class="nav-ico">📚</span>文献中心</div>
+        <div class="nav-item" data-view="projects"><span class="nav-ico">📂</span>项目管理</div>
+        <div class="nav-item" data-view="tasks"><span class="nav-ico">✅</span>任务安排</div>
+        <div class="nav-item" data-view="papers"><span class="nav-ico">📮</span>论文进度</div>
+        <div class="nav-item" data-view="notes"><span class="nav-ico">🧪</span>研究记录</div>
+        <div class="nav-item" data-view="ai"><span class="nav-ico">🤖</span>AI 助手</div>
+      </nav>
+      <div class="side-foot">
+        <div class="side-progress-row"><span class="dot dot-done"></span>已阅读 <b id="cntDone">0</b></div>
+        <div class="side-progress-row"><span class="dot dot-reading"></span>阅读中 <b id="cntReading">0</b></div>
+        <div class="side-progress-row"><span class="dot dot-unread"></span>未阅读 <b id="cntUnread">0</b></div>
+        <button id="btnNavSettings" class="btn btn-ghost w100" style="margin-top:6px">⚙ 设置</button>
+      </div>
+    </aside>
+
+    <!-- 主区域 -->
+    <div class="main-area">
+
+      <!-- ===== 视图：首页 Dashboard ===== -->
+      <section id="viewHome" class="view">
+        <div class="home-banner">
+          <div class="hb-left">
+            <span class="hb-avatar" id="homeAvatar">🎓</span>
+            <div class="hb-info">
+              <div class="hb-greet" id="homeGreet">你好，研究生</div>
+              <div class="hb-sub" id="homeSub">完善个人资料后显示学校 / 专业 / 年级</div>
+              <div class="hb-progress">
+                <span>学业进度</span>
+                <div class="hb-bar"><span id="homeProgressBar" style="width:0%"></span></div>
+                <b id="homeProgressLabel">0%</b>
+              </div>
+            </div>
+          </div>
+          <div class="hb-right">
+            <button class="btn hb-edit" id="btnHomeProfile">✎ 编辑资料</button>
+            <div class="hb-stats">
+              <div class="hb-stat"><b id="hbLit">0</b><span>📚 文献</span></div>
+              <div class="hb-stat"><b id="hbJournal">0</b><span>📮 小论文</span></div>
+              <div class="hb-stat"><b id="hbUnderway">0</b><span>🚀 在投 / 返修</span></div>
+              <div class="hb-stat"><b id="hbToday">0</b><span>⏰ 今日待办</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="home-mid">
+          <div class="card home-card home-cal">
+            <div class="card-head">
+              <b>📅 科研日历</b>
+              <div class="cal-nav">
+                <button class="cal-nav-btn" id="calPrev" title="上个月">‹</button>
+                <b id="calTitle">2026年9月</b>
+                <button class="cal-nav-btn" id="calNext" title="下个月">›</button>
+                <button class="cal-nav-btn cal-today-btn" id="calToday">今天</button>
+              </div>
+            </div>
+            <div class="cal-week">
+              <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span class="cal-we">六</span><span class="cal-we">日</span>
+            </div>
+            <div id="calGrid" class="cal-grid"></div>
+            <div id="calDayEvents" class="cal-day-events"><div class="pr-loading">点击日期查看当天安排</div></div>
+          </div>
+
+          <div class="card home-card home-today">
+            <div class="card-head"><b>☀ 今日工作计划</b><span class="side-count" id="todayDate"></span></div>
+            <div id="todayList" class="check-list"></div>
+            <div class="quick-add">
+              <input id="todayInput" class="tb-input" placeholder="＋ 添加今日任务，回车确认…" />
+              <button class="btn btn-primary" id="btnTodayAdd">添加</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="home-bottom">
+          <div class="card home-card home-feed">
+            <div class="card-head"><b>📡 科研动态</b><span class="side-count">自动生成</span></div>
+            <div id="feedList" class="feed-list"></div>
+          </div>
+
+          <div class="card home-card home-countdown">
+            <div class="card-head"><b>⏳ 重要节点倒计时</b></div>
+            <div id="countdownList" class="countdown-list"></div>
+          </div>
+
+          <div class="card home-card home-reading">
+            <div class="card-head"><b>📖 本周阅读进度</b><button class="btn-ghost as-link" data-goto-lib>去文献中心 →</button></div>
+            <div id="readingList" class="reading-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 视图：文献中心（原有表格 + 文库切换条） ===== -->
+      <section id="viewLibrary" class="view hidden">
+        <div class="lib-bar" id="libBar">
+          <div class="lib-root-chip active" data-rootlib="empirical">
+            <span>🧪</span><b>实证类文库</b><span class="side-count" data-rootcount="empirical"></span>
+          </div>
+          <div class="lib-root-chip" data-rootlib="model">
+            <span>🧮</span><b>模型类文库</b><span class="side-count" data-rootcount="model"></span>
+          </div>
+          <button class="tb-btn" id="btnAddCol">＋ 新建分类</button>
+          <span class="lib-hint">拖动文献行到分类上即可归类</span>
+        </div>
+        <div class="col-chips" id="colChips"></div>
+
+        <nav class="view-tabs">
+          <div class="tab active" data-tab="all">📄 全部</div>
+          <div class="tab" data-tab="未阅读">🕓 未阅读</div>
+          <div class="tab" data-tab="阅读中">📖 阅读中</div>
+          <div class="tab" data-tab="已阅读">✅ 已阅读</div>
+          <div class="tab-spacer"></div>
+          <span id="statBadge" class="stat-badge"></span>
+        </nav>
+
+        <div class="toolbar">
+          <button id="btnAddRecord" class="tb-btn accent">＋ 添加记录</button>
+          <button id="btnUploadTop" class="tb-btn accent">⬆ 批量上传 PDF</button>
+          <div class="tb-sep"></div>
+          <button id="btnFields" class="tb-btn">▦ 字段配置</button>
+          <select id="statusFilter" class="tb-select">
+            <option value="all">解析状态：全部</option>
+            <option value="done">已完成</option>
+            <option value="parsing">解析中</option>
+            <option value="pending">待解析</option>
+            <option value="error">失败</option>
+          </select>
+          <select id="sortField" class="tb-select">
+            <option value="createdAt">默认排序</option>
+            <option value="year">按年份</option>
+            <option value="title">按标题</option>
+            <option value="rating">按评级</option>
+            <option value="journal">按期刊</option>
+          </select>
+          <button id="btnSortOrder" class="tb-btn">↓ 降序</button>
+          <div class="tb-sep"></div>
+          <span class="tb-label">行高</span>
+          <div class="rh-group">
+            <button data-rh="s" class="rh-btn" title="小行高">▁</button>
+            <button data-rh="m" class="rh-btn active" title="中行高">▄</button>
+            <button data-rh="l" class="rh-btn" title="大行高">█</button>
+          </div>
+        </div>
+
+        <div id="fieldsPop" class="pop hidden"></div>
+
+        <div class="grid-wrap rh-m" id="gridWrap">
+          <table class="grid">
+            <thead><tr id="theadRow"></tr></thead>
+            <tbody id="tbody"></tbody>
+          </table>
+          <div id="emptyState" class="empty-state hidden">
+            <div class="empty-icon">🗂️</div>
+            <p>当前文库暂无文献</p>
+            <p class="empty-hint">点击「⬆ 批量上传 PDF」或把 PDF 直接拖入窗口；也可拖动行到上方分类进行归类</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 视图：项目管理 ===== -->
+      <section id="viewProjects" class="view hidden">
+        <div class="view-toolbar">
+          <button class="tb-btn accent" id="btnAddProject">＋ 新建项目</button>
+          <span class="tb-label">项目、文献、任务、实验记录互相联动</span>
+        </div>
+        <div id="projCards" class="proj-cards"></div>
+      </section>
+
+      <!-- ===== 视图：任务安排 ===== -->
+      <section id="viewTasks" class="view hidden">
+        <div class="card task-add card-plain">
+          <input id="taskInput" class="tb-input" placeholder="＋ 输入任务内容，回车快速添加…" />
+          <select id="taskProject" class="tb-select"></select>
+          <select id="taskPriority" class="tb-select">
+            <option value="高">🔥 高优先</option>
+            <option value="中" selected>🔸 中优先</option>
+            <option value="低">· 低优先</option>
+          </select>
+          <input type="date" id="taskDue" class="tb-select" />
+          <button class="btn btn-primary" id="btnTaskAdd">添加任务</button>
+        </div>
+        <div id="taskGroups" class="task-groups"></div>
+      </section>
+
+      <!-- ===== 视图：论文进度（小论文投稿管理 + 大论文进度） ===== -->
+      <section id="viewPapers" class="view hidden">
+        <div class="view-toolbar">
+          <div class="seg-tabs" id="paperTabs">
+            <button class="seg-tab active" data-ptab="journal">📮 小论文 · 投稿管理</button>
+            <button class="seg-tab" data-ptab="thesis">🎓 大论文 · 学位论文进度</button>
+          </div>
+          <div class="tb-spacer"></div>
+          <button class="tb-btn accent" id="btnAddPaper">＋ 添加小论文</button>
+        </div>
+        <div id="paperCards" class="paper-cards"></div>
+        <div id="thesisCards" class="paper-cards hidden"></div>
+      </section>
+
+      <!-- ===== 视图：研究记录 ===== -->
+      <section id="viewNotes" class="view hidden">
+        <div class="view-toolbar">
+          <button class="tb-btn accent" id="btnAddNote">＋ 新建研究记录</button>
+          <select id="noteProjFilter" class="tb-select"><option value="">全部项目</option></select>
+          <span class="tb-label">支持 Study 划分与经管实证研究模板</span>
+        </div>
+        <div id="noteCards" class="note-cards"></div>
+      </section>
+
+      <!-- ===== 视图：AI 助手 ===== -->
+      <section id="viewAI" class="view hidden">
+        <div class="chat-wrap">
+          <aside class="chat-conv">
+            <button class="btn btn-primary w100" id="btnNewChat">＋ 新对话</button>
+            <div id="convList" class="conv-list"></div>
+          </aside>
+          <div class="chat-main">
+            <div id="chatMsgs" class="chat-msgs">
+              <div class="chat-welcome">
+                <div class="chat-welcome-ico">🤖</div>
+                <b>AI 科研助手已就绪</b>
+                <p>基于你的文献知识库、项目与任务进行定制化对话。<br />支持多会话与上下文记忆，试试左侧快捷指令，或直接输入问题。</p>
+              </div>
+            </div>
+            <div class="chat-input-row">
+              <textarea id="chatInput" rows="2" placeholder="输入问题，Enter 发送 / Shift+Enter 换行…"></textarea>
+              <button id="btnChatSend" class="btn btn-primary">发送</button>
+            </div>
+          </div>
+          <aside class="chat-side">
+            <div class="card chat-kb">
+              <div class="card-head"><b>🧠 知识库</b></div>
+              <div class="kb-row">📚 已解析文献 <b id="kbLit">0</b> 篇</div>
+              <div class="kb-row">📂 科研项目 <b id="kbProj">0</b> 个</div>
+              <div class="kb-row">📮 小论文 <b id="kbPaper">0</b> 篇</div>
+              <div class="kb-row">🎓 大论文 <b id="kbThesis">0</b> 项</div>
+              <div class="kb-row">🧪 研究记录 <b id="kbNote">0</b> 条</div>
+              <div class="kb-tip">对话时会自动检索与你问题最相关的文献摘要、项目、任务与论文投稿状态作为上下文回答。同一会话内支持上下文追问，过长历史会自动压缩为摘要。</div>
+            </div>
+            <div class="card chat-quick">
+              <div class="card-head"><b>⚡ 快捷指令</b></div>
+              <button class="quick-btn" data-quick="innovation">💡 构思论文创新点</button>
+              <button class="quick-btn" data-quick="submission">📮 投稿策略与期刊推荐</button>
+              <button class="quick-btn" data-quick="thesis">🎓 大论文进度诊断</button>
+              <button class="quick-btn" data-quick="weekly">📄 生成本周科研周报</button>
+              <button class="quick-btn" data-quick="gap">🔍 寻找研究空白</button>
+              <button class="quick-btn" data-quick="review">📚 文献综述思路</button>
+              <button class="quick-btn" data-quick="plan">🗓 制定两周科研计划</button>
+            </div>
+            <button class="btn w100" id="btnClearChat">🗑 清空全部对话</button>
+          </aside>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <input type="file" id="fileInput" accept=".pdf,application/pdf" multiple hidden />
+  <input type="file" id="cellFileInput" accept=".pdf,application/pdf" hidden />
+
+  <!-- 右侧阅读抽屉 -->
+  <div id="drawerMask" class="drawer-mask hidden"></div>
+  <aside id="drawer" class="drawer hidden">
+    <div class="drawer-head">
+      <button id="btnDrawerClose" class="btn">← 返回表格</button>
+      <button id="btnPrev" class="btn btn-ghost">‹ 上一篇</button>
+      <button id="btnNext" class="btn btn-ghost">下一篇 ›</button>
+      <span id="drawerFilename" class="drawer-filename"></span>
+      <div class="drawer-head-right">
+        <button id="btnReparse" class="btn">↻ 重新解析</button>
+        <button id="btnEdit" class="btn">✎ 编辑</button>
+        <button id="btnRead" class="btn btn-primary">📖 阅读 PDF</button>
+        <button id="btnOpenPdf" class="btn">↗ 原 PDF</button>
+      </div>
+    </div>
+    <div id="drawerBody" class="drawer-body"></div>
+  </aside>
+
+  <!-- 分类新建/重命名弹窗 -->
+  <div id="colModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog" style="width:360px">
+      <div class="modal-head"><h3 id="colModalTitle">新建分类</h3><button class="modal-close" id="btnColClose">✕</button></div>
+      <div class="modal-body">
+        <label class="field"><span>分类名称</span><input id="colModalInput" class="tb-input w100" placeholder="例如：技术、算法、咨询…" /></label>
+      </div>
+      <div class="modal-foot">
+        <button id="btnColSave" class="btn btn-primary">保存</button>
+        <button id="btnColCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 个人资料弹窗（用户名等） -->
+  <div id="profileModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog" style="width:400px">
+      <div class="modal-head"><h3>个人资料</h3><button class="modal-close" id="btnProfileClose">✕</button></div>
+      <div class="modal-body">
+        <label class="field"><span>用户名（显示名）</span><input id="profName" class="tb-input w100" placeholder="例如：姚同学" /></label>
+        <div class="prof-grid">
+          <label class="field"><span>学校 / 院系</span><input id="profSchool" class="tb-input" placeholder="如：XX大学 经济学院" /></label>
+          <label class="field"><span>专业方向</span><input id="profField" class="tb-input" placeholder="如：应用经济学 / 工商管理" /></label>
+          <label class="field"><span>年级</span><input id="profGrade" class="tb-input" placeholder="如：硕士二年级" /></label>
+          <label class="field"><span>头像 Emoji</span><input id="profAvatar" class="tb-input" placeholder="🎓" maxlength="4" /></label>
+        </div>
+        <label class="field"><span>学业进度：<b id="profProgressVal">0</b>%（毕业论文 / 学分综合）</span>
+          <input type="range" id="profProgress" min="0" max="100" value="0" style="width:100%" />
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button id="btnProfileSave" class="btn btn-primary">保存</button>
+        <button id="btnProfileCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 项目新建/编辑弹窗 -->
+  <div id="projModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog modal-wide">
+      <div class="modal-head"><h3 id="projModalTitle">新建项目</h3><button class="modal-close" id="btnProjClose">✕</button></div>
+      <div class="modal-body">
+        <div class="prof-grid">
+          <label class="field"><span>项目名称 *</span><input id="projName" class="tb-input" placeholder="如：基于机器学习的材料性能预测研究" /></label>
+          <label class="field"><span>导师</span><input id="projAdvisor" class="tb-input" placeholder="如：王教授" /></label>
+          <label class="field"><span>研究领域</span><input id="projField" class="tb-input" placeholder="如：数字经济与绿色创新" /></label>
+          <label class="field"><span>状态</span>
+            <select id="projStatus" class="tb-select">
+              <option>进行中</option><option>已完成</option><option>暂停</option>
+            </select>
+          </label>
+          <label class="field"><span>开始日期</span><input type="date" id="projStart" class="tb-select" /></label>
+          <label class="field"><span>预计结束</span><input type="date" id="projEnd" class="tb-select" /></label>
+        </div>
+        <label class="field"><span>项目进度：<b id="projProgressVal">0</b>%</span>
+          <input type="range" id="projProgress" min="0" max="100" value="0" style="width:100%" />
+        </label>
+        <label class="field"><span>项目描述</span><textarea id="projDesc" rows="3" placeholder="一句话描述研究目标…"></textarea></label>
+        <label class="field"><span>关联文献（从文献中心选择）</span>
+          <div id="projLitPick" class="lit-pick"></div>
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button id="btnProjDelete" class="btn" style="color:var(--red);margin-right:auto">🗑 删除项目</button>
+        <button id="btnProjSave" class="btn btn-primary">保存</button>
+        <button id="btnProjCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 研究记录新建/编辑弹窗（经管版：Study 划分） -->
+  <div id="noteModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog modal-wide">
+      <div class="modal-head"><h3 id="noteModalTitle">新建研究记录</h3><button class="modal-close" id="btnNoteClose">✕</button></div>
+      <div class="modal-body">
+        <div class="prof-grid">
+          <label class="field"><span>记录标题 *</span><input id="noteTitle" class="tb-input" placeholder="如：基准回归结果（数字金融 → 创新）" /></label>
+          <label class="field"><span>关联项目</span><select id="noteProject" class="tb-select"></select></label>
+          <label class="field"><span>关联小论文</span><select id="notePaper" class="tb-select"></select></label>
+          <label class="field"><span>Study 划分（一篇论文拆多个研究时使用）</span>
+            <select id="noteStudy" class="tb-select">
+              <option value="">不划分</option>
+              <option>Study 1</option><option>Study 2</option><option>Study 3</option>
+              <option>Study 4</option><option>Study 5</option>
+            </select>
+          </label>
+        </div>
+        <label class="field"><span>记录内容（Markdown 式要点）</span>
+          <textarea id="noteContent" rows="10" placeholder="研究问题、假设、数据、模型、结果与下一步…" style="min-height:220px"></textarea>
+        </label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" id="btnNoteTemplateEcon">📋 插入经管实证研究模板</button>
+          <button class="btn" id="btnNoteTemplate">📋 通用实验 SOP 模板</button>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button id="btnNoteSave" class="btn btn-primary">保存</button>
+        <button id="btnNoteCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 小论文（投稿管理）新建/编辑弹窗 -->
+  <div id="paperModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog modal-wide">
+      <div class="modal-head"><h3 id="paperModalTitle">添加小论文</h3><button class="modal-close" id="btnPaperClose">✕</button></div>
+      <div class="modal-body">
+        <div class="prof-grid">
+          <label class="field"><span>论文标题 *</span><input id="paperTitle" class="tb-input" placeholder="如：数字普惠金融对企业创新的影响研究" /></label>
+          <label class="field"><span>目标期刊（拒稿转投时更新）</span>
+            <div class="rank-input-row">
+              <input id="paperJournal" class="tb-input" placeholder="如：经济研究 / 管理世界 / Journal of Banking & Finance" />
+              <button class="tb-btn" id="btnQueryRank" title="用 easyScholar 查询期刊等级">🏅 查等级</button>
+            </div>
+          </label>
+          <label class="field"><span>当前状态</span><select id="paperStatus" class="tb-select"></select></label>
+          <label class="field"><span>关联项目</span><select id="paperProject" class="tb-select"></select></label>
+          <label class="field"><span>投稿日期</span><input type="date" id="paperSubmitDate" class="tb-select" /></label>
+          <label class="field"><span>返修截止（临近变红提醒）</span><input type="date" id="paperDeadline" class="tb-select" /></label>
+        </div>
+        <div id="paperRankChips" class="rank-chips-row"></div>
+        <label class="field"><span>备选期刊（拒稿后的转投梯队，用 / 分隔）</span><input id="paperBackup" class="tb-input" placeholder="如：中国工业经济 / 世界经济 / 财经研究" /></label>
+        <label class="field"><span>审稿意见 / 备注</span><textarea id="paperNotes" rows="2" placeholder="记录审稿人核心意见、修改要点、版面费等信息…"></textarea></label>
+        <div class="field-sep"></div>
+        <div class="paper-hist-head"><b>📮 投稿时间线</b><span class="side-count" id="paperHistCount">0</span></div>
+        <div id="paperHistory" class="paper-history"></div>
+        <div class="hist-add">
+          <select id="histStatus" class="tb-select"></select>
+          <input type="date" id="histDate" class="tb-select" />
+          <input id="histNote" class="tb-input" placeholder="动态说明，如：收到外审意见，小修" />
+          <button class="btn btn-primary" id="btnHistAdd">记录</button>
+        </div>
+        <p class="modal-desc">时间线自动留痕。被拒稿后：把状态改回「投稿中」并更换目标期刊，即可在同一篇论文下记录完整转投历史。</p>
+      </div>
+      <div class="modal-foot">
+        <button id="btnPaperDelete" class="btn" style="color:var(--red);margin-right:auto">🗑 删除</button>
+        <button id="btnPaperSave" class="btn btn-primary">保存</button>
+        <button id="btnPaperCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 大论文（学位论文）新建/编辑弹窗 -->
+  <div id="thesisModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog modal-wide">
+      <div class="modal-head"><h3 id="thesisModalTitle">添加大论文</h3><button class="modal-close" id="btnThesisClose">✕</button></div>
+      <div class="modal-body">
+        <div class="prof-grid">
+          <label class="field"><span>学位论文题目 *</span><input id="thesisTitle" class="tb-input" placeholder="如：数字经济对区域绿色创新效率的影响研究" /></label>
+          <label class="field"><span>学位</span><select id="thesisDegree" class="tb-select"><option>硕士</option><option>博士</option></select></label>
+          <label class="field"><span>当前阶段</span><select id="thesisStage" class="tb-select"></select></label>
+          <label class="field"><span>计划完成（答辩）日期</span><input type="date" id="thesisTarget" class="tb-select" /></label>
+        </div>
+        <div class="field-sep"></div>
+        <div class="paper-hist-head"><b>📑 章节清单</b><span class="side-count" id="thesisChapCount">0</span></div>
+        <div id="thesisChapters" class="chap-list"></div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <button class="tb-btn" id="btnChapAdd">＋ 添加章节</button>
+          <button class="tb-btn" id="btnChapPreset" title="插入经管硕士论文常用五章框架">📋 经管常用章节框架</button>
+        </div>
+        <div class="field-sep"></div>
+        <div class="paper-hist-head"><b>🏁 重要节点</b><span class="side-count" id="thesisMsCount">0</span></div>
+        <div id="thesisMilestones" class="ms-list"></div>
+        <button class="tb-btn" id="btnMsAdd" style="margin-top:6px">＋ 添加节点</button>
+        <label class="field" style="margin-top:10px"><span>备注</span><textarea id="thesisNotes" rows="2" placeholder="导师要求、盲审时间安排等…"></textarea></label>
+      </div>
+      <div class="modal-foot">
+        <button id="btnThesisDelete" class="btn" style="color:var(--red);margin-right:auto">🗑 删除</button>
+        <button id="btnThesisSave" class="btn btn-primary">保存</button>
+        <button id="btnThesisCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI 设置弹窗 -->
+  <div id="settingsModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog">
+      <div class="modal-head">
+        <h3>AI 解析设置</h3>
+        <button class="modal-close" id="btnSettingsClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">配置大模型后可获得精准的「研究背景 / 方法 / 结果 / 创新点」分点解析；同一密钥同时驱动 AI 助手对话与划词翻译。配置 easyScholar 密钥可自动查询期刊等级。</p>
+        <label class="field"><span>AI 提供方</span>
+          <select id="setProvider" class="tb-select w100">
+            <option value="siliconflow">硅基流动 SiliconFlow（DeepSeek）</option>
+            <option value="openai">其他 OpenAI 兼容接口</option>
+            <option value="none">不使用 AI（规则离线提取）</option>
+          </select>
+        </label>
+        <label class="field"><span>接口地址 Base URL</span><input id="setBaseURL" class="tb-input" placeholder="https://api.siliconflow.cn/v1" /></label>
+        <label class="field"><span>API 密钥（硅基流动，用户自填）</span><input id="setApiKey" class="tb-input" type="password" placeholder="sk-..." /></label>
+        <label class="field"><span>模型名称</span><input id="setModel" class="tb-input" placeholder="deepseek-ai/DeepSeek-V4-Flash" /></label>
+        <label class="field"><span>提取结果语言</span>
+          <select id="setLanguage" class="tb-select w100">
+            <option value="zh">简体中文</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+        <div class="field-sep"></div>
+        <p class="modal-desc" style="background:#fff7e6">easyScholar 期刊等级查询（免费开放接口，需 SecretKey，仅保留中科院/新锐/ABS/SSCI 分区）。</p>
+        <label class="field"><span>easyScholar SecretKey</span><input id="setEasyKey" class="tb-input" type="password" placeholder="在 easyScholar 官网获取，留空则不查询等级" /></label>
+        <div class="field-sep"></div>
+        <p class="modal-desc" style="background:#f6ecf8">划词翻译（PDF 阅读器内选中文字自动翻译）。</p>
+        <label class="field"><span>翻译提供方</span>
+          <select id="setTranslateProvider" class="tb-select w100">
+            <option value="siliconflow">硅基流动 DeepSeek（用上方 API Key）</option>
+            <option value="deepl">DeepL（需单独 Key）</option>
+            <option value="free">免费接口（MyMemory，无需密钥）</option>
+          </select>
+        </label>
+        <label class="field"><span>DeepL API Key（选 DeepL 时填写）</span><input id="setDeeplKey" class="tb-input" type="password" placeholder="DeepL 密钥，留空则不用 DeepL" /></label>
+        <div class="field-sep"></div>
+        <p class="modal-desc" style="background:#e6f6ec">数据保存位置（默认存在<b>安装目录下</b>，与软件放一起，方便备份迁移；装在系统盘不可写时会自动存到用户数据目录）。</p>
+        <label class="field"><span>数据保存目录</span><input id="setDataDir" class="tb-input" placeholder="留空 = 安装目录下；例如 D:\文献库" /></label>
+      </div>
+      <div class="modal-foot">
+        <button id="btnReplayOnboarding" class="btn btn-ghost">🎓 重新查看新手引导</button>
+        <span class="ob-spacer"></span>
+        <button id="btnSettingsSave" class="btn btn-primary">保存设置</button>
+        <button id="btnSettingsCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 编辑弹窗 -->
+  <div id="editModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog modal-wide">
+      <div class="modal-head">
+        <h3>编辑文献信息</h3>
+        <button class="modal-close" id="btnEditClose">✕</button>
+      </div>
+      <div class="modal-body" id="editBody"></div>
+      <div class="modal-foot">
+        <button id="btnEditSave" class="btn btn-primary">保存</button>
+        <button id="btnEditCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- 拖拽上传覆盖层 -->
+  <div id="dragOverlay" class="drag-overlay hidden">
+    <div class="drag-overlay-box">📄 松开鼠标，添加 PDF 文献</div>
+  </div>
+
+  <!-- PDF 阅读器：左 PDF 划词 + 右翻译面板 -->
+  <div id="pdfReader" class="pdf-reader hidden">
+    <div class="pr-toolbar">
+      <button id="prClose" class="btn">← 返回</button>
+      <span id="prFilename" class="pr-filename"></span>
+      <div class="pr-nav">
+        <input type="number" id="prPageInput" class="pr-page-input" value="1" min="1" />
+        <span class="pr-page-total">/ <span id="prPageTotal">1</span> 页</span>
+      </div>
+      <div class="pr-tools">
+        <button id="prZoomOut" class="btn btn-ghost" title="缩小">－</button>
+        <span id="prZoomLabel" class="pr-zoom-label">140%</span>
+        <button id="prZoomIn" class="btn btn-ghost" title="放大">＋</button>
+        <button id="prFitWidth" class="btn btn-ghost" title="适宽">⤢ 适宽</button>
+      </div>
+      <div class="pr-tools">
+        <span class="tb-label">高亮色</span>
+        <div class="pr-colors">
+          <button class="pr-color active" data-color="yellow" style="background:#ffe08a"></button>
+          <button class="pr-color" data-color="green" style="background:#b5e6b5"></button>
+          <button class="pr-color" data-color="blue" style="background:#a8d4f5"></button>
+          <button class="pr-color" data-color="pink" style="background:#f7b8d0"></button>
+        </div>
+      </div>
+    </div>
+    <div class="pr-body">
+      <!-- 左：PDF 连续页面 -->
+      <div class="pr-main">
+        <div id="prPages" class="pr-pages"></div>
+      </div>
+      <!-- 右：翻译面板（Zotero 样式） -->
+      <aside class="pr-trans-panel">
+        <div class="pr-panel-head">🌐 划词翻译</div>
+        <div class="pr-panel-body">
+          <textarea id="prSourceText" class="pr-src" placeholder="在左侧 PDF 中选中文字即可自动翻译；也可在此直接粘贴文本…"></textarea>
+          <div class="pr-lang-row">
+            <select id="prLangFrom" class="tb-select">
+              <option value="auto">自动检测</option>
+              <option value="en">English</option>
+              <option value="zh">中文</option>
+            </select>
+            <span class="pr-lang-arrow">→</span>
+            <select id="prLangTo" class="tb-select">
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+          <button id="prDoTranslate" class="btn btn-primary w100">翻 译</button>
+          <div id="prTransResult" class="pr-trans-box">
+            <div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>
+          </div>
+          <div class="pr-panel-sep"></div>
+          <div class="pr-panel-sub">📝 笔记与高亮 <span class="side-count" id="prNotesCount">0</span></div>
+          <div id="prNotesList" class="pr-notes-list"></div>
+        </div>
+      </aside>
+    </div>
+    <!-- 划词操作工具条 -->
+    <div id="prSelectionToolbar" class="pr-selection-toolbar hidden">
+      <button class="pr-sel-btn" data-sel="translate">译</button>
+      <button class="pr-sel-btn" data-sel="highlight">高亮</button>
+      <button class="pr-sel-btn" data-sel="note">笔记</button>
+    </div>
+    <!-- 笔记输入浮层 -->
+    <div id="prPopover" class="pr-popover hidden"></div>
+  </div>
+
+  <!-- ===== 新手引导（首次使用） ===== -->
+  <div id="onboarding" class="ob hidden">
+    <div class="ob-backdrop" id="obBackdrop"></div>
+    <div class="ob-spot" id="obSpot"></div>
+    <div class="ob-card" id="obCard">
+      <div class="ob-progress"><div class="ob-progress-bar" id="obProgressBar"></div></div>
+      <div class="ob-step-badge" id="obStepBadge">1 / 8</div>
+      <div class="ob-emoji" id="obEmoji">👋</div>
+      <h2 class="ob-title" id="obTitle"></h2>
+      <p class="ob-desc" id="obDesc"></p>
+      <ul class="ob-points" id="obPoints"></ul>
+      <div class="ob-actions">
+        <button class="btn btn-ghost" id="obSkip">跳过引导</button>
+        <span class="ob-spacer"></span>
+        <button class="btn btn-ghost" id="obPrev">上一步</button>
+        <button class="btn btn-primary" id="obNext">下一步</button>
+      </div>
+      <div class="ob-dots" id="obDots"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

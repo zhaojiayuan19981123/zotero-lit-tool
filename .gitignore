@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 运行时数据（用户本地文献库与设置，不应上传）
+data/
+uploads/
+
+# 打包产物
+dist/
+build/icon.ico
+*.exe
+
+# 缓存与日志
+.npm-cache/
+*.log
+test.pdf
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
