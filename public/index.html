@@ -18,6 +18,7 @@
     <div class="topbar-actions">
       <input type="search" id="searchInput" class="search" placeholder="🔍 搜索标题 / 作者 / 关键词…" />
       <button id="btnParseAll" class="btn btn-primary">▶ 解析全部</button>
+      <button id="btnRefreshRanks" class="btn">🏅 更新期刊等级</button>
       <button id="btnExport" class="btn">导出</button>
       <button id="btnSettings" class="btn">⚙ AI 设置</button>
     </div>
@@ -165,6 +166,7 @@
           </select>
           <select id="sortField" class="tb-select">
             <option value="createdAt">默认排序</option>
+            <option value="importedAt">按导入时间</option>
             <option value="year">按年份</option>
             <option value="title">按标题</option>
             <option value="rating">按评级</option>
@@ -174,9 +176,10 @@
           <div class="tb-sep"></div>
           <span class="tb-label">行高</span>
           <div class="rh-group">
-            <button data-rh="s" class="rh-btn" title="小行高">▁</button>
-            <button data-rh="m" class="rh-btn active" title="中行高">▄</button>
-            <button data-rh="l" class="rh-btn" title="大行高">█</button>
+            <button data-rh="s" class="rh-btn" title="紧凑行高">▁</button>
+            <button data-rh="m" class="rh-btn active" title="标准行高">▄</button>
+            <button data-rh="l" class="rh-btn" title="宽松行高">█</button>
+            <button data-rh="xl" class="rh-btn" title="特大行高">▉</button>
           </div>
         </div>
 
@@ -252,7 +255,7 @@
             <p>把从世图科研（worldlib）复制的「标题 + 链接地址」文本粘贴到下方，自动解析成下载列表。支持这两种格式（可多选整段粘贴）：</p>
             <pre>标题：10.1093/jcr/ucaf065
 链接地址：https://research.worldlib.site/tools/submit_ajax.ashx?action=getdownfile&...=xxx.pdf&uid=...</pre>
-            <p class="wl-hint">「⬇ 下载」会跳转系统浏览器，文件自动保存到浏览器默认下载文件夹；下载后可用「一键导入」把文献导入文献中心，再在文献中心上传 PDF 附件。</p>
+            <p class="wl-hint">点「下载并导入」后，软件会自动抓取链接里的 PDF 文件（自动解析中转页获取真实下载地址），下载完成后连同 PDF 附件一并导入文献中心，无需打开浏览器手动下载。</p>
           </div>
           <label class="field"><span>粘贴文本（支持一次粘贴多条）</span><textarea id="wlInput" rows="6" placeholder="标题：10.1093/jcr/ucaf065
 链接地址：https://research.worldlib.site/..."></textarea></label>
@@ -260,8 +263,8 @@
             <button class="btn btn-primary" id="btnWlParse">🔍 解析列表</button>
             <button class="btn" id="btnWlClear">清空</button>
             <span class="ob-spacer"></span>
-            <button class="btn" id="btnWlDownloadAll" disabled>⬇ 全部下载</button>
-            <button class="btn btn-primary" id="btnWlImport" disabled>📥 一键导入文献中心</button>
+            <button class="btn" id="btnWlDownloadAll" disabled>⬇ 全部下载并导入</button>
+            <button class="btn btn-primary" id="btnWlImport" disabled>📥 下载勾选并导入</button>
           </div>
           <div id="wlList" class="wl-list"></div>
         </div>
@@ -457,6 +460,7 @@
             </div>
           </label>
           <label class="field"><span>当前状态</span><select id="paperStatus" class="tb-select"></select></label>
+          <label class="field"><span>状态起始日（停留天数按这天起算）</span><input type="date" id="paperStatusDate" class="tb-select" /></label>
           <label class="field"><span>关联项目</span><select id="paperProject" class="tb-select"></select></label>
           <label class="field"><span>投稿日期</span><input type="date" id="paperSubmitDate" class="tb-select" /></label>
           <label class="field"><span>返修截止（临近变红提醒）</span><input type="date" id="paperDeadline" class="tb-select" /></label>
@@ -556,7 +560,7 @@
         <p class="modal-desc" style="background:#fff7e6">easyScholar 期刊等级查询（免费开放接口，需 SecretKey，仅保留中科院/新锐/ABS/SSCI 分区）。</p>
         <label class="field"><span>easyScholar SecretKey</span><input id="setEasyKey" class="tb-input" type="password" placeholder="在 easyScholar 官网获取，留空则不查询等级" /></label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:#f6ecf8">划词翻译（PDF 阅读器内选中文字自动翻译）。</p>
+        <p class="modal-desc" style="background:var(--primary-soft)">划词翻译（PDF 阅读器内选中文字自动翻译）。</p>
         <label class="field"><span>翻译提供方</span>
           <select id="setTranslateProvider" class="tb-select w100">
             <option value="siliconflow">硅基流动 DeepSeek（用上方 API Key）</option>
@@ -566,7 +570,7 @@
         </label>
         <label class="field"><span>DeepL API Key（选 DeepL 时填写）</span><input id="setDeeplKey" class="tb-input" type="password" placeholder="DeepL 密钥，留空则不用 DeepL" /></label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:#f3eafd">🎨 主题配色（一键换色，全界面生效；也可以直接输入任意色值自定义）。</p>
+        <p class="modal-desc" style="background:var(--primary-soft)">🎨 主题配色（一键换色，侧边栏、正文、文字颜色全界面生效；也可以直接输入任意色值自定义）。</p>
         <label class="field"><span>预设配色</span>
           <div id="themePresets" class="theme-presets"></div>
         </label>
@@ -579,8 +583,29 @@
           </div>
         </label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:#e6f6ec">数据保存位置（默认存在<b>安装目录下</b>，与软件放一起，方便备份迁移；装在系统盘不可写时会自动存到用户数据目录）。</p>
-        <label class="field"><span>数据保存目录</span><input id="setDataDir" class="tb-input" placeholder="留空 = 安装目录下；例如 D:\文献库" /></label>
+        <p class="modal-desc" style="background:var(--primary-soft)">🔤 全局字体（选择后所有界面文字统一使用该字体，立即预览；保存后跨启动生效）。</p>
+        <label class="field"><span>界面字体</span>
+          <select id="setAppFont" class="tb-select w100">
+            <option value="">默认（跟随系统）</option>
+            <option value="SimSun">宋体</option>
+            <option value="SimHei">黑体</option>
+            <option value="KaiTi">楷体</option>
+            <option value="STXingkai">华文行楷（行书）</option>
+            <option value="STZhongsong">华文中宋</option>
+            <option value="Microsoft YaHei">微软雅黑</option>
+          </select>
+        </label>
+        <label class="field"><span>界面字号（英文统一使用 Times New Roman）</span>
+          <select id="setFontSize" class="tb-select w100">
+            <option value="small">小（90%）</option>
+            <option value="medium" selected>标准（100%）</option>
+            <option value="large">大（115%）</option>
+            <option value="xlarge">特大（130%）</option>
+          </select>
+        </label>
+        <div class="field-sep"></div>
+        <p class="modal-desc" style="background:#e6f6ec">数据保存位置（默认存在<b>系统用户数据目录</b>，与安装位置分离，<b>升级/覆盖安装不会丢失</b>文献与配置；也可手动指定自定义目录）。</p>
+        <label class="field"><span>数据保存目录</span><input id="setDataDir" class="tb-input" placeholder="留空 = 系统用户数据目录；例如 D:\文献库" /></label>
       </div>
       <div class="modal-foot">
         <button id="btnReplayOnboarding" class="btn btn-ghost">🎓 重新查看新手引导</button>
@@ -666,16 +691,24 @@
             <div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>
           </div>
           <div class="pr-panel-sep"></div>
+          <div class="pr-panel-sub">💭 我的思考 <span class="side-count" id="prThoughtsState"></span></div>
+          <textarea id="prThoughts" class="pr-src pr-thoughts" placeholder="阅读时随手记录自己的小想法：疑问、灵感、与课题的联系…保存后写入文献库的「我的思考」字段"></textarea>
+          <button id="btnPrThoughtsSave" class="btn btn-primary w100" style="margin-top:6px">保存思考</button>
+          <div class="pr-panel-sep"></div>
           <div class="pr-panel-sub">📝 笔记与高亮 <span class="side-count" id="prNotesCount">0</span></div>
           <div id="prNotesList" class="pr-notes-list"></div>
         </div>
       </aside>
     </div>
-    <!-- 划词操作工具条 -->
+    <!-- 划词操作工具条（白色圆角浮层 + 图标风格） -->
     <div id="prSelectionToolbar" class="pr-selection-toolbar hidden">
-      <button class="pr-sel-btn" data-sel="translate">译</button>
-      <button class="pr-sel-btn" data-sel="highlight">高亮</button>
-      <button class="pr-sel-btn" data-sel="note">笔记</button>
+      <button class="pr-sel-btn" data-sel="copy" title="复制选中文字"><span class="pr-sel-ico">⧉</span>复制</button>
+      <span class="pr-sel-sep"></span>
+      <button class="pr-sel-btn" data-sel="highlight" title="高亮选中文字"><span class="pr-sel-ico">🖍️</span>高亮</button>
+      <button class="pr-sel-btn" data-sel="underline" title="给选中文字加下划线"><span class="pr-sel-ico pr-ico-u">U</span>下划线</button>
+      <button class="pr-sel-btn" data-sel="note" title="写笔记"><span class="pr-sel-ico">📝</span>笔记</button>
+      <span class="pr-sel-sep"></span>
+      <button class="pr-sel-btn" data-sel="translate" title="翻译选中文字"><span class="pr-sel-ico">🌐</span>翻译</button>
     </div>
     <!-- 笔记输入浮层 -->
     <div id="prPopover" class="pr-popover hidden"></div>

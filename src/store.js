@@ -118,6 +118,10 @@ export function getSettings() {
     deeplKey: '', // DeepL API Key
     // 数据保存目录（空 = 使用默认用户数据目录）
     dataDir: '',
+    // 新手引导是否已看过（持久化到数据目录，跨启动/跨版本稳定保留）
+    onboarded: false,
+    // 用户调节的表格列宽 { 列key: 像素 }（持久化到数据目录，跨启动保留）
+    colWidths: {},
   });
 }
 

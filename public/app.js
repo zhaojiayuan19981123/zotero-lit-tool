@@ -10,6 +10,7 @@
     { key: 'journalRank', label: '期刊等级', type: 'rank', w: 170 },
   ];
   const CONTENT_COLS = {
+    importedAt: { key: 'importedAt', label: '导入时间', type: 'time', w: 118 },
     title: { key: 'title', label: '标题', type: 'title', ai: true, w: 200 },
     authors: { key: 'authors', label: '作者', type: 'text', ai: true, w: 150 },
     journal: { key: 'journal', label: '期刊/会议', type: 'text', ai: true, w: 150 },
@@ -27,15 +28,16 @@
     results: { key: 'results', label: '实验结果', type: 'md', ai: true, w: 260 },
     conclusion: { key: 'conclusion', label: '结论', type: 'md', ai: true, w: 260 },
     criticalThinking: { key: 'criticalThinking', label: '批判性思考', type: 'md', ai: true, w: 260 },
+    thoughts: { key: 'thoughts', label: '我的思考', type: 'md', w: 220 },
     model: { key: 'model', label: '模型', type: 'md', ai: true, w: 220 },
     paramDiscussion: { key: 'paramDiscussion', label: '参数讨论', type: 'md', ai: true, w: 260 },
   };
   // 两个文库各自的字段排布（界面分开，不一致）
   const TYPE_ORDER = {
-    empirical: ['title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract', 'background',
-      'theory', 'method', 'researchDesign', 'constructs', 'results', 'conclusion', 'criticalThinking', 'summary', 'innovation'],
-    model: ['title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract', 'background',
-      'model', 'method', 'paramDiscussion', 'results', 'summary', 'innovation'],
+    empirical: ['importedAt', 'title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract', 'background',
+      'theory', 'method', 'researchDesign', 'constructs', 'results', 'conclusion', 'criticalThinking', 'thoughts', 'summary', 'innovation'],
+    model: ['importedAt', 'title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract', 'background',
+      'model', 'method', 'paramDiscussion', 'results', 'thoughts', 'summary', 'innovation'],
   };
   const LIB_META = {
     empirical: { label: '实证类文库', icon: '🧪' },
@@ -58,7 +60,14 @@
   let cellUploadId = null;
   // 当前文库（侧边栏选中）：类型 + 分类（null = 全部文献）
   let lib = { type: 'empirical', collectionId: null };
-  let colWidths = {}; // 用户调节的列宽 { key: px }
+  let colWidths = {}; // 用户调节的列宽 { key: px }（持久化到后端 settings，跨启动保留）
+  let colWidthsSaveTimer = null;
+  function persistColWidths() {
+    clearTimeout(colWidthsSaveTimer);
+    colWidthsSaveTimer = setTimeout(() => {
+      api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ colWidths }) }).catch(() => {});
+    }, 400);
+  }
   // 工作台状态（首页 / 项目 / 任务 / 论文 / 研究记录 / AI 助手）
   let view = 'home';
   let profile = {};
@@ -112,9 +121,26 @@
   async function loadSettings() {
     settings = await api('/api/settings');
     fillSettingsForm();
+    // 恢复用户调节过的表格列宽
+    if (settings.colWidths && typeof settings.colWidths === 'object' && !Array.isArray(settings.colWidths)) {
+      colWidths = { ...settings.colWidths };
+    }
     // 启动时恢复已保存的主题配色（无保存则用默认紫）
     renderThemePresets();
     applyTheme(settings.themeColor || DEFAULT_THEME, false);
+    // 恢复全局字体与字号
+    applyFont(settings.appFont || '');
+    applyFontSize(settings.fontSize || 'medium');
+    // 恢复行高偏好
+    applyRowHeight(settings.rowHeight || 'm');
+  }
+
+  // 行高：s 紧凑 / m 标准 / l 宽松 / xl 特大（缩略图随档位缩放），持久化到设置
+  function applyRowHeight(rh) {
+    if (!['s', 'm', 'l', 'xl'].includes(rh)) rh = 'm';
+    rowHeight = rh;
+    el.gridWrap.className = 'grid-wrap rh-' + rh;
+    document.querySelectorAll('.rh-btn').forEach((b) => b.classList.toggle('active', b.dataset.rh === rh));
   }
   async function loadCollections() { collections = await api('/api/collections'); renderLibBar(); }
 
@@ -288,11 +314,22 @@
 
   function renderHead() {
     const cols = buildColumns();
+    // table-layout: fixed + colgroup：列宽完全由用户设置（可放大也可缩小，不受内容撑开）
+    const grid = el.theadRow.closest('table');
+    let colgroup = document.getElementById('gridCols');
+    if (!colgroup) {
+      colgroup = document.createElement('colgroup');
+      colgroup.id = 'gridCols';
+      grid.insertBefore(colgroup, grid.firstChild);
+    }
+    const widths = [44, 40, ...cols.map((c) => c.w)];
+    colgroup.innerHTML = widths.map((w) => `<col style="width:${w}px" />`).join('');
+    grid.style.width = widths.reduce((a, b) => a + b, 0) + 'px';
     el.theadRow.innerHTML =
       `<th class="cell-check"><input type="checkbox" disabled /></th>` +
       `<th class="cell-num">#</th>` +
       cols.map((c) => `
-        <th style="min-width:${c.w}px" data-col="${c.key}"><div class="th-inner" title="${esc(c.label)}">
+        <th data-col="${c.key}" title="${esc(c.label)}（拖动右缘调宽，双击手柄复位）"><div class="th-inner">
           <span class="th-ico">${typeIcon(c.type)}</span><span class="th-name">${esc(c.label)}</span>
           ${c.ai ? '<span class="col-ai">AI 生成</span>' : ''}
         </div><span class="col-resize" data-resize="${c.key}"></span></th>`).join('');
@@ -323,6 +360,14 @@
 
   function renderCell(c, it) {
     switch (c.type) {
+      case 'time': {
+        const v = it.importedAt || it.createdAt || '';
+        if (!v) return '<span class="cell-empty">—</span>';
+        const d = new Date(v);
+        if (isNaN(d)) return `<div class="clamp cell-text">${esc(v)}</div>`;
+        const p2 = (n) => String(n).padStart(2, '0');
+        return `<div class="clamp cell-text" title="导入时间：${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}">${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}</div>`;
+      }
       case 'title': {
         const v = it.title || '';
         return `<div class="clamp cell-title" data-open="${it.id}" title="点击查看全文解析">${esc(v) || '<span class="cell-empty">（未命名）</span>'}</div>`;
@@ -345,8 +390,18 @@
           <button class="icon-btn danger" data-act="del" title="删除">🗑</button></div>`;
       case 'rank': {
         const v = it.journalRank || '';
-        if (!v) return it.journalRankError ? `<span class="cell-empty" title="${esc(it.journalRankError)}" style="color:var(--orange)">查询失败</span>` : '<span class="cell-empty">—</span>';
-        return `<div class="clamp rank-cell" title="${esc(v)}">${rankChips(it.journalRankDetail)}</div>`;
+        const btn = it.journal
+          ? `<button class="lit-rank-refresh${rankLoadingIds.has(it.id) ? ' spinning' : ''}" data-refreshrank="${it.id}" title="单独更新该文献的期刊等级（按当前期刊名重新查询）">${rankLoadingIds.has(it.id) ? '⟳' : '⟳ 更新'}</button>`
+          : '';
+        let body;
+        if (!v) {
+          body = it.journalRankError
+            ? `<span class="cell-empty" title="${esc(it.journalRankError)}" style="color:var(--orange)">查询失败</span>`
+            : '<span class="cell-empty">—</span>';
+        } else {
+          body = `<div class="clamp rank-cell" title="${esc(v)}">${rankChips(it.journalRankDetail)}</div>`;
+        }
+        return `<div class="rank-pos">${body}${btn}</div>`;
       }
       case 'md': {
         const v = it[c.key] || '';
@@ -491,7 +546,9 @@
   // ============ 解析 ============
   async function parseIds(ids, docType) {
     try {
-      await api('/api/parse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, docType: docType || undefined }) });
+      // 多篇并发解析：并发数按篇数自适应（最多 8），显著缩短批量解析时间
+      const concurrency = Math.max(1, Math.min(8, ids.length));
+      await api('/api/parse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, docType: docType || undefined, concurrency }) });
       await loadItems();
       const errs = items.filter((i) => ids.includes(i.id) && i.status === 'error');
       if (errs.length) toast(`解析完成，${errs.length} 篇失败`, 'error'); else toast('AI 解析完成，字段已自动写入', 'success');
@@ -501,6 +558,8 @@
   // ============ 表格事件 ============
   function bindGrid() {
     el.tbody.addEventListener('click', (e) => {
+      const rr = e.target.closest('[data-refreshrank]');
+      if (rr) { e.stopPropagation(); refreshLitRank(rr.dataset.refreshrank); return; }
       const star = e.target.closest('[data-star]');
       if (star) { setRating(star.closest('[data-rating]').dataset.rating, parseInt(star.dataset.star, 10)); return; }
       const pb = e.target.closest('[data-progress]'); if (pb) { cycleProgress(pb.dataset.progress); return; }
@@ -554,6 +613,44 @@
     await loadItems(); await loadCollections(); toast('已删除', 'success');
   }
 
+  // ============ 期刊等级：手动单独更新（文献中心） ============
+  const rankLoadingIds = new Set(); // 正在刷新等级的记录 id（按钮转圈）
+  async function refreshLitRank(id, opts = {}) {
+    const silent = !!opts.silent;
+    const it = items.find((x) => x.id === id);
+    if (!it) return false;
+    if (!String(it.journal || '').trim()) {
+      if (!silent) toast('该文献没有期刊名，请先在「编辑」中填写「期刊/会议」字段', 'error');
+      return false;
+    }
+    rankLoadingIds.add(id); render();
+    try {
+      const updated = await api(`/api/literature/${id}/refresh-rank`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const idx = items.findIndex((x) => x.id === id); if (idx >= 0) items[idx] = updated;
+      if (!silent) toast(updated.journalRank ? `✅ 等级已更新：${updated.journalRank}` : '未查询到该期刊等级', updated.journalRank ? 'success' : 'error');
+      return !!updated.journalRank;
+    } catch (e) {
+      const cur = items.find((x) => x.id === id);
+      if (cur) cur.journalRankError = e.message;
+      if (!silent) toast('更新失败：' + e.message, 'error');
+      return false;
+    } finally {
+      rankLoadingIds.delete(id); render();
+    }
+  }
+  // 批量：按当前筛选列表逐篇刷新等级（顺延请求，避免触发 easyScholar 限流）
+  async function refreshAllRanks() {
+    const list = filteredItems().filter((i) => String(i.journal || '').trim());
+    if (!list.length) { toast('当前列表没有已识别期刊名的文献', 'error'); return; }
+    let ok = 0, fail = 0;
+    for (let i = 0; i < list.length; i++) {
+      toast(`正在更新期刊等级 ${i + 1}/${list.length}…`);
+      const success = await refreshLitRank(list[i].id, { silent: true });
+      if (success) ok++; else fail++;
+    }
+    toast(`期刊等级更新完成：成功 ${ok} 篇${fail ? `，失败 ${fail} 篇（未配置密钥 / 期刊未被收录）` : ''}`, ok ? 'success' : 'error');
+  }
+
   // ============ 阅读抽屉 ============
   function openDrawer(id) { currentId = id; el.drawer.classList.remove('hidden'); el.drawerMask.classList.remove('hidden'); renderDrawer(); }
   function closeDrawer() { currentId = null; el.drawer.classList.add('hidden'); el.drawerMask.classList.add('hidden'); }
@@ -570,7 +667,7 @@
     $('btnRead').disabled = !it.filename;
 
     const sections = TYPE_ORDER[it.docType || lib.type]
-      .filter((k) => !['title', 'authors', 'journal', 'year', 'doi', 'keywords'].includes(k));
+      .filter((k) => !['title', 'authors', 'journal', 'year', 'doi', 'keywords', 'importedAt'].includes(k));
     const chip = (l, v) => (v ? `<span class="meta-chip"><b>${l}：</b>${esc(v)}</span>` : '');
     const col = collections.find((c) => c.id === it.collectionId);
 
@@ -585,6 +682,10 @@
         ${it.status !== 'done' ? `<span class="badge badge-${it.status}" title="${esc(it.error || '')}">${STATUS_LABEL[it.status]}</span>` : ''}
       </div>
       ${it.error ? `<div class="modal-desc">⚠ 解析失败：${esc(it.error)}</div>` : ''}
+      <section style="margin-bottom:18px"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>💭 我的思考<span class="col-ai">手写</span></h4>
+        <textarea id="drawerThoughts" class="drawer-thoughts" rows="4" placeholder="写下你自己的小想法：疑问、灵感、与课题的联系…">${esc(it.thoughts || '')}</textarea>
+        <button id="btnSaveDrawerThoughts" class="btn btn-primary" style="margin-top:8px">保存思考</button>
+      </section>
       ${it.journalRankDetail && it.journalRankDetail.length ? `
         <section style="margin-bottom:18px"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>期刊等级<span class="col-ai">easyScholar</span></h4>
         <div style="display:flex;flex-wrap:wrap;gap:8px">${rankChips(it.journalRankDetail)}</div></section>` : ''}
@@ -599,14 +700,17 @@
       <label><input type="checkbox" data-col="${k}" ${visible.has(k) ? 'checked' : ''} /> ${esc(k === 'method' && lib.type === 'model' ? '求解方法' : CONTENT_COLS[k].label)}</label>`).join('');
     el.fieldsPop.classList.toggle('hidden');
     const rect = $('btnFields').getBoundingClientRect();
-    el.fieldsPop.style.top = (rect.bottom + 6) + 'px';
-    el.fieldsPop.style.left = rect.left + 'px';
+    const z = uiZoom(); // 字号缩放时坐标换算
+    el.fieldsPop.style.top = ((rect.bottom + 6) / z) + 'px';
+    el.fieldsPop.style.left = (rect.left / z) + 'px';
   }
 
   // ============ 编辑 ============
   function openEdit() {
     const it = items.find((x) => x.id === currentId); if (!it) return;
-    const fields = TYPE_ORDER[it.docType || lib.type].map((k) => [k, k === 'method' && it.docType === 'model' ? '求解方法' : CONTENT_COLS[k].label]);
+    // importedAt 为系统字段，不在编辑表单中出现
+    const fields = TYPE_ORDER[it.docType || lib.type].filter((k) => k !== 'importedAt')
+      .map((k) => [k, k === 'method' && it.docType === 'model' ? '求解方法' : CONTENT_COLS[k].label]);
     el.editBody.innerHTML = fields.map(([key, label]) => `
       <label class="field"><span>${label}</span><textarea data-key="${key}" rows="3">${esc(it[key] || '')}</textarea></label>`).join('');
     el.editModal.classList.remove('hidden');
@@ -614,9 +718,17 @@
   async function saveEdit() {
     const patch = {};
     el.editBody.querySelectorAll('[data-key]').forEach((n) => { patch[n.dataset.key] = n.value; });
+    const prev = items.find((x) => x.id === currentId);
+    const journalChanged = prev && 'journal' in patch
+      && String(prev.journal || '').trim() !== String(patch.journal || '').trim();
     const updated = await api('/api/literature/' + currentId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
     const idx = items.findIndex((x) => x.id === currentId); if (idx >= 0) items[idx] = updated;
     el.editModal.classList.add('hidden'); render(); renderDrawer(); toast('已保存', 'success');
+    // 期刊名被修改：自动按新期刊名重新查询等级
+    if (journalChanged && String(patch.journal || '').trim()) {
+      toast('期刊名已修改，正在重新查询等级…');
+      refreshLitRank(currentId);
+    }
   }
 
   // ============ 世图科研下载助手 ============
@@ -646,58 +758,70 @@
     }
     box.innerHTML = wlItems.map((it, i) => {
       const imported = it.imported || wlImportedKeys.has(it.title.toLowerCase());
-      return `<div class="wl-item">
+      let state = '';
+      if (it.state === 'downloading') state = '<span class="wl-done">⏳ 下载中…</span>';
+      else if (it.state === 'error') state = `<span class="wl-err" title="${esc(it.error || '')}">✗ 失败</span>`;
+      else if (imported) state = '<span class="wl-imported">📥 已导入（含PDF）</span>';
+      else state = `<button class="tb-btn" data-wldl="${i}">⬇ 下载并导入</button>`;
+      return `<div class="wl-item${it.state === 'error' ? ' wl-item-error' : ''}">
         <input type="checkbox" data-wlchk="${i}" ${it.checked ? 'checked' : ''} />
         <span class="wl-item-title" title="${esc(it.title)}">${esc(it.title)}</span>
         <span class="wl-item-url" title="${esc(it.url)}">${esc(it.url)}</span>
         <span class="wl-item-actions">
-          ${it.done ? '<span class="wl-done">✓ 已下载</span>' : `<button class="tb-btn" data-wldl="${i}">⬇ 下载</button>`}
-          ${imported ? '<span class="wl-imported">📥 已导入</span>' : ''}
+          ${state}
         </span>
       </div>`;
     }).join('');
     box.querySelectorAll('[data-wlchk]').forEach((c) => c.addEventListener('change', () => { wlItems[parseInt(c.dataset.wlchk, 10)].checked = c.checked; }));
     box.querySelectorAll('[data-wldl]').forEach((b) => b.addEventListener('click', () => {
       const it = wlItems[parseInt(b.dataset.wldl, 10)];
-      wlDownloadOne(it);
-      renderWlList();
+      wlDownloadOne(it, true);
     }));
   }
 
-  // 下载单条：跳转系统浏览器（Electron 主进程会把 window.open 转交系统浏览器），
-  // 由浏览器把 PDF 下载到默认下载文件夹
-  function wlDownloadOne(it) {
-    if (!it?.url) return;
-    window.open(it.url, '_blank');
-    it.done = true;
-  }
-
-  async function wlDownloadAll() {
-    const list = wlItems.filter((x) => !x.done);
-    if (!list.length) { toast('所有条目都已下载过', 'success'); return; }
-    toast(`开始下载 ${list.length} 篇，请在浏览器默认下载文件夹查看`, 'success');
-    for (const it of list) {
-      wlDownloadOne(it);
-      renderWlList();
-      await new Promise((r) => setTimeout(r, 700)); // 间隔打开，避免浏览器卡顿
-    }
-  }
-
-  async function wlImport() {
-    const sel = wlItems.filter((x) => x.checked && !x.imported);
-    if (!sel.length) { toast('请先勾选要导入的文献', 'error'); return; }
+  // 下载单条：由后端直接抓取 PDF（自动解析中转页拿到真实直链），下载完成后
+  // 连同 PDF 附件一并写入文献中心，无需再跳浏览器手动下载
+  async function wlDownloadOne(it, refresh) {
+    if (!it?.url || it.state === 'downloading') return;
+    it.state = 'downloading'; it.error = '';
+    renderWlList();
     try {
-      const res = await api('/api/worldlib/import', {
+      const res = await api('/api/worldlib/download', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: sel.map((x) => ({ title: x.title, url: x.url })) }),
+        body: JSON.stringify({ title: it.title, url: it.url }),
       });
-      (res.records || []).forEach((r) => wlImportedKeys.add(String(r.doi || r.title).toLowerCase()));
-      sel.forEach((x) => { x.imported = true; });
-      renderWlList();
-      await loadItems();
-      toast(`已导入 ${res.imported} 篇到文献中心${res.skipped?.length ? `，跳过 ${res.skipped.length} 篇重复` : ''}。可在文献中心上传对应 PDF 附件`, 'success');
-    } catch (e) { toast(e.message, 'error'); }
+      it.state = 'done'; it.imported = true;
+      wlImportedKeys.add(String(res.record?.doi || it.title).toLowerCase());
+      if (refresh) await loadItems();
+      toast(`「${it.title.slice(0, 24)}…」已下载 PDF 并导入文献中心`, 'success');
+    } catch (e) {
+      it.state = 'error'; it.error = e.message;
+      toast(e.message, 'error');
+    }
+    renderWlList();
   }
+
+  // 批量：逐条下载并导入（len 传 null 表示处理全部未完成条目）
+  async function wlDownloadImport(onlyChecked) {
+    const all = wlItems.filter((x) => !x.imported && x.state !== 'done');
+    const list = onlyChecked ? all.filter((x) => x.checked) : all;
+    if (!list.length) {
+      toast(onlyChecked ? '没有已勾选的待下载条目' : '所有条目都已下载导入', 'error');
+      return;
+    }
+    let ok = 0, fail = 0;
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i];
+      toast(`正在下载并导入 ${i + 1}/${list.length}：${it.title.slice(0, 20)}…`);
+      await wlDownloadOne(it, false);
+      if (it.state === 'done') ok++; else fail++;
+    }
+    await loadItems();
+    const failMsg = fail ? `，失败 ${fail} 篇（可点击单条查看原因重试）` : '';
+    toast(`完成：成功下载并导入 ${ok} 篇${failMsg}`, fail ? 'error' : 'success');
+  }
+
+  async function wlImport() { return wlDownloadImport(true); }
 
   // ============ 主题配色（一键换色 + 自定义色值） ============
   const DEFAULT_THEME = '#81308C';
@@ -742,7 +866,8 @@
     return '#' + to(f(0)) + to(f(8)) + to(f(4));
   }
 
-  // 由主色推导整套协调的界面色（背景、边框、浅底都带同一色相）
+  // 由主色推导整套协调的界面色：背景、边框、面板、侧边栏、滚动条、
+  // 正文文字色相全部跟随主色，实现「一键换色、全界面生效」
   function deriveTheme(primary) {
     const c = hexToHsl(primary);
     if (!c) return null;
@@ -756,6 +881,26 @@
       '--head-bg': hslToHex(c.h, cl(c.s * 0.22), 98.6),
       '--border': hslToHex(c.h, cl(c.s * 0.30), 91),
       '--gray-soft': hslToHex(c.h, cl(c.s * 0.16), 94.5),
+      // 侧边栏：主色的两个加深色阶 + 同色相浅文字
+      '--side-1': hslToHex(c.h, cl(c.s * 1.06), 20),
+      '--side-2': hslToHex(c.h, cl(c.s * 1.15), 14),
+      '--side-text': hslToHex(c.h, cl(c.s * 0.68), 90),
+      // 正文文字：带主色相的低饱和深浅三档
+      '--text': hslToHex(c.h, cl(c.s * 0.30), 15),
+      '--text-2': hslToHex(c.h, cl(c.s * 0.18), 40),
+      '--text-3': hslToHex(c.h, cl(c.s * 0.14), 68),
+      '--gray': hslToHex(c.h, cl(c.s * 0.18), 60),
+      // 面板 / 悬停 / 边框 / 滚动条
+      '--border-soft': hslToHex(c.h, cl(c.s * 0.30), 94.5),
+      '--panel-soft': hslToHex(c.h, cl(c.s * 0.30), 98.2),
+      '--panel-2': hslToHex(c.h, cl(c.s * 0.18), 97.2),
+      '--panel-2-hover': hslToHex(c.h, cl(c.s * 0.14), 94.8),
+      '--row-hover': hslToHex(c.h, cl(c.s * 0.35), 98.5),
+      '--scrollbar': hslToHex(c.h, cl(c.s * 0.28), 83),
+      '--scrollbar-hover': hslToHex(c.h, cl(c.s * 0.30), 70),
+      '--btn-border': hslToHex(c.h, cl(c.s * 0.26), 86),
+      '--accent-2': hslToHex(c.h, cl(c.s * 0.90), cl(c.l * 1.15)),
+      '--dash-border': hslToHex(c.h, cl(c.s * 0.22), 81),
     };
   }
 
@@ -784,6 +929,23 @@
     box.querySelectorAll('.theme-swatch').forEach((s) => s.addEventListener('click', () => applyTheme(s.dataset.color, true)));
   }
 
+  // ============ 全局字体（英文统一 Times New Roman，中文可选宋体/黑体/楷体/行楷等） ============
+  function applyFont(fontKey) {
+    const root = document.documentElement;
+    const f = String(fontKey || '').trim();
+    if (!f) { root.style.removeProperty('--app-font'); return; }
+    root.style.setProperty('--app-font', `"Times New Roman", "${f}", "Microsoft YaHei", "PingFang SC", sans-serif`);
+  }
+
+  // ============ 全局字号（小/标准/大/特大，body zoom 整体缩放） ============
+  const FONT_SIZE_ZOOM = { small: 0.9, medium: 1, large: 1.15, xlarge: 1.3 };
+  function applyFontSize(level) {
+    const zoom = FONT_SIZE_ZOOM[level] || 1;
+    document.body.style.zoom = zoom === 1 ? '' : String(zoom);
+  }
+  // body 有 zoom 时，getBoundingClientRect 返回的是缩放后坐标；写回 style.left/top 前需除回
+  function uiZoom() { const z = parseFloat(document.body.style.zoom); return isNaN(z) || z <= 0 ? 1 : z; }
+
   // ============ 设置 ============
   function fillSettingsForm() {
     $('setProvider').value = settings.aiProvider || 'siliconflow';
@@ -795,6 +957,8 @@
     $('setTranslateProvider').value = settings.translateProvider || 'siliconflow';
     $('setDeeplKey').value = settings.deeplKey || '';
     $('setDataDir').value = settings.dataDir || '';
+    $('setAppFont').value = settings.appFont || '';
+    $('setFontSize').value = settings.fontSize || 'medium';
   }
   async function saveSettingsFromForm() {
     const next = {
@@ -807,6 +971,8 @@
       translateProvider: $('setTranslateProvider').value,
       deeplKey: $('setDeeplKey').value.trim(),
       dataDir: $('setDataDir').value.trim(),
+      appFont: $('setAppFont').value,
+      fontSize: $('setFontSize').value,
     };
     try {
       settings = await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) });
@@ -847,8 +1013,9 @@
       $('btnSortOrder').textContent = sortOrder === 'asc' ? '↑ 升序' : '↓ 降序'; render();
     });
     document.querySelectorAll('.rh-btn').forEach((b) => b.addEventListener('click', () => {
-      document.querySelectorAll('.rh-btn').forEach((x) => x.classList.remove('active'));
-      b.classList.add('active'); rowHeight = b.dataset.rh; el.gridWrap.className = 'grid-wrap rh-' + rowHeight;
+      applyRowHeight(b.dataset.rh);
+      // 行高偏好持久化，下次启动保留
+      api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rowHeight: b.dataset.rh }) }).catch(() => {});
     }));
 
     $('btnParseAll').addEventListener('click', () => {
@@ -858,28 +1025,48 @@
     });
     $('btnExport').addEventListener('click', () => window.open('/api/export?format=csv', '_blank'));
 
-    // 列宽拖拽调节
+    // 列宽拖拽调节（table-layout: fixed，实时移动 <col> 宽度，放大缩小都精确生效）
     let resizing = null;
     el.theadRow.addEventListener('mousedown', (e) => {
       const handle = e.target.closest('[data-resize]');
       if (!handle) return;
       e.preventDefault();
       const th = handle.closest('th');
-      resizing = { key: handle.dataset.resize, startX: e.clientX, startW: th.getBoundingClientRect().width, th, handle };
+      const grid = el.theadRow.closest('table');
+      const colgroup = document.getElementById('gridCols');
+      const cols = buildColumns();
+      const idx = cols.findIndex((c) => c.key === handle.dataset.resize);
+      if (idx < 0 || !colgroup) return;
+      resizing = {
+        key: handle.dataset.resize, startX: e.clientX, startW: th.getBoundingClientRect().width,
+        th, handle, col: colgroup.children[idx + 2],
+        baseTotal: parseFloat(grid.style.width) || 0, grid,
+      };
       handle.classList.add('active');
       document.body.style.cursor = 'col-resize';
     });
     document.addEventListener('mousemove', (e) => {
       if (!resizing) return;
-      const w = Math.max(60, resizing.startW + (e.clientX - resizing.startX));
+      const w = Math.max(60, Math.min(900, resizing.startW + (e.clientX - resizing.startX)));
       colWidths[resizing.key] = Math.round(w);
-      resizing.th.style.minWidth = w + 'px';
+      resizing.col.style.width = w + 'px';
+      resizing.grid.style.width = Math.round(resizing.baseTotal + (w - resizing.startW)) + 'px';
     });
     document.addEventListener('mouseup', () => {
       if (!resizing) return;
       resizing.handle.classList.remove('active');
       document.body.style.cursor = '';
       resizing = null;
+      render(); // 拖完立即按新列宽整表重排
+      persistColWidths(); // 持久化，下次启动保留
+    });
+    // 双击列宽手柄：重置该列为默认宽度
+    el.theadRow.addEventListener('dblclick', (e) => {
+      const handle = e.target.closest('[data-resize]');
+      if (!handle) return;
+      delete colWidths[handle.dataset.resize];
+      render();
+      persistColWidths();
     });
 
     $('btnDrawerClose').addEventListener('click', closeDrawer);
@@ -893,14 +1080,27 @@
       const it = items.find((x) => x.id === currentId);
       if (it?.filename) window.open('/uploads/' + encodeURIComponent(it.filename), '_blank');
     });
-    el.drawerBody.addEventListener('click', (e) => {
+    el.drawerBody.addEventListener('click', async (e) => {
       const ds = e.target.closest('[data-dstar]'); if (ds) { setRating(currentId, parseInt(ds.dataset.dstar, 10)); renderDrawer(); return; }
       if (e.target.closest('[data-dprogress]')) cycleProgress(currentId).then(renderDrawer);
+      if (e.target.closest('#btnSaveDrawerThoughts')) {
+        const v = $('drawerThoughts').value.trim();
+        const updated = await api('/api/literature/' + currentId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ thoughts: v }) });
+        const idx = items.findIndex((x) => x.id === currentId); if (idx >= 0) items[idx] = updated;
+        render(); toast('我的思考已保存', 'success');
+      }
     });
 
     $('btnSettingsClose').addEventListener('click', () => el.settingsModal.classList.add('hidden'));
     $('btnSettingsCancel').addEventListener('click', () => el.settingsModal.classList.add('hidden'));
     $('btnSettingsSave').addEventListener('click', saveSettingsFromForm);
+
+    // 全局字体/字号：下拉即预览，保存后持久化
+    $('setAppFont').addEventListener('change', () => applyFont($('setAppFont').value));
+    $('setFontSize').addEventListener('change', () => applyFontSize($('setFontSize').value));
+
+    // 文献中心：批量更新当前列表的期刊等级
+    $('btnRefreshRanks').addEventListener('click', refreshAllRanks);
 
     // 审稿意见一键翻译
     $('btnTranslateReview').addEventListener('click', translateReview);
@@ -928,7 +1128,7 @@
       toast(`解析完成，新增 ${added} 条${parsed.length - added ? `（重复跳过 ${parsed.length - added} 条）` : ''}`, 'success');
     });
     $('btnWlClear').addEventListener('click', () => { $('wlInput').value = ''; wlItems = []; renderWlList(); });
-    $('btnWlDownloadAll').addEventListener('click', wlDownloadAll);
+    $('btnWlDownloadAll').addEventListener('click', () => wlDownloadImport(false));
     $('btnWlImport').addEventListener('click', wlImport);
 
     // 主题配色
@@ -989,6 +1189,8 @@
     $('prFilename').textContent = it.originalName || '';
     $('prTransResult').innerHTML = '<div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>';
     $('prSourceText').value = '';
+    $('prThoughts').value = it.thoughts || '';
+    $('prThoughtsState').textContent = it.thoughts ? '已保存' : '';
     loadPdfDocument('/uploads/' + encodeURIComponent(it.filename));
   }
 
@@ -1162,6 +1364,19 @@
         div.style.background = HIGHLIGHT_COLORS[a.color] || '#ffe08a';
         div.style.opacity = '0.45';
         layer.appendChild(div);
+      } else if (a.type === 'underline') {
+        const lineH = Math.max(1.5, 1.4 * scale);
+        for (const r of (a.rects || [])) {
+          const u = document.createElement('div');
+          u.style.position = 'absolute';
+          u.style.left = (r.x1 * scale) + 'px';
+          u.style.top = (r.y2 * scale - lineH) + 'px';
+          u.style.width = ((r.x2 - r.x1) * scale) + 'px';
+          u.style.height = lineH + 'px';
+          u.style.background = HIGHLIGHT_COLORS[a.color] || '#e8a213';
+          u.style.borderRadius = '1px';
+          layer.appendChild(u);
+        }
       } else if (a.type === 'note') {
         const m = document.createElement('div');
         m.className = 'pr-note-marker';
@@ -1184,7 +1399,7 @@
     list.innerHTML = anns.map((a, i) => `
       <div class="pr-note-item">
         <button class="pr-note-del" data-annidx="${i}" title="删除">✕</button>
-        ${a.type === 'highlight' ? '<span class="badge badge-source">高亮</span>' : '<span class="badge badge-done">笔记</span>'}
+        ${a.type === 'highlight' ? '<span class="badge badge-source">高亮</span>' : a.type === 'underline' ? '<span class="badge badge-source">下划线</span>' : '<span class="badge badge-done">笔记</span>'}
         <div class="pr-note-quote">${esc((a.text || '').slice(0, 100))}</div>
         ${a.note ? `<div class="pr-note-text">${esc(a.note)}</div>` : ''}
         <div class="pr-note-meta">第 ${a.page} 页 · <a href="#" data-goto="${a.page}" style="color:var(--primary)">跳转</a></div>
@@ -1252,9 +1467,17 @@
   function showSelectionToolbar(clientRects) {
     const tb = $('prSelectionToolbar');
     const last = clientRects[clientRects.length - 1];
-    tb.style.left = (last.left + last.width / 2 - 50) + 'px';
-    tb.style.top = (last.bottom + 8) + 'px';
     tb.classList.remove('hidden');
+    // 水平：对准选区中心并收拢到窗口内；垂直：默认在选区下方，靠底时翻到上方
+    const tw = tb.offsetWidth || 240;
+    const th = tb.offsetHeight || 40;
+    let left = last.left + last.width / 2 - tw / 2;
+    left = Math.max(10, Math.min(left, window.innerWidth - tw - 10));
+    let top = last.bottom + 10;
+    if (top + th > window.innerHeight - 10) top = Math.max(10, last.top - th - 10);
+    const z = uiZoom();
+    tb.style.left = (left / z) + 'px';
+    tb.style.top = (top / z) + 'px';
   }
   function hideSelectionToolbar() { $('prSelectionToolbar').classList.add('hidden'); }
 
@@ -1296,6 +1519,13 @@
     addAnnotation({ id: 'a' + Date.now(), page: sel.pageNum, type: 'highlight', color: pr.highlightColor, rect: [x1, y1, x2, y2], text: sel.text, note: '', createdAt: new Date().toISOString() });
   }
 
+  // 下划线：按选区的逐行矩形，在每行文字底部画一条线（跨行选中会得到多条下划线）
+  function doUnderline() {
+    const sel = pr.currentSelection;
+    if (!sel) return;
+    addAnnotation({ id: 'a' + Date.now(), page: sel.pageNum, type: 'underline', color: pr.highlightColor, rects: sel.rects, text: sel.text, note: '', createdAt: new Date().toISOString() });
+  }
+
   function doNote() {
     const sel = pr.currentSelection;
     if (!sel) return;
@@ -1333,8 +1563,9 @@
       ${buttons.length ? `<div class="pr-popover-foot">${buttons.map((b) => `<button class="btn ${b.cls || ''}" data-popbtn="${b.text}">${esc(b.text)}</button>`).join('')}</div>` : ''}`;
     const tb = $('prSelectionToolbar');
     const tbRect = tb.classList.contains('hidden') ? { left: 300, bottom: 300 } : tb.getBoundingClientRect();
-    pop.style.left = (pos.left != null ? pos.left : Math.max(10, tbRect.left)) + 'px';
-    pop.style.top = (pos.top != null ? pos.top : Math.min(window.innerHeight - 250, tbRect.bottom + 8)) + 'px';
+    const z = uiZoom();
+    pop.style.left = ((pos.left != null ? pos.left : Math.max(10, tbRect.left)) / z) + 'px';
+    pop.style.top = ((pos.top != null ? pos.top : Math.min(window.innerHeight - 250, tbRect.bottom + 8)) / z) + 'px';
     pop.classList.remove('hidden');
     pop.querySelector('[data-popclose]')?.addEventListener('click', hidePopover);
     pop.querySelectorAll('[data-popbtn]').forEach((btn) => btn.addEventListener('click', () => {
@@ -1369,6 +1600,22 @@
     $('prZoomIn').addEventListener('click', () => { pr.scale = Math.min(4, pr.scale + 0.2); $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%'; rebuildAllPages(); });
     $('prFitWidth').addEventListener('click', fitWidth);
 
+    // Ctrl + 鼠标滚轮 / 笔记本触控板捏合 缩放（Chromium 中捏合手势会带 ctrlKey 的 wheel 事件）
+    let zoomDebounce = null;
+    $('prPages').addEventListener('wheel', (e) => {
+      if (!pr.open || !(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      pr.scale = Math.max(0.5, Math.min(4, pr.scale + (e.deltaY > 0 ? -0.07 : 0.07)));
+      $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%';
+      clearTimeout(zoomDebounce);
+      zoomDebounce = setTimeout(() => {
+        const c = $('prPages');
+        const ratio = c.scrollTop / Math.max(1, c.scrollHeight); // 缩放后尽量保持阅读位置
+        rebuildAllPages();
+        requestAnimationFrame(() => { c.scrollTop = ratio * c.scrollHeight; });
+      }, 60);
+    }, { passive: false });
+
     document.querySelectorAll('.pr-color').forEach((c) => c.addEventListener('click', () => {
       document.querySelectorAll('.pr-color').forEach((x) => x.classList.remove('active'));
       c.classList.add('active'); pr.highlightColor = c.dataset.color;
@@ -1394,9 +1641,25 @@
       if (!btn) return;
       const sel = pr.currentSelection;
       if (!sel) return;
+      if (btn.dataset.sel === 'copy') {
+        navigator.clipboard.writeText(sel.text).then(() => toast('已复制选中内容', 'success')).catch(() => toast('复制失败', 'error'));
+        return;
+      }
       if (btn.dataset.sel === 'translate') translateSelection(sel.text);
       else if (btn.dataset.sel === 'highlight') doHighlight();
+      else if (btn.dataset.sel === 'underline') doUnderline();
       else if (btn.dataset.sel === 'note') doNote();
+    });
+
+    // 我的思考：PDF 阅读器侧栏直接写，保存到文献库 thoughts 字段
+    $('btnPrThoughtsSave').addEventListener('click', async () => {
+      const v = $('prThoughts').value.trim();
+      try {
+        const updated = await api('/api/literature/' + pr.recordId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ thoughts: v }) });
+        const idx = items.findIndex((x) => x.id === pr.recordId); if (idx >= 0) items[idx] = updated;
+        $('prThoughtsState').textContent = v ? '已保存' : '';
+        toast('我的思考已保存', 'success');
+      } catch (e2) { toast('保存失败：' + e2.message, 'error'); }
     });
 
     // 右侧翻译面板
@@ -1444,8 +1707,11 @@
     const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', ai: 'viewAI', worldlib: 'viewWorldlib' };
     for (const [key, id] of Object.entries(map)) $(id).classList.toggle('hidden', key !== v);
     const isLib = v === 'library';
+    // 文献中心：主区固定不滚动，表格容器内滚动（横向滚动条贴可视区底部）
+    document.querySelector('.main-area').classList.toggle('lib-mode', isLib);
     $('searchInput').classList.toggle('hidden', !isLib);
     $('btnParseAll').classList.toggle('hidden', !isLib);
+    $('btnRefreshRanks').classList.toggle('hidden', !isLib);
     $('btnExport').classList.toggle('hidden', !isLib);
     if (v === 'home') renderHome();
     if (v === 'projects') renderProjects();
@@ -1531,7 +1797,7 @@
     $('readingList').innerHTML = recent.length ? recent.map((i) => {
       const p = i.readingProgress || '未阅读';
       const w = p === '已阅读' ? 100 : p === '阅读中' ? 50 : 6;
-      const color = p === '已阅读' ? 'var(--green)' : p === '阅读中' ? 'var(--orange)' : '#ddd4e4';
+      const color = p === '已阅读' ? 'var(--green)' : p === '阅读中' ? 'var(--orange)' : 'var(--scrollbar-hover)';
       return `<div class="reading-item"><div class="reading-title"><b title="${esc(i.title || '')}">${esc(clipTitle(i.title || i.originalName || '未命名', 26))}</b><span style="color:${color};flex-shrink:0">${p}</span></div><div class="reading-bar"><span style="width:${w}%;background:${color}"></span></div></div>`;
     }).join('') : '<div class="pr-loading">还没有上传 PDF 文献</div>';
 
@@ -1581,8 +1847,8 @@
   const CAL_TYPES = {
     task: { color: '#d9820a', label: '任务' },
     deadline: { color: '#e5484d', label: '返修截止' },
-    submit: { color: '#81308C', label: '投稿' },
-    milestone: { color: '#a94bb5', label: '论文节点' },
+    submit: { color: 'var(--primary)', label: '投稿' },
+    milestone: { color: 'var(--primary-light)', label: '论文节点' },
     project: { color: '#0ea5a4', label: '项目' },
   };
   function calEventsByDate() {
@@ -1838,6 +2104,31 @@
     wlRankRunning = false;
   }
 
+  // 手动更新单篇期刊等级：点卡片上的 🔄 按钮。不受自动补查的失败缓存限制，
+  // 且失败原因会明确提示（如未配置 easyScholar SecretKey）。
+  function rankRefreshBtn(id) {
+    return `<button class="rank-refresh" data-rankrefresh="${id}" title="手动更新期刊等级（easyScholar）">🔄</button>`;
+  }
+  async function manualRankRefresh(id) {
+    const p = papers.find((x) => x.id === id);
+    if (!p) return;
+    if (!p.journal) { toast('请先在编辑中填写目标期刊', 'error'); return; }
+    wlRankFailed.delete(p.journal);
+    const box = document.querySelector(`[data-rankfor="${id}"]`);
+    if (box) box.innerHTML = '<span class="cell-empty">查询中…</span>' + rankRefreshBtn(id);
+    try {
+      const rank = await api('/api/journal-rank?name=' + encodeURIComponent(p.journal));
+      const updated = await api('/api/papers/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rank }) });
+      const idx = papers.findIndex((x) => x.id === id);
+      if (idx >= 0) papers[idx] = updated;
+      if (box) box.innerHTML = (rank.items?.length ? rankChips(rank.items) : `<span class="cell-empty">${esc(rank.summary)}</span>`) + rankRefreshBtn(id);
+      toast(`期刊等级已更新：${rank.summary}`, 'success');
+    } catch (e) {
+      if (box) box.innerHTML = `<span class="rank-err">⚠ ${esc(e.message)}</span>` + rankRefreshBtn(id);
+      toast('期刊等级更新失败：' + e.message, 'error');
+    }
+  }
+
   function statusBadge(s) {
     return `<span class="paper-status ${STATUS_CLS[s] || ''}">${esc(s)}</span>`;
   }
@@ -1874,7 +2165,7 @@
         let startDate = last.date;
         if (hist.length <= 1 && p.submitDate && p.submitDate < last.date) startDate = p.submitDate;
         const d = Math.max(0, Math.floor((Date.now() - new Date(startDate + 'T00:00:00')) / 86400000));
-        stay = `<span class="meta-chip">⏱ 当前状态已停留 ${d} 天</span>`;
+        stay = `<span class="meta-chip" title="当前状态起始日：${esc(startDate)}（可在编辑弹窗中修正）">⏱ 当前状态已停留 ${d} 天</span>`;
       }
       // 返修截止提醒
       let ddl = '';
@@ -1886,9 +2177,13 @@
             : `<span class="ddl-chip${d <= 7 ? ' urgent' : ''}">⏳ 返修截止 ${p.revisionDeadline}（剩 ${d} 天）</span>`;
         }
       }
-      const rank = p.rank?.summary
-        ? `<div class="paper-rank" data-rankfor="${p.id}">${rankChips(p.rank.items)}</div>`
-        : (p.journal ? `<div class="paper-rank" data-rankfor="${p.id}"><span class="cell-empty">期刊等级自动查询中…</span></div>` : '');
+      const rank = p.journal ? `
+        <div class="paper-rank" data-rankfor="${p.id}">
+          ${p.rank?.summary
+            ? (p.rank.items?.length ? rankChips(p.rank.items) : `<span class="cell-empty">${esc(p.rank.summary)}</span>`)
+            : '<span class="cell-empty">期刊等级未查询</span>'}
+          <button class="rank-refresh" data-rankrefresh="${p.id}" title="手动更新期刊等级（easyScholar）">🔄</button>
+        </div>` : '';
       return `<div class="card paper-card" data-paper="${p.id}" title="点击编辑">
         <div class="paper-card-top">
           <div class="paper-title">《${esc(p.title)}》</div>
@@ -1970,6 +2265,9 @@
     $('paperNotes').value = p?.notes || '';
     paperDraft = { history: JSON.parse(JSON.stringify(p?.history || [])), rank: p?.rank ? JSON.parse(JSON.stringify(p.rank)) : null, reviewTranslation: p?.reviewTranslation || null };
     if (!paperDraft.history.length) paperDraft.history = [{ status: $('paperStatus').value, date: todayStr(), note: '创建论文' }];
+    // 状态起始日：默认取最近一条动态的日期，可手动修正（停留天数按这天起算）
+    const hist0 = paperDraft.history;
+    $('paperStatusDate').value = (hist0.length ? hist0[hist0.length - 1].date : '') || p?.submitDate || todayStr();
     $('paperRankChips').innerHTML = paperDraft.rank?.summary ? rankChips(paperDraft.rank.items) : '';
     // 已有译文则显示，否则收起
     const rtWrap = $('reviewTransWrap');
@@ -2058,29 +2356,48 @@
     if (!title) { toast('请输入论文标题', 'error'); return; }
     const status = $('paperStatus').value;
     const history = JSON.parse(JSON.stringify(paperDraft.history));
-    // 状态与最后一条历史不一致时自动补一条动态
-    if (!history.length || history[history.length - 1].status !== status) {
-      history.push({ status, date: todayStr(), note: '状态更新' });
+    // 状态起始日：用户可修正（停留天数按它计算）。状态变化时作为新动态的日期；状态未变时用于修正当前状态的起始日
+    const effDate = /^\d{4}-\d{2}-\d{2}$/.test($('paperStatusDate').value || '') ? $('paperStatusDate').value : todayStr();
+    if (!history.length) {
+      history.push({ status, date: effDate, note: '创建论文' });
+    } else if (history[history.length - 1].status !== status) {
+      history.push({ status, date: effDate, note: '状态更新' });
+    } else {
+      history[history.length - 1].date = effDate;
     }
+    const journal = $('paperJournal').value.trim();
+    const original = paperModalId ? papers.find((x) => x.id === paperModalId) : null;
+    const journalChanged = !!journal && journal !== (original?.journal || '');
+    // 期刊名变更时：清空旧等级，改为携带 null 让后端置空并触发重查，避免旧等级残留导致不更新
+    const rankToSend = journalChanged ? null : paperDraft.rank;
     const body = {
-      title, journal: $('paperJournal').value.trim(), status,
+      title, journal, status,
       projectId: $('paperProject').value || null,
       submitDate: $('paperSubmitDate').value, revisionDeadline: $('paperDeadline').value,
       backupJournals: $('paperBackup').value.trim(), notes: $('paperNotes').value,
       reviewTranslation: paperDraft.reviewTranslation || '',
-      history, rank: paperDraft.rank,
+      history, rank: rankToSend,
     };
     try {
+      let saved;
       if (paperModalId) {
-        const updated = await api('/api/papers/' + paperModalId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        const idx = papers.findIndex((x) => x.id === paperModalId); if (idx >= 0) papers[idx] = updated;
+        saved = await api('/api/papers/' + paperModalId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const idx = papers.findIndex((x) => x.id === paperModalId); if (idx >= 0) papers[idx] = saved;
       } else {
-        const created = await api('/api/papers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        papers.unshift(created);
+        saved = await api('/api/papers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        papers.unshift(saved);
       }
       $('paperModal').classList.add('hidden');
       renderPaperTab(); renderChatMeta();
-      toast('论文已保存', 'success');
+      // 期刊名变更（或新增论文带期刊）时自动重查等级；清除失败缓存，允许重查
+      if (journalChanged) wlRankFailed.delete(journal);
+      const needRank = (journalChanged || !saved.rank?.summary) && !!journal;
+      if (needRank) {
+        toast('论文已保存，正在自动更新期刊等级…', 'success');
+        autoFillPaperRanks();
+      } else {
+        toast('论文已保存', 'success');
+      }
     } catch (e) { toast(e.message, 'error'); }
   }
 
@@ -2568,6 +2885,8 @@
     });
     $('btnAddPaper').addEventListener('click', () => (paperTab === 'journal' ? openPaperModal(null) : openThesisModal(null)));
     $('paperCards').addEventListener('click', (e) => {
+      const rb = e.target.closest('[data-rankrefresh]');
+      if (rb) { e.stopPropagation(); manualRankRefresh(rb.dataset.rankrefresh); return; }
       const card = e.target.closest('[data-paper]');
       if (card) openPaperModal(card.dataset.paper);
     });
@@ -2581,6 +2900,15 @@
     $('btnPaperSave').addEventListener('click', savePaperModal);
     $('btnPaperDelete').addEventListener('click', deletePaperModal);
     $('btnQueryRank').addEventListener('click', queryPaperRank);
+    // 期刊名变更时立即清空等级（旧期刊的等级作废），保存后会按新期刊名自动重查
+    $('paperJournal').addEventListener('input', () => {
+      if (paperDraft && paperDraft.rank) {
+        paperDraft.rank = null;
+        $('paperRankChips').innerHTML = '<span class="rank-err" style="opacity:.75">期刊已变更，保存后将自动重新查询等级</span>';
+      }
+    });
+    // 状态切换时，起始日默认重置为今天（用户可手动改成实际生效日）
+    $('paperStatus').addEventListener('change', () => { $('paperStatusDate').value = todayStr(); });
     $('btnHistAdd').addEventListener('click', () => {
       const status = $('histStatus').value;
       const date = $('histDate').value || todayStr();
@@ -2729,7 +3057,7 @@
       points: [
         { ico: '🏅', html: '<b>easyScholar SecretKey</b>：在 easyScholar 官网免费申请，填后点「期刊等级」按钮可自动查询中科院 / ABS / SSCI 分区' },
         { ico: '🈶', html: '<b>翻译提供方</b>：默认用上方 API Key（DeepSeek）；不想配密钥可改选「免费接口」' },
-        { ico: '💾', html: '<b>数据保存目录</b>：默认存在<b>安装目录下</b>，想换位置再填，如 <code>D:\\文献库</code>，留空用默认' },
+        { ico: '💾', html: '<b>数据保存目录</b>：默认存在<b>系统用户数据目录</b>（升级不丢失），想换位置再填，如 <code>D:\\文献库</code>，留空用默认' },
         { ico: '💡', html: '填完点弹窗底部<b>「保存设置」</b>生效' },
       ],
       target: '#btnNavSettings', view: 'home',
@@ -2820,11 +3148,25 @@
   }
 
   function obMarkDone() {
+    // 持久化到后端数据目录（settings.onboarded），跨启动、跨版本、跨端口都稳定保留；
+    // 不再依赖浏览器 localStorage（其按 origin 隔离，后端随机端口会导致每次重置）。
+    settings.onboarded = true;
+    api('/api/onboarding/done', { method: 'POST' }).catch(() => {});
     try { localStorage.setItem(OB_KEY, '1'); } catch (_) { /* ignore */ }
   }
 
   function obShouldShow() {
-    try { return localStorage.getItem(OB_KEY) !== '1'; } catch (_) { return true; }
+    // 后端持久化标记 + 旧版 localStorage 标记，任一表示“已看过”就不显示，
+    // 兼容老用户（此前仅写 localStorage）升级后不重复弹出。
+    const backendSeen = settings && settings.onboarded === true;
+    let legacySeen = false;
+    try { legacySeen = localStorage.getItem(OB_KEY) === '1'; } catch (_) { /* ignore */ }
+    if (legacySeen && !backendSeen) {
+      // 老用户看过但后端未记录，补写后端标记，避免下次仍读到 false
+      obMarkDone();
+      return false;
+    }
+    return !backendSeen;
   }
 
   // 定位高亮框到目标元素，卡片跟随其位置（避免超出视口）

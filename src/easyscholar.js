@@ -74,6 +74,11 @@ export function formatRank(data) {
     items.push({ label, value: String(val) });
   }
 
+  // 若 4 类等级均无数据，返回明确占位，避免 summary 为空字符串被前端/后端误判为「未查询」而反复请求
+  if (!items.length) {
+    return { summary: '未收录于中科院/新锐/ABS/SSCI 分区', items: [] };
+  }
+
   return {
     summary: items.map((i) => `${i.label} ${i.value}`).join('  ·  '),
     items,

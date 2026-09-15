@@ -42,6 +42,7 @@ function blankRecord() {
     docType: 'empirical', // 'empirical' 实证类 | 'model' 模型类
     collectionId: null,   // 所属分类（collections.id，null = 未分类）
     createdAt: new Date().toISOString(),
+    importedAt: new Date().toISOString(), // 导入时间（表格展示 + 排序用）
     parsedAt: null,
     readingProgress: '未阅读',
     rating: 0,
@@ -50,6 +51,7 @@ function blankRecord() {
     journalRankDetail: [],
     journalRankError: '',
     annotations: [], // PDF 阅读器的高亮与笔记
+    thoughts: '',    // 我的思考（用户手写，AI 解析不会覆盖）
   };
   for (const key of FIELDS) record[key] = '';
   return record;
@@ -273,6 +275,21 @@ export function createApp({
   });
 
   // ---------- 解析 ----------
+  // 并发解析：LLM 调用是主要的耗时瓶颈，串行逐篇会非常慢。
+  // 用有限并发（默认 3）并发跑，既显著提速，又避免同时打爆 LLM 接口/限流。
+  async function runWithConcurrency(tasks, limit) {
+    const results = new Array(tasks.length);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+      while (cursor < tasks.length) {
+        const i = cursor++;
+        results[i] = await tasks[i]();
+      }
+    });
+    await Promise.all(workers);
+    return results;
+  }
+
   app.post('/api/parse', async (req, res) => {
     const settings = store.getSettings();
     const docType = req.body?.docType;
@@ -281,8 +298,8 @@ export function createApp({
     if (Array.isArray(ids) && ids.length) items = items.filter((it) => ids.includes(it.id));
     else items = items.filter((it) => it.status !== 'done' && it.status !== 'parsing');
 
-    const results = [];
-    for (const item of items) results.push(await parseRecord(item, settings, docType));
+    const concurrency = Math.max(1, Math.min(8, parseInt(req.body?.concurrency, 10) || 4));
+    const results = await runWithConcurrency(items.map((item) => () => parseRecord(item, settings, docType)), concurrency);
     res.json({ results });
   });
 
@@ -329,14 +346,19 @@ export function createApp({
   });
 
   // ---------- 查询 ----------
-  app.get('/api/literature', (_req, res) => res.json(store.listLiterature()));
+  app.get('/api/literature', (_req, res) => res.json(store.listLiterature().map((it) => ({
+    ...it,
+    // 旧数据没有 importedAt 字段：依次回退到解析时间 / 创建时间
+    importedAt: it.importedAt || it.parsedAt || it.createdAt || null,
+  }))));
   app.get('/api/literature/:id', (req, res) => {
     const item = store.getLiterature(req.params.id);
     if (!item) return res.status(404).json({ error: '记录不存在' });
     res.json(item);
   });
 
-  const EDITABLE = [...FIELDS, 'readingProgress', 'rating', 'thumb', 'docType', 'annotations', 'collectionId', 'title'];
+  const EDITABLE = [...FIELDS, 'readingProgress', 'rating', 'thumb', 'docType', 'annotations', 'collectionId', 'title', 'thoughts',
+    'journalRank', 'journalRankDetail', 'journalRankError', 'importedAt'];
   app.patch('/api/literature/:id', (req, res) => {
     const item = store.getLiterature(req.params.id);
     if (!item) return res.status(404).json({ error: '记录不存在' });
@@ -672,6 +694,31 @@ export function createApp({
     }
   });
 
+  // 单独刷新某条文献的期刊等级（文献中心「更新等级」按钮）：
+  // 按该记录当前 journal 重新查询 easyScholar，并写回 journalRank / journalRankDetail
+  app.post('/api/literature/:id/refresh-rank', async (req, res) => {
+    const item = store.getLiterature(req.params.id);
+    if (!item) return res.status(404).json({ error: '记录不存在' });
+    const settings = store.getSettings();
+    if (!settings.easyScholarKey) return res.status(400).json({ error: '未配置 easyScholar SecretKey，请在「AI 设置」中填写后重试' });
+    const journal = String(item.journal || '').trim();
+    if (!journal) return res.status(400).json({ error: '该文献没有期刊名，请先在「编辑」中填写「期刊/会议」字段' });
+    try {
+      const data = await queryPublicationRank(journal, settings.easyScholarKey);
+      if (data?.code !== 200) {
+        const errMsg = 'easyScholar：' + (data?.msg || '未查询到该期刊');
+        store.upsertLiterature({ ...item, journalRankError: errMsg });
+        return res.status(404).json({ error: errMsg });
+      }
+      const f = formatRank(data.data);
+      const updated = { ...item, journalRank: f.summary, journalRankDetail: f.items, journalRankError: '' };
+      store.upsertLiterature(updated);
+      res.json(updated);
+    } catch (e) {
+      res.status(502).json({ error: '查询失败：' + e.message });
+    }
+  });
+
   // ---------- AI 知识库上下文 ----------
   function clipText(s, n) {
     const t = String(s || '').replace(/\s+/g, ' ').trim();
@@ -1001,8 +1048,126 @@ export function createApp({
     res.json({ imported, skipped, records });
   });
 
+  // ---------- 世图科研下载助手：服务端直接下载 PDF 并导入文献中心 ----------
+  const DL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+  function fetchWithTimeout(u, opts = {}, ms = 90000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    return fetch(u, { ...opts, signal: ctrl.signal, redirect: 'follow' })
+      .finally(() => clearTimeout(timer));
+  }
+
+  function sanitizeWlName(s) {
+    return String(s || '').replace(/[\\/:*?"<>|\r\n]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80) || 'document';
+  }
+
+  // 从解析页 HTML 中提取 PDF 直链（兼容「文件下载」按钮 href / 页面裸链接 / onclick 跳转）
+  function extractPdfLink(html, baseUrl) {
+    if (!html) return null;
+    const cands = [];
+    let m;
+    const attrRe = /(?:href|src)\s*=\s*["']([^"']+)["']/gi;
+    while ((m = attrRe.exec(html)) !== null) cands.push(m[1]);
+    const jsRe = /(?:location\.href|window\.open|location\.replace)\s*[=(]\s*["']([^"']+)["']/gi;
+    while ((m = jsRe.exec(html)) !== null) cands.push(m[1]);
+    const aTextRe = /<a[^>]*>\s*[^<]*文件下载[^<]*\s*<\/a>/gi;
+    while ((m = aTextRe.exec(html)) !== null) {
+      const hm = /href\s*=\s*["']([^"']+)["']/i.exec(m[0]);
+      if (hm) cands.unshift(hm[1]); // 「文件下载」按钮优先
+    }
+    const bareRe = /https?:\/\/[^\s"'<>()]+/gi;
+    while ((m = bareRe.exec(html)) !== null) cands.push(m[0]);
+    const abs = (u) => { try { return new URL(u, baseUrl).href; } catch (_) { return null; } };
+    const list = cands.map((u) => String(u || '').trim()).filter(Boolean).map(abs).filter(Boolean);
+    return list.find((u) => /\.pdf(\?|#|$)/i.test(u))
+        || list.find((u) => /getdownfile|download|UPLOAD/i.test(u) && !/\.ashx\?action=getdownfile/i.test(u))
+        || null;
+  }
+
+  function isPdfBuffer(buf) {
+    return buf && buf.length > 4 && buf.subarray(0, 5).toString('latin1') === '%PDF-';
+  }
+
+  // 下载世图 PDF：先请求用户给的链接；若返回 HTML 解析页，则提取真实直链再下载
+  async function downloadWorldlibPdf(pageUrl) {
+    const headers = {
+      'User-Agent': DL_UA,
+      'Accept': 'text/html,application/xhtml+xml,application/pdf,*/*;q=0.8,*;q=0.5',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+    };
+    let cur = pageUrl;
+    for (let hop = 0; hop < 3; hop++) {
+      const r = await fetchWithTimeout(cur, { headers });
+      if (!r.ok) throw new Error(`链接响应 ${r.status}，链接可能已失效或需要登录世图账号`);
+      const ct = String(r.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('pdf') || /\.pdf(\?|#|$)/i.test(r.url || cur)) {
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (!isPdfBuffer(buf)) throw new Error('下载内容不是有效的 PDF 文件');
+        return { buf, finalUrl: r.url || cur };
+      }
+      // HTML 解析页：提取直链后继续
+      const html = await r.text();
+      const direct = extractPdfLink(html, r.url || cur);
+      if (!direct) throw new Error('未能从页面解析出 PDF 直链（链接可能已失效，或需要登录世图账号后重新复制链接）');
+      cur = direct;
+      headers['Referer'] = r.url || pageUrl;
+    }
+    throw new Error('多次跳转仍未拿到 PDF 文件，请确认链接是否为「文件下载」链接');
+  }
+
+  app.post('/api/worldlib/download', async (req, res) => {
+    const title = String(req.body?.title || '').trim().slice(0, 200);
+    const url = String(req.body?.url || '').trim();
+    if (!title || !url) return res.status(400).json({ error: '缺少标题或链接地址' });
+    if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: '链接格式不正确' });
+
+    // 去重：标题或 DOI 已存在则跳过（提示但不报错）
+    const list = store.listLiterature();
+    const key = title.toLowerCase();
+    const doiKey = /^10\.\d{4,9}\//.test(title) ? key : null;
+    const dup = list.find((r) => String(r.title || '').trim().toLowerCase() === key
+      || (doiKey && String(r.doi || '').trim().toLowerCase() === doiKey));
+    if (dup) return res.status(409).json({ error: '文献中心已有同名/同 DOI 文献，已跳过', duplicate: true });
+
+    try {
+      const { buf, finalUrl } = await downloadWorldlibPdf(url);
+      const safe = sanitizeWlName(title);
+      const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safe}.pdf`;
+      const filePath = path.join(currentUploadDir, filename);
+      fs.writeFileSync(filePath, buf);
+      const rec = blankRecord();
+      rec.title = title;
+      rec.doi = doiKey ? title : '';
+      rec.source = 'worldlib';
+      rec.worldlibUrl = url.slice(0, 500);
+      rec.worldlibFileUrl = String(finalUrl).slice(0, 800);
+      Object.assign(rec, {
+        originalName: safe + '.pdf',
+        filename,
+        filePath,
+        fileSize: buf.length,
+      });
+      store.upsertLiterature(rec);
+      res.json({ ok: true, record: rec });
+    } catch (e) {
+      const msg = e?.name === 'AbortError' ? '下载超时（90 秒），请稍后重试' : (e.message || '下载失败');
+      res.status(502).json({ error: msg });
+    }
+  });
+
+
   // ---------- 设置 ----------
   app.get('/api/settings', (_req, res) => res.json(store.getSettings()));
+
+  // 新手引导完成标记：持久化到数据目录（而非浏览器 localStorage，避免端口随机导致每次重置）
+  app.post('/api/onboarding/done', (_req, res) => {
+    const settings = store.getSettings();
+    settings.onboarded = true;
+    store.saveSettings(settings);
+    res.json({ onboarded: true });
+  });
+
   app.post('/api/settings', (req, res) => {
     const cur = store.getSettings();
     const next = { ...cur, ...(req.body || {}) };
@@ -1037,7 +1202,7 @@ export function createApp({
     const items = store.listLiterature();
     const headers = ['标题', '作者', '期刊/会议', '年份', 'DOI', '摘要', '关键词', '研究背景',
       '一段话总结', '创新点', '理论', '研究方法', '研究设计', '构念', '实验结果', '结论', '批判性思考',
-      '模型', '参数讨论', '期刊等级', '阅读进度', '评级', '解析状态', '来源'];
+      '模型', '参数讨论', '期刊等级', '阅读进度', '评级', '解析状态', '来源', '我的思考', '导入时间'];
     const fieldMap = ['title', 'authors', 'journal', 'year', 'doi', 'abstract', 'keywords', 'background',
       'summary', 'innovation', 'theory', 'method', 'researchDesign', 'constructs', 'results', 'conclusion', 'criticalThinking',
       'model', 'paramDiscussion'];
@@ -1052,7 +1217,8 @@ export function createApp({
     for (const it of items) {
       const row = fieldMap.map((f) => csvEscape(it[f] ?? ''));
       row.push(csvEscape(it.journalRank || ''), csvEscape(it.readingProgress || '未阅读'),
-        csvEscape(it.rating || 0), csvEscape(it.status), csvEscape(it.source || ''));
+        csvEscape(it.rating || 0), csvEscape(it.status), csvEscape(it.source || ''), csvEscape(it.thoughts || ''),
+        csvEscape(it.importedAt || it.parsedAt || it.createdAt || ''));
       lines.push(row.join(','));
     }
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
