@@ -61,6 +61,7 @@
         <div class="nav-item" data-view="papers"><span class="nav-ico">📮</span>论文进度</div>
         <div class="nav-item" data-view="mail"><span class="nav-ico">📧</span>邮箱<span id="navMailBadge" class="nav-badge hidden">0</span></div>
         <div class="nav-item" data-view="notes"><span class="nav-ico">🧪</span>研究记录</div>
+        <div class="nav-item" data-view="ideas"><span class="nav-ico">💡</span>灵感孵化</div>
         <div class="nav-item" data-view="ai"><span class="nav-ico">🤖</span>AI 助手</div>
         <div class="nav-item" data-view="worldlib"><span class="nav-ico">🌍</span>世图下载助手</div>
       </nav>
@@ -176,6 +177,7 @@
             <button class="tb-btn" id="btnBulkParse">▶ 解析选中</button>
             <button class="tb-btn" id="btnBulkReparse" title="忽略解析状态，强制对选中文献重新跑一遍 AI 解析">↻ 批量重新解析</button>
             <button class="tb-btn" id="btnBulkProgress">◔ 标记进度</button>
+            <button class="tb-btn" id="btnBulkCollection">▣ 移动到分类</button>
             <button class="tb-btn" id="btnBulkRank" title="按当前期刊名重新查询 easyScholar 等级">🏅 更新等级</button>
             <button class="tb-btn danger" id="btnBulkDelete">🗑 批量删除</button>
           </div>
@@ -278,6 +280,22 @@
           <span class="tb-label">支持 Study 划分与经管实证研究模板</span>
         </div>
         <div id="noteCards" class="note-cards"></div>
+      </section>
+
+      <!-- ===== 视图：灵感孵化 ===== -->
+      <section id="viewIdeas" class="view hidden">
+        <div class="view-toolbar idea-toolbar">
+          <button class="tb-btn accent" id="btnAddIdea">＋ 记录灵感</button>
+          <select id="ideaStatusFilter" class="tb-select">
+            <option value="all">全部状态</option>
+            <option value="seed">待孵化</option>
+            <option value="incubated">已孵化</option>
+          </select>
+          <input id="ideaSearch" class="tb-input" type="search" placeholder="搜索标题、内容或标签" />
+          <span class="tb-spacer"></span>
+          <span id="ideaCount" class="stat-badge"></span>
+        </div>
+        <div id="ideaCards" class="idea-grid"></div>
       </section>
 
       <!-- ===== 视图：世图科研下载助手 ===== -->
@@ -416,6 +434,43 @@
       <div class="modal-foot">
         <button id="btnColSave" class="btn btn-primary">保存</button>
         <button id="btnColCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文献分类移动弹窗 -->
+  <div id="classModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog" style="width:400px">
+      <div class="modal-head"><h3>移动文献到分类</h3><button class="modal-close" id="btnClassClose">✕</button></div>
+      <div class="modal-body">
+        <p id="classModalHint" class="modal-desc"></p>
+        <label class="field"><span>目标分类</span><select id="classTarget" class="tb-select w100"></select></label>
+      </div>
+      <div class="modal-foot">
+        <button id="btnClassSave" class="btn btn-primary">移动</button>
+        <button id="btnClassCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 灵感编辑弹窗 -->
+  <div id="ideaModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog modal-wide">
+      <div class="modal-head"><h3 id="ideaModalTitle">记录灵感</h3><button class="modal-close" id="btnIdeaClose">✕</button></div>
+      <div class="modal-body">
+        <label class="field"><span>标题</span><input id="ideaTitle" class="tb-input w100" maxlength="120" placeholder="一句话概括这个想法" /></label>
+        <label class="field"><span>灵感原文 *</span><textarea id="ideaContent" rows="7" placeholder="记录问题、观察、矛盾、可能机制或任何尚未成形的想法"></textarea></label>
+        <div class="prof-grid">
+          <label class="field"><span>标签</span><input id="ideaTags" class="tb-input" placeholder="多个标签用逗号分隔" /></label>
+          <label class="field"><span>关联项目</span><select id="ideaProject" class="tb-select"><option value="">不关联项目</option></select></label>
+        </div>
+        <label class="field"><span>关联本地文献（作为孵化证据）</span><div id="ideaLiterature" class="lit-pick"></div></label>
+      </div>
+      <div class="modal-foot">
+        <button id="btnIdeaSave" class="btn btn-primary">保存</button>
+        <button id="btnIdeaCancel" class="btn">取消</button>
       </div>
     </div>
   </div>

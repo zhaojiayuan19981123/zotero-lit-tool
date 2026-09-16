@@ -55,6 +55,7 @@ function blankRecord() {
     journalRankError: '',
     annotations: [], // PDF 阅读器的高亮与笔记
     thoughts: '',    // 我的思考（用户手写，AI 解析不会覆盖）
+    cnkiUrl: '',     // 从知网导入时保留详情页地址
   };
   for (const key of FIELDS) record[key] = '';
   return record;
@@ -349,6 +350,20 @@ export function createApp({
     },
   });
 
+  function normalizeDocType(value) {
+    return value === 'model' ? 'model' : 'empirical';
+  }
+
+  function checkedCollection(collectionId, docType) {
+    if (collectionId === null || collectionId === undefined || collectionId === '') return null;
+    const col = store.listCollections().find((item) => item.id === String(collectionId));
+    if (!col) throw new Error('目标分类不存在，可能已被删除');
+    if (col.docType !== normalizeDocType(docType)) {
+      throw new Error(`分类「${col.name}」不属于当前文库，不能移动到该分类`);
+    }
+    return col.id;
+  }
+
   // ---------- 数据目录切换（迁移数据与上传文件） ----------
   function notifyDataDirChange(absDir) {
     if (typeof onDataDirChange === 'function') {
@@ -487,12 +502,19 @@ export function createApp({
     const files = req.files || [];
     const created = [];
     const failed = [];
-    const docType = req.body?.docType || 'empirical';
+    const docType = normalizeDocType(req.body?.docType);
+    let collectionId = null;
+    try {
+      collectionId = checkedCollection(req.body?.collectionId, docType);
+    } catch (e) {
+      for (const f of files) { try { fs.unlinkSync(f.path); } catch (_) { /* ignore */ } }
+      return res.status(400).json({ error: e.message });
+    }
     for (const f of files) {
       try {
         const record = blankRecord();
         record.docType = docType;
-        if (req.body?.collectionId) record.collectionId = req.body.collectionId;
+        record.collectionId = collectionId;
         Object.assign(record, {
           originalName: fixFileName(f.originalname),
           filename: f.filename,
@@ -550,7 +572,12 @@ export function createApp({
   app.post('/api/literature', (req, res) => {
     const record = blankRecord();
     record.title = '未命名文献';
-    if (req.body?.docType) record.docType = req.body.docType;
+    record.docType = normalizeDocType(req.body?.docType);
+    try {
+      record.collectionId = checkedCollection(req.body?.collectionId, record.docType);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
     store.upsertLiterature(record);
     res.json(record);
   });
@@ -638,13 +665,24 @@ export function createApp({
     res.json(item);
   });
 
-  const EDITABLE = [...FIELDS, 'readingProgress', 'rating', 'thumb', 'docType', 'annotations', 'collectionId', 'title', 'thoughts',
+  const EDITABLE = [...FIELDS, 'readingProgress', 'rating', 'thumb', 'docType', 'annotations', 'collectionId', 'title', 'thoughts', 'cnkiUrl',
     'journalRank', 'journalRankDetail', 'journalRankError', 'importedAt'];
   app.patch('/api/literature/:id', (req, res) => {
     const item = store.getLiterature(req.params.id);
     if (!item) return res.status(404).json({ error: '记录不存在' });
     const patch = {};
     for (const k of EDITABLE) if (k in req.body) patch[k] = req.body[k];
+    if ('docType' in patch) patch.docType = normalizeDocType(patch.docType);
+    const nextDocType = patch.docType || normalizeDocType(item.docType);
+    try {
+      if ('collectionId' in patch) patch.collectionId = checkedCollection(patch.collectionId, nextDocType);
+      else if (patch.docType && item.collectionId) {
+        const current = store.listCollections().find((c) => c.id === item.collectionId);
+        if (!current || current.docType !== nextDocType) patch.collectionId = null;
+      }
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
     const updated = { ...item, ...patch };
     store.upsertLiterature(updated);
     res.json(updated);
@@ -716,6 +754,26 @@ export function createApp({
     res.json({ ok: true, updated, readingProgress: progress });
   });
 
+  // ---------- 批量移动分类 ----------
+  app.post('/api/literature/batch-collection', (req, res) => {
+    const ids = Array.isArray(req.body?.ids) ? [...new Set(req.body.ids.filter(Boolean))] : [];
+    if (!ids.length) return res.status(400).json({ error: '未选择任何文献' });
+    const target = req.body?.collectionId === '' ? null : req.body?.collectionId;
+    const targets = ids.map((id) => store.getLiterature(id)).filter(Boolean);
+    if (!targets.length) return res.status(404).json({ error: '选中的文献不存在' });
+    if (target !== null && target !== undefined) {
+      const col = store.listCollections().find((c) => c.id === String(target));
+      if (!col) return res.status(400).json({ error: '目标分类不存在，可能已被删除' });
+      const incompatible = targets.filter((item) => normalizeDocType(item.docType) !== col.docType);
+      if (incompatible.length) {
+        return res.status(400).json({ error: `有 ${incompatible.length} 篇文献不属于「${col.docType === 'model' ? '模型类' : '实证类'}文库」，无法批量移动` });
+      }
+    }
+    const collectionId = target ? String(target) : null;
+    for (const item of targets) store.upsertLiterature({ ...item, collectionId });
+    res.json({ ok: true, updated: targets.map((item) => item.id), collectionId });
+  });
+
   // ---------- 文献分类（collections） ----------
   app.get('/api/collections', (_req, res) => res.json(store.listCollections()));
 
@@ -750,6 +808,138 @@ export function createApp({
       if (it.collectionId === req.params.id) store.upsertLiterature({ ...it, collectionId: null });
     }
     res.json({ ok: true });
+  });
+
+  // ---------- 灵感孵化 ----------
+  const ideaText = (value, max) => String(value || '').trim().slice(0, max);
+  const activeIdeaIncubations = new Set();
+  function ideaPatch(body = {}) {
+    const patch = {};
+    if ('title' in body) patch.title = ideaText(body.title, 120);
+    if ('content' in body) patch.content = ideaText(body.content, 12000);
+    if ('tags' in body) patch.tags = (Array.isArray(body.tags) ? body.tags : String(body.tags || '').split(/[,，]/))
+      .map((tag) => ideaText(tag, 30)).filter(Boolean).slice(0, 12);
+    if ('projectId' in body) patch.projectId = body.projectId ? String(body.projectId) : null;
+    if ('literatureIds' in body) patch.literatureIds = (Array.isArray(body.literatureIds) ? body.literatureIds : [])
+      .map(String).filter(Boolean).slice(0, 30);
+    return patch;
+  }
+
+  app.get('/api/ideas', (_req, res) => {
+    const list = store.listIdeas().map((idea) => {
+      if (activeIdeaIncubations.has(idea.id)) return { ...idea, status: 'incubating' };
+      if (idea.status !== 'incubating') return idea;
+      const recovered = { ...idea, status: idea.incubation ? 'incubated' : 'seed' };
+      store.upsertIdea(recovered);
+      return recovered;
+    });
+    res.json(list.sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt))));
+  });
+
+  app.post('/api/ideas', (req, res) => {
+    const now = new Date().toISOString();
+    const idea = {
+      id: store.newId(), title: '', content: '', tags: [], status: 'seed', projectId: null,
+      literatureIds: [], incubation: '', createdAt: now, updatedAt: now, incubatedAt: null,
+      ...ideaPatch(req.body),
+    };
+    if (!idea.title && !idea.content) return res.status(400).json({ error: '请填写灵感标题或内容' });
+    res.json(store.upsertIdea(idea));
+  });
+
+  app.patch('/api/ideas/:id', (req, res) => {
+    const idea = store.getIdea(req.params.id);
+    if (!idea) return res.status(404).json({ error: '灵感不存在' });
+    if (activeIdeaIncubations.has(idea.id)) return res.status(409).json({ error: '灵感正在孵化，完成后再编辑' });
+    const updated = { ...idea, ...ideaPatch(req.body), updatedAt: new Date().toISOString() };
+    if (!updated.title && !updated.content) return res.status(400).json({ error: '请填写灵感标题或内容' });
+    res.json(store.upsertIdea(updated));
+  });
+
+  app.delete('/api/ideas/:id', (req, res) => {
+    if (activeIdeaIncubations.has(req.params.id)) return res.status(409).json({ error: '灵感正在孵化，完成后再删除' });
+    if (!store.deleteIdea(req.params.id)) return res.status(404).json({ error: '灵感不存在' });
+    res.json({ ok: true });
+  });
+
+  app.post('/api/ideas/:id/incubate', async (req, res) => {
+    const idea = store.getIdea(req.params.id);
+    if (!idea) return res.status(404).json({ error: '灵感不存在' });
+    if (activeIdeaIncubations.has(idea.id)) return res.status(409).json({ error: '这条灵感正在孵化，请等待当前任务完成' });
+    const am = activeModel();
+    if (!am) return res.status(400).json({ error: noModelError() });
+
+    const project = store.listProjects().find((p) => p.id === idea.projectId);
+    const selected = (idea.literatureIds || []).slice(0, 20)
+      .map((id) => store.getLiterature(id)).filter(Boolean);
+    const literature = selected.length
+      ? selected.map((item, index) => {
+        const fields = [
+          `标题：${clip(item.title || item.originalName || '未命名', 280)}`,
+          item.authors ? `作者：${clip(item.authors, 180)}` : '',
+          item.year ? `年份：${clip(item.year, 20)}` : '',
+          item.abstract ? `摘要：${clip(item.abstract, 1200)}` : '',
+          item.innovation ? `已有创新点：${clip(item.innovation, 700)}` : '',
+          item.criticalThinking ? `批判性思考：${clip(item.criticalThinking, 700)}` : '',
+        ].filter(Boolean).join('\n');
+        return `[文献${index + 1}]\n${fields}`;
+      }).join('\n\n')
+      : '没有关联本地文献。所有涉及新颖性或文献现状的判断必须标记为“待文献验证”。';
+    const prompt = `请把下面的科研灵感孵化成一个可验证的初步创新点。\n\n灵感标题：${ideaText(idea.title, 120) || '未命名'}\n灵感原文：${ideaText(idea.content, 12000)}\n标签：${(idea.tags || []).join('、') || '无'}\n关联项目：${project ? `${project.name || '未命名项目'}；${ideaText(project.description, 1200)}` : '无'}\n\n可用的本地文献证据：\n${literature}`;
+    const systemPrompt = [
+      '你是严谨的科研创新孵化助手。目标是把研究者的一条原始灵感收敛为“可证伪、可执行、可审查”的初步创新点，而不是夸大其新颖性。',
+      '仅可引用用户提供的本地文献，并严格使用[文献1]这样的编号。禁止编造作者、题名、结论、数据、引用或检索结果。没有证据时明确写“待文献验证”。',
+      '避免把“把X应用到Y”直接当作创新；应说明它会揭示什么新机制、放松什么关键假设、解决什么矛盾，或产生何种有意义的正负结果。',
+      '按以下固定结构输出 Markdown：',
+      '## 核心创新主张（1段，说明问题、差异与贡献类型）',
+      '## 可检验假设（2-4条，每条包含方向、机制和可证伪条件）',
+      '## 文献依据与证据缺口（区分已有证据和待验证判断）',
+      '## 与既有研究的差异（最接近方案、关键增量、为何不只是简单组合）',
+      '## 最小可行验证（数据、对照/基线、指标、成功与失败阈值，优先设计低成本试验）',
+      '## 实施资源（数据可得性、方法、软件/算力、预计工期；未知处给核查项）',
+      '## 风险与审稿人质疑（至少3条，并给对应缓解实验）',
+      '## 下一步行动（按优先级列出未来7天可完成事项）',
+      '结尾给出“成熟度：概念/待验证/可试验”及一句理由。使用简体中文，具体、克制、不要写空泛口号。',
+    ].join('\n');
+
+    const beforeStatus = idea.status === 'incubated' ? 'incubated' : 'seed';
+    activeIdeaIncubations.add(idea.id);
+    sseStart(res);
+    try {
+      const up = await fetch(am.baseURL + '/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${am.apiKey}` },
+        body: JSON.stringify({
+          model: am.model,
+          messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
+          stream: true, temperature: 0.45, max_tokens: 4096,
+        }),
+      });
+      if (!up.ok) {
+        const detail = await up.text().catch(() => '');
+        store.upsertIdea({ ...idea, status: beforeStatus, updatedAt: new Date().toISOString() });
+        sseSend(res, { error: `AI 接口返回 ${up.status}：${clip(detail, 300)}` });
+        return sseEnd(res);
+      }
+      const result = await pipeLLMStream(up, res);
+      if (result.aborted) {
+        store.upsertIdea({ ...idea, status: beforeStatus, updatedAt: new Date().toISOString() });
+      } else if (result.full.trim()) {
+        const now = new Date().toISOString();
+        store.upsertIdea({ ...idea, incubation: result.full.trim(), status: 'incubated', incubatedAt: now, updatedAt: now });
+        sseSend(res, { saved: true });
+      } else if (!result.aborted) {
+        store.upsertIdea({ ...idea, status: beforeStatus, updatedAt: new Date().toISOString() });
+        sseSend(res, { error: '模型没有返回有效内容，请稍后重试' });
+      }
+      sseEnd(res);
+    } catch (e) {
+      store.upsertIdea({ ...idea, status: beforeStatus, updatedAt: new Date().toISOString() });
+      sseSend(res, { error: '孵化失败：' + e.message });
+      sseEnd(res);
+    } finally {
+      activeIdeaIncubations.delete(idea.id);
+    }
   });
 
   // ---------- 个人资料 ----------
@@ -1797,7 +1987,9 @@ export async function startServer(options = {}) {
     defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir,
   } = options;
   if (dataDir) store.configure({ dataDir });
-  const { app } = createApp({ uploadDir, defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir });
+  const { app } = createApp({
+    uploadDir, defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir,
+  });
 
   // 启动时自动做一份数据快照：覆盖安装 / 升级 / 误操作后都能从「设置 → 数据备份」找回。
   // 至少间隔 6 小时才再建一份，避免频繁重启把备份位刷掉。

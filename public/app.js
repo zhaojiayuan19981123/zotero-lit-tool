@@ -47,6 +47,7 @@
   const STATUS_LABEL = { done: '已完成', parsing: '解析中', pending: '待解析', error: '解析失败' };
   const PROGRESS_LIST = ['未阅读', '阅读中', '已阅读'];
   const HIGHLIGHT_COLORS = { yellow: '#ffe08a', green: '#b5e6b5', blue: '#a8d4f5', pink: '#f7b8d0' };
+  const UNCLASSIFIED = '__uncategorized__';
 
   // ============ 状态 ============
   let items = [];
@@ -95,6 +96,11 @@
   let calYear = new Date().getFullYear();
   let calMonth = new Date().getMonth(); // 0-based
   let calSelected = null; // 'YYYY-MM-DD'
+  let ideas = [];
+  let ideasLoaded = false;
+  let editingIdeaId = null;
+  const incubatingIdeaIds = new Set();
+  let classMoveIds = [];
 
   const $ = (id) => document.getElementById(id);
   const el = {
@@ -220,8 +226,12 @@
       }
     }
     const cols = collections.filter((c) => c.docType === lib.type);
-    $('colChips').innerHTML = cols.map((c) => {
-      const n = items.filter((i) => i.collectionId === c.id).length;
+    const sameType = items.filter((i) => (i.docType || 'empirical') === lib.type);
+    const uncategorized = sameType.filter((i) => !i.collectionId).length;
+    $('colChips').innerHTML = `<div class="col-chip${lib.collectionId === UNCLASSIFIED ? ' active' : ''}" data-collection="${UNCLASSIFIED}" data-colname="未分类">
+      ▣ 未分类 <span class="side-count">${uncategorized || ''}</span>
+    </div>` + cols.map((c) => {
+      const n = sameType.filter((i) => i.collectionId === c.id).length;
       return `<div class="col-chip${lib.collectionId === c.id ? ' active' : ''}" data-collection="${c.id}" data-colname="${esc(c.name)}">
         📁 ${esc(c.name)} <span class="side-count">${n || ''}</span>
         <span class="chip-ops">
@@ -280,11 +290,10 @@
     chipWrap.addEventListener('drop', async (e) => {
       const t = e.target.closest('.col-chip'); if (!t) return;
       e.preventDefault(); t.classList.remove('dragover');
-      const id = e.dataTransfer?.getData('text/lit-id');
+      const id = e.dataTransfer?.getData('text/lit-id') || e.dataTransfer?.getData('text/plain');
       if (!id) return;
       try {
-        await api('/api/literature/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ collectionId: t.dataset.collection }) });
-        await loadItems(); await loadCollections();
+        await moveLiterature([id], t.dataset.collection);
         toast(`已移入「${t.dataset.colname}」`, 'success');
       } catch (err) { toast(err.message, 'error'); }
     });
@@ -300,11 +309,15 @@
       const root = e.target.closest('[data-rootlib]');
       if (!root) return;
       e.preventDefault(); root.classList.remove('dragover');
-      const id = e.dataTransfer?.getData('text/lit-id');
+      const id = e.dataTransfer?.getData('text/lit-id') || e.dataTransfer?.getData('text/plain');
       if (!id) return;
       try {
-        await api('/api/literature/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ collectionId: null }) });
-        await loadItems(); await loadCollections();
+        const targetType = root.dataset.rootlib;
+        const item = items.find((it) => it.id === id);
+        if (item && (item.docType || 'empirical') !== targetType) {
+          await api('/api/literature/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ docType: targetType, collectionId: null }) });
+          await Promise.all([loadItems(), loadCollections()]);
+        } else await moveLiterature([id], null);
         toast('已移出分类', 'success');
       } catch (err) { toast(err.message, 'error'); }
     });
@@ -334,6 +347,36 @@
     } catch (e) { toast(e.message, 'error'); }
   }
 
+  async function moveLiterature(ids, collectionId) {
+    const target = !collectionId || collectionId === UNCLASSIFIED ? null : collectionId;
+    await api('/api/literature/batch-collection', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, collectionId: target }),
+    });
+    await Promise.all([loadItems(), loadCollections()]);
+  }
+
+  function openClassModal(ids) {
+    classMoveIds = [...new Set((ids || []).filter(Boolean))];
+    if (!classMoveIds.length) return;
+    const picked = items.filter((item) => classMoveIds.includes(item.id));
+    const types = [...new Set(picked.map((item) => item.docType || 'empirical'))];
+    if (types.length !== 1) { toast('请一次只移动同一文库中的文献', 'error'); return; }
+    const type = types[0];
+    const cols = collections.filter((c) => c.docType === type);
+    $('classTarget').innerHTML = '<option value="">未分类</option>' + cols.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+    $('classModalHint').textContent = `将 ${classMoveIds.length} 篇${type === 'model' ? '模型类' : '实证类'}文献移动到：`;
+    $('classModal').classList.remove('hidden');
+  }
+
+  async function saveClassMove() {
+    try {
+      await moveLiterature(classMoveIds, $('classTarget').value || null);
+      $('classModal').classList.add('hidden');
+      toast(`已移动 ${classMoveIds.length} 篇文献`, 'success');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
   // ============ 列构建 ============
   function buildColumns() {
     const cols = [...FIXED_COLS];
@@ -344,14 +387,15 @@
       cols.push({ ...c, label });
     }
     cols.push({ key: 'status', label: '解析状态', type: 'status', w: 92 });
-    cols.push({ key: 'actions', label: '操作', type: 'actions', w: 84 });
+    cols.push({ key: 'actions', label: '操作', type: 'actions', w: 122 });
     return cols.map((c) => ({ ...c, w: colWidths[c.key] || c.w }));
   }
 
   // ============ 渲染 ============
   function filteredItems() {
     let list = items.filter((i) => (i.docType || 'empirical') === lib.type);
-    if (lib.collectionId) list = list.filter((i) => i.collectionId === lib.collectionId);
+    if (lib.collectionId === UNCLASSIFIED) list = list.filter((i) => !i.collectionId);
+    else if (lib.collectionId) list = list.filter((i) => i.collectionId === lib.collectionId);
     if (tab !== 'all') list = list.filter((i) => (i.readingProgress || '未阅读') === tab);
     const st = el.statusFilter.value;
     if (st !== 'all') list = list.filter((i) => i.status === st);
@@ -369,7 +413,7 @@
 
   function render() {
     renderHead(); renderBody(); renderBulkBar();
-    const scope = items.filter((i) => (i.docType || 'empirical') === lib.type);
+    const scope = filteredItems();
     const done = scope.filter((i) => i.status === 'done').length;
     const libName = lib.collectionId
       ? collections.find((c) => c.id === lib.collectionId)?.name || '分类'
@@ -445,6 +489,7 @@
         cols.map((c) => `<td>${renderCell(c, it)}</td>`).join('');
       tr.addEventListener('dragstart', (e) => {
         e.dataTransfer.setData('text/lit-id', it.id);
+        e.dataTransfer.setData('text/plain', it.id);
         e.dataTransfer.effectAllowed = 'move';
       });
       el.tbody.appendChild(tr);
@@ -480,6 +525,7 @@
           <button class="icon-btn" data-act="parse" title="重新解析">↻</button>
           <button class="icon-btn" data-act="open" title="查看解析">⤢</button>
           <button class="icon-btn" data-act="read" title="阅读 PDF">📖</button>
+          <button class="icon-btn" data-act="collection" title="移动到分类">▣</button>
           <button class="icon-btn danger" data-act="del" title="删除">🗑</button></div>`;
       case 'rank': {
         const v = it.journalRank || '';
@@ -616,7 +662,7 @@
     const form = new FormData();
     pdfs.forEach((f) => form.append('files', f));
     form.append('docType', lib.type);
-    if (lib.collectionId) form.append('collectionId', lib.collectionId);
+    if (lib.collectionId && lib.collectionId !== UNCLASSIFIED) form.append('collectionId', lib.collectionId);
     toast(`正在上传 ${pdfs.length} 个 PDF…`);
     try {
       const data = await api('/api/upload', { method: 'POST', body: form });
@@ -676,6 +722,7 @@
         if (act.dataset.act === 'open') openDrawer(id);
         else if (act.dataset.act === 'read') openPdfReader(id);
         else if (act.dataset.act === 'parse') { toast('开始重新解析…'); parseIds([id]); }
+        else if (act.dataset.act === 'collection') openClassModal([id]);
         else if (act.dataset.act === 'del') deleteItem(id);
         return;
       }
@@ -1662,7 +1709,7 @@
 
     $('btnAddRecord').addEventListener('click', async () => {
       const body = { docType: lib.type };
-      if (lib.collectionId) body.collectionId = lib.collectionId;
+      if (lib.collectionId && lib.collectionId !== UNCLASSIFIED) body.collectionId = lib.collectionId;
       await api('/api/literature', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       await loadItems(); await loadCollections(); toast('已添加空白记录，可拖入 PDF 或直接编辑', 'success');
     });
@@ -1699,6 +1746,10 @@
     $('btnBulkParse').addEventListener('click', batchParse);
     $('btnBulkReparse').addEventListener('click', batchReparse);
     $('btnBulkProgress').addEventListener('click', batchProgress);
+    $('btnBulkCollection').addEventListener('click', () => {
+      const ids = pickIdsOrWarn();
+      if (ids) openClassModal(ids);
+    });
     $('btnBulkRank').addEventListener('click', batchRank);
     $('btnBulkDelete').addEventListener('click', batchDelete);
     $('btnBulkInvert').addEventListener('click', invertVisible);
@@ -2811,10 +2862,166 @@
   }
   function clipTitle(s, n = 30) { s = String(s || ''); return s.length > n ? s.slice(0, n) + '…' : s; }
 
+  // ---------- 灵感孵化 ----------
+  async function loadIdeas() {
+    ideas = await api('/api/ideas');
+    ideasLoaded = true;
+    renderIdeas();
+  }
+
+  function ideaMarkdown(value) {
+    const lines = String(value || '').split(/\r?\n/);
+    const out = [];
+    let inList = false;
+    const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+    for (const line of lines) {
+      const text = line.trim();
+      if (!text) { closeList(); continue; }
+      const heading = /^(#{1,3})\s+(.+)$/.exec(text);
+      if (heading) {
+        closeList();
+        out.push(`<h${Math.min(4, heading[1].length + 1)}>${esc(heading[2]).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</h${Math.min(4, heading[1].length + 1)}>`);
+        continue;
+      }
+      const safe = esc(text).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+      if (/^[-*]\s+/.test(text)) {
+        if (!inList) { out.push('<ul>'); inList = true; }
+        out.push(`<li>${safe.replace(/^[-*]\s+/, '')}</li>`);
+      } else {
+        closeList();
+        out.push(`<p>${safe}</p>`);
+      }
+    }
+    closeList();
+    return out.join('');
+  }
+
+  function renderIdeas() {
+    const wrap = $('ideaCards');
+    if (!wrap) return;
+    const status = $('ideaStatusFilter')?.value || 'all';
+    const query = ($('ideaSearch')?.value || '').trim().toLowerCase();
+    const list = ideas.filter((idea) => {
+      if (status !== 'all' && idea.status !== status) return false;
+      if (!query) return true;
+      return [idea.title, idea.content, ...(idea.tags || [])].join(' ').toLowerCase().includes(query);
+    });
+    $('ideaCount').textContent = `${list.length} / ${ideas.length} 条`;
+    if (!list.length) {
+      wrap.innerHTML = `<div class="idea-empty"><b>${ideas.length ? '没有匹配的灵感' : '还没有记录灵感'}</b><span>把研究中的疑问、矛盾和机制猜想先记下来，再用模型收敛成可检验的创新点。</span></div>`;
+      return;
+    }
+    wrap.innerHTML = list.map((idea) => {
+      const busy = incubatingIdeaIds.has(idea.id) || idea.status === 'incubating';
+      const project = projects.find((p) => p.id === idea.projectId);
+      const statusText = busy ? '孵化中' : idea.status === 'incubated' ? '已孵化' : '待孵化';
+      return `<article class="idea-card" data-idea="${idea.id}">
+        <div class="idea-card-head">
+          <span class="idea-status status-${busy ? 'incubating' : idea.status}">${statusText}</span>
+          <div class="idea-card-actions">
+            <button class="icon-btn" data-idea-edit="${idea.id}" title="编辑灵感">✎</button>
+            <button class="icon-btn danger" data-idea-delete="${idea.id}" title="删除灵感">🗑</button>
+          </div>
+        </div>
+        <h3>${esc(idea.title || '未命名灵感')}</h3>
+        <p class="idea-source">${esc(idea.content || '')}</p>
+        <div class="idea-meta">
+          ${project ? `<span>项目：${esc(project.name || '未命名')}</span>` : ''}
+          ${(idea.literatureIds || []).length ? `<span>证据文献：${idea.literatureIds.length} 篇</span>` : '<span>尚未关联文献</span>'}
+          <span>${fmtTime(idea.updatedAt || idea.createdAt)}</span>
+        </div>
+        ${(idea.tags || []).length ? `<div class="idea-tags">${idea.tags.map((tag) => `<span>${esc(tag)}</span>`).join('')}</div>` : ''}
+        <div class="idea-incubation${idea.incubation || busy ? '' : ' hidden'}" data-idea-output="${idea.id}">
+          ${idea.incubation ? ideaMarkdown(idea.incubation) : '<p class="idea-generating">正在构建假设、证据缺口与最小验证方案...</p>'}
+        </div>
+        <div class="idea-card-foot">
+          <button class="btn btn-primary" data-idea-incubate="${idea.id}"${busy ? ' disabled' : ''}>${busy ? '孵化中...' : idea.incubation ? '重新孵化' : '孵化创新点'}</button>
+        </div>
+      </article>`;
+    }).join('');
+  }
+
+  function openIdeaModal(id) {
+    editingIdeaId = id || null;
+    const idea = ideas.find((item) => item.id === id) || {};
+    $('ideaModalTitle').textContent = id ? '编辑灵感' : '记录灵感';
+    $('ideaTitle').value = idea.title || '';
+    $('ideaContent').value = idea.content || '';
+    $('ideaTags').value = (idea.tags || []).join('，');
+    $('ideaProject').innerHTML = '<option value="">不关联项目</option>' + projects.map((p) => `<option value="${p.id}"${p.id === idea.projectId ? ' selected' : ''}>${esc(p.name || '未命名项目')}</option>`).join('');
+    const selected = new Set(idea.literatureIds || []);
+    const literature = items.filter((item) => item.title || item.originalName).slice(0, 200);
+    $('ideaLiterature').innerHTML = literature.length ? literature.map((item) => `<label title="${esc(item.title || item.originalName)}"><input type="checkbox" value="${item.id}"${selected.has(item.id) ? ' checked' : ''} /> <span>${esc(item.title || item.originalName)}</span></label>`).join('') : '<span class="lit-empty">文献中心暂无可关联记录</span>';
+    $('ideaModal').classList.remove('hidden');
+    setTimeout(() => $('ideaTitle').focus(), 30);
+  }
+
+  async function saveIdea() {
+    const body = {
+      title: $('ideaTitle').value.trim(),
+      content: $('ideaContent').value.trim(),
+      tags: $('ideaTags').value,
+      projectId: $('ideaProject').value || null,
+      literatureIds: [...$('ideaLiterature').querySelectorAll('input:checked')].map((input) => input.value),
+    };
+    if (!body.title && !body.content) { toast('请填写灵感标题或内容', 'error'); return; }
+    try {
+      await api(editingIdeaId ? `/api/ideas/${editingIdeaId}` : '/api/ideas', {
+        method: editingIdeaId ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      $('ideaModal').classList.add('hidden');
+      await loadIdeas();
+      toast('灵感已保存', 'success');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function deleteIdea(id) {
+    if (!confirm('确认删除这条灵感及其孵化结果？')) return;
+    try { await api('/api/ideas/' + id, { method: 'DELETE' }); await loadIdeas(); toast('灵感已删除', 'success'); }
+    catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function incubateIdea(id) {
+    if (incubatingIdeaIds.has(id)) return;
+    incubatingIdeaIds.add(id);
+    renderIdeas();
+    let full = '';
+    let streamError = '';
+    const result = await streamSSE(`/api/ideas/${id}/incubate`, {}, {
+      onEvent(event) {
+        if (event.error) streamError = event.error;
+        if (event.delta) {
+          full += event.delta;
+          const output = document.querySelector(`[data-idea-output="${id}"]`);
+          if (output) { output.classList.remove('hidden'); output.innerHTML = ideaMarkdown(full) + '<span class="chat-cursor"></span>'; }
+        }
+      },
+    });
+    incubatingIdeaIds.delete(id);
+    await loadIdeas();
+    if (streamError || result.error) toast(streamError || result.error, 'error');
+    else if (!result.aborted) toast('创新点已孵化并保存', 'success');
+  }
+
+  function bindIdeas() {
+    $('btnAddIdea').addEventListener('click', () => openIdeaModal(null));
+    $('ideaStatusFilter').addEventListener('change', renderIdeas);
+    $('ideaSearch').addEventListener('input', renderIdeas);
+    $('ideaCards').addEventListener('click', (e) => {
+      const edit = e.target.closest('[data-idea-edit]'); if (edit) return openIdeaModal(edit.dataset.ideaEdit);
+      const del = e.target.closest('[data-idea-delete]'); if (del) return deleteIdea(del.dataset.ideaDelete);
+      const incubate = e.target.closest('[data-idea-incubate]'); if (incubate) incubateIdea(incubate.dataset.ideaIncubate);
+    });
+    const closeIdeaModal = () => $('ideaModal').classList.add('hidden');
+    $('btnIdeaClose').addEventListener('click', closeIdeaModal);
+    $('btnIdeaCancel').addEventListener('click', closeIdeaModal);
+    $('btnIdeaSave').addEventListener('click', saveIdea);
+  }
+
   async function switchView(v) {
     view = v;
     document.querySelectorAll('.nav-item[data-view]').forEach((n) => n.classList.toggle('active', n.dataset.view === v));
-    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
+    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', ideas: 'viewIdeas', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
     for (const [key, id] of Object.entries(map)) $(id).classList.toggle('hidden', key !== v);
     const isLib = v === 'library';
     // 文献中心：主区固定不滚动，表格容器内滚动（横向滚动条贴可视区底部）
@@ -2833,6 +3040,7 @@
     if (v === 'papers') { renderPaperTab(); }
     if (v === 'worldlib') renderWlList();
     if (v === 'notes') renderNotes();
+    if (v === 'ideas') { if (!ideasLoaded) await loadIdeas(); else renderIdeas(); }
     if (v === 'mail') await enterMailView();
     if (v === 'ai') {
       renderChatMeta();
@@ -4697,6 +4905,12 @@ a { color: #81308C; }
     $('btnNavSettings').addEventListener('click', openSettingsModal);
     $('btnSettings').addEventListener('click', openSettingsModal);
 
+    // 文献分类移动弹窗
+    const closeClassModal = () => $('classModal').classList.add('hidden');
+    $('btnClassClose').addEventListener('click', closeClassModal);
+    $('btnClassCancel').addEventListener('click', closeClassModal);
+    $('btnClassSave').addEventListener('click', saveClassMove);
+
     // 邮箱
     bindMailEvents();
 
@@ -5290,6 +5504,7 @@ a { color: #81308C; }
     bindEvents();
     bindWorkbench();
     bindPdfReader();
+    bindIdeas();
     await Promise.all([loadItems(), loadSettings(), loadCollections(), loadWorkbenchData()]);
     // 模型列表依赖 settings（其中 visionProfileId 用于「两段式看图」），必须放在其后，
     // 否则首次渲染设置页时视觉模型下拉会显示成「自动」而丢掉用户已保存的指定。

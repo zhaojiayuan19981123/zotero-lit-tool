@@ -1625,3 +1625,59 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
   .mail-list-col { width: 256px; }
   .mail-wrap { gap: 8px; }
 }
+
+/* ---------- 灵感孵化 ---------- */
+.idea-toolbar {
+  position: sticky; top: 0; z-index: 10; flex-wrap: wrap;
+  background: var(--bg); border-bottom: 1px solid var(--border);
+}
+.idea-toolbar > .tb-btn { flex: 0 0 auto; white-space: nowrap; }
+.idea-toolbar #ideaSearch { flex: 1 1 220px; width: auto; min-width: 160px; max-width: 360px; }
+.idea-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 14px; padding: 16px 20px 36px; align-items: start;
+}
+.idea-card {
+  min-width: 0; padding: 15px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 10px;
+}
+.idea-card-head, .idea-card-foot, .idea-meta, .idea-tags { display: flex; align-items: center; gap: 7px; }
+.idea-card-head { justify-content: space-between; min-height: 26px; }
+.idea-card-actions { display: flex; gap: 3px; }
+.idea-card h3 { margin: 0; font-size: 16px; line-height: 1.45; overflow-wrap: anywhere; }
+.idea-source {
+  margin: 0; color: var(--text-2); line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
+}
+.idea-status { padding: 2px 8px; border-radius: 5px; font-size: 11.5px; background: var(--gray-soft); color: var(--text-2); }
+.idea-status.status-incubated { background: var(--green-soft); color: var(--green); }
+.idea-status.status-incubating { background: var(--orange-soft); color: var(--orange); }
+.idea-meta { flex-wrap: wrap; color: var(--text-3); font-size: 11.5px; }
+.idea-meta span:not(:last-child)::after { content: '·'; margin-left: 7px; color: var(--border); }
+.idea-tags { flex-wrap: wrap; }
+.idea-tags span { padding: 2px 7px; border-radius: 4px; background: #e9f2ff; color: #245d95; font-size: 11px; }
+.idea-incubation {
+  border-top: 1px solid var(--border); padding-top: 9px; max-height: 440px; overflow: auto;
+  color: var(--text-2); line-height: 1.72; overflow-wrap: anywhere;
+}
+.idea-incubation h2, .idea-incubation h3, .idea-incubation h4 { margin: 12px 0 5px; color: var(--text); font-size: 14px; }
+.idea-incubation p { margin: 5px 0; }
+.idea-incubation ul { margin: 5px 0; padding-left: 20px; }
+.idea-generating { color: var(--text-3); }
+.idea-card-foot { justify-content: flex-end; border-top: 1px solid var(--border-soft); padding-top: 10px; }
+.idea-empty {
+  grid-column: 1 / -1; min-height: 260px; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 7px; color: var(--text-3); text-align: center; padding: 30px;
+}
+.idea-empty b { color: var(--text-2); font-size: 15px; }
+.idea-empty span { max-width: 520px; }
+#ideaLiterature label span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 1080px) {
+  .idea-grid { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); padding: 12px; }
+}
+
+@media (max-width: 760px) {
+  .idea-toolbar #ideaSearch { flex-basis: 100%; width: 100%; max-width: none; order: 3; }
+  .idea-grid { grid-template-columns: minmax(0, 1fr); }
+}

@@ -146,7 +146,7 @@ function rescueDataFromInstallDir(defaultDataDir) {
     const installDir = path.resolve(path.dirname(app.getPath('exe')));
     if (!fs.existsSync(installDir)) return null;
     const names = ['literature.json', 'settings.json', 'mail.json', 'tasks.json',
-      'projects.json', 'notes.json', 'profile.json', 'papers.json', 'chat.json', 'conversations.json'];
+      'projects.json', 'notes.json', 'profile.json', 'papers.json', 'chat.json', 'conversations.json', 'ideas.json'];
     const found = names.filter((n) => fs.existsSync(path.join(installDir, n)));
     if (!found.length) return null;
 
