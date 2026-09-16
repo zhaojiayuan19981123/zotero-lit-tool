@@ -4,6 +4,9 @@ import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { marked } from 'marked';
+import sanitizeHtml from 'sanitize-html';
+import katex from 'katex';
 
 import { extractPdfText } from './src/pdfParser.js';
 import { extract, FIELDS } from './src/aiExtractor.js';
@@ -31,6 +34,57 @@ function fixFileName(raw) {
     }
   } catch (_) { /* ignore */ }
   return name;
+}
+
+function safeFileStem(value, fallback = 'note') {
+  const stem = String(value || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().replace(/[. ]+$/g, '');
+  return (stem || fallback).slice(0, 100);
+}
+
+function markdownToSafeHtml(source) {
+  const formulas = [];
+  const protectedSource = String(source || '')
+    .replace(/\$\$([\s\S]+?)\$\$/g, (_m, expr) => {
+      const key = `@@KATEXBLOCK${formulas.length}@@`;
+      try { formulas.push(katex.renderToString(expr.trim(), { displayMode: true, throwOnError: false, output: 'html' })); }
+      catch (_) { formulas.push(`<pre>${String(expr)}</pre>`); }
+      return `\n\n${key}\n\n`;
+    })
+    .replace(/(^|[^\\$])\$([^\n$]+?)\$/g, (_m, lead, expr) => {
+      const key = `@@KATEXINLINE${formulas.length}@@`;
+      try { formulas.push(katex.renderToString(expr.trim(), { displayMode: false, throwOnError: false, output: 'html' })); }
+      catch (_) { formulas.push(`<code>${String(expr)}</code>`); }
+      return lead + key;
+    });
+  let html = marked.parse(protectedSource, { gfm: true, breaks: true });
+  html = html.replace(/@@KATEX(?:BLOCK|INLINE)(\d+)@@/g, (_m, index) => formulas[Number(index)] || '');
+  return sanitizeHtml(html, {
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat([
+      'img', 'mark', 'div', 'span', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+      'math', 'semantics', 'annotation', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'mspace', 'mtext',
+    ]),
+    allowedAttributes: {
+      a: ['href', 'title', 'target', 'rel'], img: ['src', 'alt', 'title', 'width', 'height'],
+      '*': ['class', 'style', 'align', 'aria-hidden'], annotation: ['encoding'], math: ['xmlns'],
+    },
+    allowedStyles: {
+      '*': {
+        'font-family': [/^[\w\s,"'-]+$/], 'font-size': [/^\d{1,2}(?:\.\d+)?(?:px|pt|em|rem|%)$/],
+        'text-align': [/^(?:left|center|right|justify)$/], 'background-color': [/^(?:#[0-9a-f]{3,8}|[a-z]+)$/i],
+        color: [/^(?:#[0-9a-f]{3,8}|[a-z]+)$/i], 'vertical-align': [/^[\w.-]+$/],
+        position: [/^relative$/], top: [/^[\d.-]+em$/], width: [/^\d+(?:\.\d+)?(?:em|%)$/],
+        height: [/^\d+(?:\.\d+)?(?:em|%)$/], 'margin-right': [/^[\d.]+em$/],
+      },
+    },
+    allowedSchemes: ['http', 'https', 'mailto', 'data'],
+  });
+}
+
+function notePrintDocument(note, { autoPrint = false } = {}) {
+  const title = safeFileStem(note?.title, '未命名笔记');
+  const safeTitle = title.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${safeTitle}</title><link rel="stylesheet" href="/vendor/katex/katex.min.css">
+<style>@page{size:A4;margin:18mm 16mm}body{font-family:"Microsoft YaHei","Noto Sans CJK SC",sans-serif;color:#202124;font-size:11pt;line-height:1.75}h1{font-size:22pt}h2{font-size:17pt}h3{font-size:14pt}pre{background:#f4f5f7;padding:10px;white-space:pre-wrap;word-break:break-word}code{font-family:Consolas,monospace}table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #bbb;padding:6px 8px;text-align:left}blockquote{border-left:3px solid #8b3d95;margin-left:0;padding-left:12px;color:#555}img{max-width:100%}.katex{font-family:KaTeX_Main,serif}</style></head><body><h1>${safeTitle}</h1>${markdownToSafeHtml(note?.content || '')}${autoPrint ? '<script>addEventListener("load",()=>setTimeout(()=>print(),180))<\/script>' : ''}</body></html>`;
 }
 
 // ---------- 记录构造 ----------
@@ -324,6 +378,8 @@ export function createApp({
   onDataDirChange = null,  // 数据目录切换成功后的回调（Electron 用于持久化引导配置）
   openPath = null,         // 在系统文件管理器中打开目录（Electron 注入 shell.openPath）
   installDir = null,       // 应用安装目录（用于拦截「把数据放进安装目录」这一危险操作）
+  saveTextFile = null,     // Electron 注入系统另存为对话框
+  exportPdf = null,        // Electron 注入 PDF 打印与另存为
 } = {}) {
   let currentUploadDir = uploadDir;
   fs.mkdirSync(currentUploadDir, { recursive: true });
@@ -1097,6 +1153,108 @@ export function createApp({
     res.json({ ok: true });
   });
 
+  // ---------- Markdown 笔记 ----------
+  app.get('/api/markdown-notes', (_req, res) => res.json(store.listMarkdownNotes()));
+
+  app.post('/api/markdown-notes', (req, res) => {
+    const now = new Date().toISOString();
+    const note = {
+      id: store.newId(),
+      title: String(req.body?.title || '').trim().slice(0, 160) || '未命名笔记',
+      content: String(req.body?.content || '').slice(0, 5 * 1024 * 1024),
+      sourceName: String(req.body?.sourceName || '').trim().slice(0, 260),
+      createdAt: now,
+      updatedAt: now,
+    };
+    res.json(store.upsertMarkdownNote(note));
+  });
+
+  app.patch('/api/markdown-notes/:id', (req, res) => {
+    const note = store.getMarkdownNote(req.params.id);
+    if (!note) return res.status(404).json({ error: '笔记不存在' });
+    const patch = { updatedAt: new Date().toISOString() };
+    if ('title' in req.body) patch.title = String(req.body.title || '').trim().slice(0, 160) || '未命名笔记';
+    if ('content' in req.body) patch.content = String(req.body.content || '').slice(0, 5 * 1024 * 1024);
+    if ('sourceName' in req.body) patch.sourceName = String(req.body.sourceName || '').trim().slice(0, 260);
+    res.json(store.upsertMarkdownNote({ ...note, ...patch }));
+  });
+
+  app.delete('/api/markdown-notes/:id', (req, res) => {
+    if (!store.deleteMarkdownNote(req.params.id)) return res.status(404).json({ error: '笔记不存在' });
+    res.json({ ok: true });
+  });
+
+  app.post('/api/markdown-notes/:id/export-md', async (req, res) => {
+    const note = store.getMarkdownNote(req.params.id);
+    if (!note) return res.status(404).json({ error: '笔记不存在' });
+    const filename = safeFileStem(note.title) + '.md';
+    if (typeof saveTextFile === 'function') {
+      try {
+        const result = await saveTextFile({ filename, data: String(note.content || '') });
+        return res.json(result || { canceled: true });
+      } catch (e) { return res.status(500).json({ error: '导出失败：' + e.message }); }
+    }
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.send(String(note.content || ''));
+  });
+
+  app.get('/api/markdown-notes/:id/print', (req, res) => {
+    const note = store.getMarkdownNote(req.params.id);
+    if (!note) return res.status(404).send('笔记不存在');
+    res.type('html').send(notePrintDocument(note, { autoPrint: req.query.print === '1' }));
+  });
+
+  app.post('/api/markdown-notes/:id/export-pdf', async (req, res) => {
+    const note = store.getMarkdownNote(req.params.id);
+    if (!note) return res.status(404).json({ error: '笔记不存在' });
+    if (typeof exportPdf !== 'function') return res.json({ browserPrint: true, printUrl: `/api/markdown-notes/${note.id}/print?print=1` });
+    try {
+      const result = await exportPdf({ filename: safeFileStem(note.title) + '.pdf', html: notePrintDocument(note) });
+      res.json(result || { canceled: true });
+    } catch (e) { res.status(500).json({ error: 'PDF 导出失败：' + e.message }); }
+  });
+
+  // ---------- 科研日历：用户事件与历法显示设置 ----------
+  app.get('/api/calendar', (_req, res) => res.json(store.getCalendar()));
+
+  app.patch('/api/calendar/preferences', (req, res) => {
+    const value = store.getCalendar();
+    for (const key of ['lunar', 'solarTerms', 'festivals']) {
+      if (key in (req.body || {})) value.preferences[key] = !!req.body[key];
+    }
+    res.json(store.saveCalendar(value));
+  });
+
+  app.post('/api/calendar/import', (req, res) => {
+    const raw = String(req.body?.ics || '');
+    if (!raw.trim()) return res.status(400).json({ error: '请选择有效的 ICS 日历文件' });
+    const blocks = raw.replace(/\r?\n[ \t]/g, '').match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/g) || [];
+    const parsed = [];
+    const unescapeIcs = (s) => String(s || '').replace(/\\n/gi, ' ').replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\\\/g, '\\').trim();
+    for (const block of blocks.slice(0, 3000)) {
+      const dt = /(?:^|\n)DTSTART(?:;[^:]*)?:(\d{4})(\d{2})(\d{2})/i.exec(block);
+      const sm = /(?:^|\n)SUMMARY(?:;[^:]*)?:(.*)/i.exec(block);
+      if (!dt || !sm) continue;
+      parsed.push({ id: store.newId(), date: `${dt[1]}-${dt[2]}-${dt[3]}`, label: unescapeIcs(sm[1]).slice(0, 200) || '日历事件', type: 'imported', source: String(req.body?.sourceName || 'ICS 导入').slice(0, 260), createdAt: new Date().toISOString() });
+    }
+    if (!parsed.length) return res.status(400).json({ error: '未在该 ICS 文件中识别到带日期的事件' });
+    const value = store.getCalendar();
+    const seen = new Set(value.events.map((e) => `${e.date}\n${e.label}`));
+    const added = parsed.filter((e) => !seen.has(`${e.date}\n${e.label}`));
+    value.events.push(...added);
+    store.saveCalendar(value);
+    res.json({ added: added.length, skipped: parsed.length - added.length, calendar: value });
+  });
+
+  app.delete('/api/calendar/events/:id', (req, res) => {
+    const value = store.getCalendar();
+    const before = value.events.length;
+    value.events = value.events.filter((event) => event.id !== req.params.id);
+    if (value.events.length === before) return res.status(404).json({ error: '日历事件不存在' });
+    res.json(store.saveCalendar(value));
+  });
+
   // ---------- 论文管理（小论文投稿流水线 + 大论文阶段进度） ----------
   const JOURNAL_STATUSES = ['构思中', '撰写中', '导师审阅', '投稿中', '初审', '外审', '返修', '复审', '录用', '校样', '已见刊', '拒稿', '撤稿'];
   const THESIS_STAGES = ['选题', '开题', '搭框架', '读文献', '找数据', '实证分析', '撰写初稿', '修改完善', '查重盲审', '答辩'];
@@ -1336,7 +1494,8 @@ export function createApp({
       `- 用简体中文回答；科研问题要具体、可执行，避免空话。`,
       `- 引用用户文献结论时注明编号（如【2】）；知识库没有的内容要说明「知识库中未涉及」。`,
       `- 用户让你构思论文创新点时：结合其文献库与研究缺口，给出 3-5 个候选创新点，并说明每个的可行性、与现有文献的差异、可验证方式。`,
-      `- 用户问投稿策略时：结合其小论文当前状态、期刊等级与审稿周期给出主投/备选/转投建议（经管类中文顶刊审稿常达 9-18 个月，返修一般须 30 天内返回）。`,
+      `- 用户问投稿策略时：结合其小论文当前状态、期刊等级与审稿周期给出主投/备选/转投建议；审稿周期和返修期限以期刊官网及编辑部通知为准，不编造固定时限。`,
+      `- 使用规范 Markdown 输出。适合比较的信息可使用 Markdown 表格；代码使用带语言标识的围栏代码块；公式使用 $...$ 或 $$...$$。`,
     ].filter(Boolean).join('\n');
   }
 
@@ -1393,6 +1552,7 @@ export function createApp({
   app.post('/api/chat', async (req, res) => {
     const conversationId = String(req.body?.conversationId || '');
     const content = String(req.body?.content || '').trim();
+    const retry = req.body?.retry === true;
     if (!content) return res.status(400).json({ error: '缺少对话内容' });
     const settings = store.getSettings();
     const am = activeModel(settings);
@@ -1403,8 +1563,12 @@ export function createApp({
     if (!conv) return res.status(404).json({ error: '会话不存在，请先新建对话' });
     if (!Array.isArray(conv.messages)) conv.messages = [];
 
-    // 记录用户消息；首个消息自动命名会话
-    conv.messages.push({ id: store.newId(), role: 'user', content, ts: new Date().toISOString() });
+    // 重试只允许复用最后一条尚无助手回复的用户消息，避免把旧问题插入到当前上下文。
+    const lastMessage = conv.messages[conv.messages.length - 1];
+    if (retry && (!lastMessage || lastMessage.role !== 'user' || lastMessage.content !== content)) {
+      return res.status(409).json({ error: '当前会话状态已变化，请重新发送问题' });
+    }
+    if (!retry) conv.messages.push({ id: store.newId(), role: 'user', content, ts: new Date().toISOString() });
     if (conv.title === '新对话') conv.title = clipText(content, 18) || '新对话';
 
     // ---- 上下文压缩：总字数超阈值时，把较早的消息摘要化，保留最近 KEEP_RECENT 条原文 ----
@@ -1440,6 +1604,7 @@ export function createApp({
     sseStart(res);
 
     let full = '';
+    let replyComplete = false;
     try {
       const llmMsgs = [];
       if (conv.summary) llmMsgs.push({ role: 'system', content: '本会话早期对话的摘要（作为上下文参考，不要重复输出摘要本身）：\n' + conv.summary });
@@ -1458,29 +1623,32 @@ export function createApp({
       if (!up.ok) {
         const errText = await up.text().catch(() => '');
         sseSend(res, { error: `AI 接口返回 ${up.status}：${clipText(errText, 300)}` });
-        return sseEnd(res);
+        sseEnd(res);
+      } else {
+        const r = await pipeLLMStream(up, res);
+        full = r.full;
+        replyComplete = !r.aborted && !!full.trim();
+        if (compressed) sseSend(res, { compressed: true });
+        sseEnd(res);
       }
-      const r = await pipeLLMStream(up, res);
-      full = r.full;
-      if (compressed) sseSend(res, { compressed: true });
-      sseEnd(res);
     } catch (e) {
       sseSend(res, { error: e.message });
       sseEnd(res);
     }
     // 持久化会话（含失败时的用户消息，保证上下文不丢）
-    if (full) conv.messages.push({ id: store.newId(), role: 'assistant', content: full, ts: new Date().toISOString() });
+    if (replyComplete) conv.messages.push({ id: store.newId(), role: 'assistant', content: full, ts: new Date().toISOString() });
     conv.updatedAt = new Date().toISOString();
     try { store.saveConversations(convList); } catch (_) { /* ignore */ }
   });
 
-  // ---------- 审稿意见一键翻译（LLM 整理为逐条中文，忠于原文） ----------
+  // ---------- 审稿意见一键翻译（SSE 流式，忠于原文） ----------
   app.post('/api/translate-review', async (req, res) => {
     const text = String(req.body?.text || '').trim();
     if (!text) return res.status(400).json({ error: '请先粘贴审稿意见原文' });
     const am = activeModel();
     if (!am) return res.status(400).json({ error: noModelError() });
     const base = am.baseURL;
+    sseStart(res);
     try {
       const up = await fetch(base + '/chat/completions', {
         method: 'POST',
@@ -1499,21 +1667,22 @@ export function createApp({
             },
             { role: 'user', content: '请整理以下审稿意见：\n\n' + text.slice(0, 12000) },
           ],
-          stream: false,
+          stream: true,
           temperature: 0.2,
           max_tokens: 4096,
         }),
       });
       if (!up.ok) {
         const errText = await up.text().catch(() => '');
-        return res.status(502).json({ error: `AI 接口返回 ${up.status}：${clipText(errText, 200)}` });
+        sseSend(res, { error: `AI 接口返回 ${up.status}：${clipText(errText, 200)}` });
+        return sseEnd(res);
       }
-      const data = await up.json().catch(() => ({}));
-      const out = data.choices?.[0]?.message?.content?.trim();
-      if (!out) return res.status(502).json({ error: 'AI 未返回有效内容，请稍后重试' });
-      res.json({ translation: out });
+      const result = await pipeLLMStream(up, res);
+      if (!result.full.trim() && !result.aborted) sseSend(res, { error: 'AI 未返回有效内容，请稍后重试' });
+      sseEnd(res);
     } catch (e) {
-      res.status(502).json({ error: '翻译请求失败：' + e.message });
+      sseSend(res, { error: '翻译请求失败：' + e.message });
+      sseEnd(res);
     }
   });
 
@@ -1984,11 +2153,11 @@ export async function startServer(options = {}) {
   const {
     dataDir, uploadDir, port = 0,
     publicDir = path.join(__dirname, 'public'),
-    defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir,
+    defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir, saveTextFile, exportPdf,
   } = options;
   if (dataDir) store.configure({ dataDir });
   const { app } = createApp({
-    uploadDir, defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir,
+    uploadDir, defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir, saveTextFile, exportPdf,
   });
 
   // 启动时自动做一份数据快照：覆盖安装 / 升级 / 误操作后都能从「设置 → 数据备份」找回。

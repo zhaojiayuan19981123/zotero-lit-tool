@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>一站式科研终端</title>
   <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="stylesheet" href="vendor/katex/katex.min.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -61,6 +62,7 @@
         <div class="nav-item" data-view="papers"><span class="nav-ico">📮</span>论文进度</div>
         <div class="nav-item" data-view="mail"><span class="nav-ico">📧</span>邮箱<span id="navMailBadge" class="nav-badge hidden">0</span></div>
         <div class="nav-item" data-view="notes"><span class="nav-ico">🧪</span>研究记录</div>
+        <div class="nav-item" data-view="markdown"><span class="nav-ico">✎</span>Markdown 笔记</div>
         <div class="nav-item" data-view="ideas"><span class="nav-ico">💡</span>灵感孵化</div>
         <div class="nav-item" data-view="ai"><span class="nav-ico">🤖</span>AI 助手</div>
         <div class="nav-item" data-view="worldlib"><span class="nav-ico">🌍</span>世图下载助手</div>
@@ -84,6 +86,7 @@
             <div class="hb-info">
               <div class="hb-greet" id="homeGreet">你好，研究生</div>
               <div class="hb-sub" id="homeSub">完善个人资料后显示学校 / 专业 / 年级</div>
+              <div class="hb-encouragement" id="dailyEncouragement"></div>
               <div class="hb-progress">
                 <span>学业进度</span>
                 <div class="hb-bar"><span id="homeProgressBar" style="width:0%"></span></div>
@@ -107,10 +110,18 @@
             <div class="card-head">
               <b>📅 科研日历</b>
               <div class="cal-nav">
+                <button class="cal-nav-btn" id="calOptions" title="历法显示设置">历法</button>
+                <button class="cal-nav-btn" id="calImport" title="导入 ICS 日历">导入</button>
                 <button class="cal-nav-btn" id="calPrev" title="上个月">‹</button>
                 <b id="calTitle">2026年9月</b>
                 <button class="cal-nav-btn" id="calNext" title="下个月">›</button>
                 <button class="cal-nav-btn cal-today-btn" id="calToday">今天</button>
+              </div>
+              <div id="calOptionsPop" class="cal-pop hidden">
+                <label><input type="checkbox" data-cal-pref="lunar" /> 显示农历日期</label>
+                <label><input type="checkbox" data-cal-pref="solarTerms" /> 显示二十四节气</label>
+                <label><input type="checkbox" data-cal-pref="festivals" /> 显示传统与公历节日</label>
+                <p>节日不代表法定放假或调休安排；年度安排请导入权威 ICS 日历。</p>
               </div>
             </div>
             <div class="cal-week">
@@ -282,6 +293,66 @@
         <div id="noteCards" class="note-cards"></div>
       </section>
 
+      <!-- ===== 视图：Markdown 笔记 ===== -->
+      <section id="viewMarkdown" class="view hidden markdown-view">
+        <aside class="md-note-side">
+          <div class="md-note-side-head">
+            <button class="btn btn-primary btn-sm" id="btnMdNew">＋ 新建</button>
+            <button class="btn btn-sm" id="btnMdImport">导入 .md</button>
+          </div>
+          <input id="mdNoteSearch" class="tb-input" type="search" placeholder="搜索笔记" />
+          <div id="mdNoteList" class="md-note-list"></div>
+          <div id="mdDropZone" class="md-drop-zone">拖入 Markdown 文件</div>
+        </aside>
+        <div class="md-note-main">
+          <div id="mdEmpty" class="md-empty">新建或导入一篇 Markdown 笔记</div>
+          <div id="mdEditorShell" class="md-editor-shell hidden">
+            <div class="md-title-row">
+              <input id="mdNoteTitle" class="md-note-title" maxlength="160" placeholder="未命名笔记" />
+              <span id="mdSaveState" class="md-save-state"></span>
+              <button class="btn btn-sm" id="btnMdExport">导出 MD</button>
+              <button class="btn btn-sm" id="btnMdPdf">导出 PDF</button>
+              <button class="icon-btn danger" id="btnMdDelete" title="删除笔记">🗑</button>
+            </div>
+            <div class="md-toolbar" id="mdToolbar">
+              <select class="md-tool-select" data-md-command="heading" title="标题级别">
+                <option value="">正文</option><option value="1">标题 1</option><option value="2">标题 2</option><option value="3">标题 3</option><option value="4">标题 4</option>
+              </select>
+              <button class="md-tool-btn" data-md-command="bold" title="加粗"><b>B</b></button>
+              <button class="md-tool-btn" data-md-command="italic" title="斜体"><i>I</i></button>
+              <button class="md-tool-btn" data-md-command="highlight" title="高亮">高亮</button>
+              <select class="md-tool-select" data-md-command="align" title="对齐方式">
+                <option value="">对齐</option><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option>
+              </select>
+              <select class="md-tool-select" data-md-command="font" title="字体">
+                <option value="">字体</option><option value="Microsoft YaHei">微软雅黑</option><option value="SimSun">宋体</option><option value="KaiTi">楷体</option><option value="Times New Roman">Times New Roman</option>
+              </select>
+              <select class="md-tool-select" data-md-command="size" title="字号">
+                <option value="">字号</option><option value="12px">12</option><option value="14px">14</option><option value="16px">16</option><option value="18px">18</option><option value="24px">24</option><option value="32px">32</option>
+              </select>
+              <span class="md-tool-sep"></span>
+              <button class="md-tool-btn" data-md-command="ul" title="无序列表">• 列表</button>
+              <button class="md-tool-btn" data-md-command="ol" title="有序列表">1. 列表</button>
+              <button class="md-tool-btn" data-md-command="quote" title="引用">引用</button>
+              <button class="md-tool-btn" data-md-command="link" title="插入链接">链接</button>
+              <button class="md-tool-btn" data-md-command="code" title="插入代码块">代码块</button>
+              <button class="md-tool-btn" data-md-command="formula" title="插入公式块">公式</button>
+              <button class="md-tool-btn" data-md-command="table" title="插入表格">表格</button>
+              <span class="md-tool-spacer"></span>
+              <div class="seg-tabs md-mode-tabs">
+                <button class="seg-tab active" data-md-mode="split">分栏</button>
+                <button class="seg-tab" data-md-mode="write">编辑</button>
+                <button class="seg-tab" data-md-mode="preview">预览</button>
+              </div>
+            </div>
+            <div id="mdWorkspace" class="md-workspace split">
+              <textarea id="mdSource" class="md-source" spellcheck="true" aria-label="Markdown 编辑器"></textarea>
+              <article id="mdPreview" class="md-render md-preview"></article>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ===== 视图：灵感孵化 ===== -->
       <section id="viewIdeas" class="view hidden">
         <div class="view-toolbar idea-toolbar">
@@ -404,6 +475,8 @@
 
   <input type="file" id="fileInput" accept=".pdf,application/pdf" multiple hidden />
   <input type="file" id="cellFileInput" accept=".pdf,application/pdf" hidden />
+  <input type="file" id="mdFileInput" accept=".md,.markdown,text/markdown,text/plain" multiple hidden />
+  <input type="file" id="calIcsInput" accept=".ics,text/calendar" hidden />
 
   <!-- 右侧阅读抽屉 -->
   <div id="drawerMask" class="drawer-mask hidden"></div>
@@ -1047,6 +1120,10 @@
     </div>
   </div>
 
+  <script src="vendor/marked/marked.umd.js"></script>
+  <script src="vendor/dompurify/purify.min.js"></script>
+  <script src="vendor/katex/katex.min.js"></script>
+  <script src="vendor/lunar/lunar.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

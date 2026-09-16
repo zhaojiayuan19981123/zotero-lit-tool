@@ -100,6 +100,12 @@
   let ideasLoaded = false;
   let editingIdeaId = null;
   const incubatingIdeaIds = new Set();
+  const ideaErrors = new Map();
+  let markdownNotes = [];
+  let markdownNotesLoaded = false;
+  let activeMarkdownNoteId = null;
+  let markdownSaveTimer = null;
+  let calendarData = { events: [], preferences: { lunar: true, solarTerms: true, festivals: true } };
   let classMoveIds = [];
 
   const $ = (id) => document.getElementById(id);
@@ -187,6 +193,71 @@
   }
   function esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // 全部用户可见 AI 内容与笔记预览共用同一个 Markdown 渲染器。
+  // 原始 HTML 经过 DOMPurify 白名单过滤；公式由 KaTeX 渲染，表格使用 GFM 语法。
+  if (window.marked?.use) {
+    window.marked.use({
+      gfm: true,
+      breaks: true,
+      extensions: [
+        {
+          name: 'blockKatex', level: 'block',
+          start(src) { return src.indexOf('$$'); },
+          tokenizer(src) {
+            const match = /^\$\$\s*([\s\S]+?)\s*\$\$(?:\n|$)/.exec(src);
+            return match ? { type: 'blockKatex', raw: match[0], text: match[1] } : undefined;
+          },
+          renderer(token) {
+            try { return window.katex.renderToString(token.text, { displayMode: true, throwOnError: false, output: 'htmlAndMathml' }); }
+            catch (_) { return `<pre>${esc(token.text)}</pre>`; }
+          },
+        },
+        {
+          name: 'inlineKatex', level: 'inline',
+          start(src) { return src.indexOf('$'); },
+          tokenizer(src) {
+            const match = /^\$([^$\n]+?)\$/.exec(src);
+            return match ? { type: 'inlineKatex', raw: match[0], text: match[1] } : undefined;
+          },
+          renderer(token) {
+            try { return window.katex.renderToString(token.text, { displayMode: false, throwOnError: false, output: 'htmlAndMathml' }); }
+            catch (_) { return `<code>${esc(token.text)}</code>`; }
+          },
+        },
+      ],
+    });
+  }
+
+  if (window.DOMPurify?.addHook) {
+    window.DOMPurify.addHook('uponSanitizeAttribute', (_node, data) => {
+      if (data.attrName === 'style') {
+        const allowed = String(data.attrValue || '').split(';').map((part) => part.trim()).filter((part) => {
+          return /^(?:font-family\s*:\s*[\w\s,"'-]+|font-size\s*:\s*\d{1,2}(?:\.\d+)?(?:px|pt|em|rem|%)|text-align\s*:\s*(?:left|center|right|justify)|background-color\s*:\s*(?:#[0-9a-f]{3,8}|[a-z]+)|color\s*:\s*(?:#[0-9a-f]{3,8}|[a-z]+))$/i.test(part);
+        });
+        data.attrValue = allowed.join('; ');
+        data.keepAttr = allowed.length > 0;
+      }
+      if (data.attrName === 'href' && !/^(?:https?:|mailto:|#|\/)/i.test(String(data.attrValue || ''))) data.keepAttr = false;
+    });
+  }
+
+  function renderMarkdown(value) {
+    const source = String(value || '');
+    if (!window.marked?.parse || !window.DOMPurify) return esc(source).replace(/\n/g, '<br />');
+    const html = window.marked.parse(source);
+    const clean = window.DOMPurify.sanitize(html, {
+      ADD_TAGS: ['mark', 'math', 'semantics', 'annotation', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'mspace', 'mtext'],
+      ADD_ATTR: ['align', 'style', 'target', 'rel', 'encoding', 'xmlns', 'aria-hidden'],
+    });
+    const holder = document.createElement('template');
+    holder.innerHTML = clean;
+    holder.content.querySelectorAll('a[href]').forEach((link) => {
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+    });
+    return holder.innerHTML;
   }
 
   async function loadItems() { items = await api('/api/literature'); render(); }
@@ -567,14 +638,7 @@
 
   function mdLines(v) { return String(v).split('\n').map((l) => l.trim()).filter(Boolean); }
   function mdInline(v) {
-    return mdLines(v).map((line) => {
-      const b = esc(line)
-        .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-        .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
-        .replace(/(^|[^_\w])_([^_\n]+)_(?![_\w])/g, '$1<i>$2</i>');
-      if (/^[-•*]\s*/.test(line)) return `<div class="md-line"><span class="dot">•</span><span>${b.replace(/^[-•*]\s*/, '')}</span></div>`;
-      return `<div>${b}</div>`;
-    }).join('');
+    return renderMarkdown(v);
   }
   function mdFull(v) {
     const out = []; let inList = false;
@@ -2033,16 +2097,16 @@
   }
 
   // ==================== 论文 AI 对话（文本 + 图片多模态） ====================
-  // 与文献中心的 AI 助手共用同一套模型配置，但走 /api/paper-chat（非流式、不落库），
+  // 与文献中心的 AI 助手共用同一套模型配置，但走 /api/paper-chat（流式、不落库），
   // 并把「当前论文的解析结果」作为强上下文，把用户上传的图片按 OpenAI 多模态
   // content 数组格式一并提交，从而支持「文字 + 图片」混合提问。
-  function prChatMessageHtml(m) {
+  function prChatMessageHtml(m, index) {
     const imgs = (m.images || []).length
       ? `<div class="pr-msg-attach">${m.images.map((u) => `<img src="${u}" alt="附图" />`).join('')}</div>`
       : '';
     const body = m.pending
       ? '<span class="pr-typing"><i></i><i></i><i></i></span>'
-      : (m.role === 'assistant' ? mdInline(m.content || '') : esc(m.content || '').replace(/\n/g, '<br />'));
+      : (m.role === 'assistant' ? renderMarkdown(m.content || '') : esc(m.content || '').replace(/\n/g, '<br />'));
     // 「两段式看图」完成后，折叠展示视觉模型的原始转述，方便用户核对 AI 是否看错图
     const vnote = (m.visions || []).length
       ? `<div class="pr-vision-note">👁 <b>图片已由 ${esc(m.visions[0].label || '视觉模型')} 转述</b>`
@@ -2055,6 +2119,7 @@
         ${imgs}
         ${vnote}
         <div class="pr-msg-bubble">${body}</div>
+        ${m.error ? `<button class="btn btn-sm md-retry" data-pr-retry="${index}">重试回答</button>` : ''}
       </div>
     </div>`;
   }
@@ -2149,17 +2214,18 @@
   }
 
   // 发送并流式接收回答：逐字追加到 pending 气泡，支持中途「停止」
-  async function sendPrChat() {
+  async function sendPrChat(retryPayload = null) {
     if (pr.chatBusy) return;
     const input = $('prChatInput');
-    const text = String(input?.value || '').trim();
-    if (!text && !prChatImages.length) { toast('请输入问题或上传图片', 'error'); return; }
+    const text = String(retryPayload?.text ?? input?.value ?? '').trim();
+    if (!text && !prChatImages.length && !retryPayload?.imgs?.length) { toast('请输入问题或上传图片', 'error'); return; }
     const it = items.find((x) => x.id === pr.recordId);
     if (!it) { toast('未找到对应的文献记录', 'error'); return; }
 
-    const imgs = prChatImages.map((x) => x.dataUrl);
-    pr.chat.push({ role: 'user', content: text, images: imgs });
-    const holder = { role: 'assistant', content: '', pending: true, streaming: true };
+    const imgs = retryPayload?.imgs ? [...retryPayload.imgs] : prChatImages.map((x) => x.dataUrl);
+    const userMessage = retryPayload?.userMessage || { role: 'user', content: text, images: imgs };
+    if (!retryPayload) pr.chat.push(userMessage);
+    const holder = { role: 'assistant', content: '', pending: true, streaming: true, retryPayload: { text, imgs, userMessage } };
     pr.chat.push(holder);
     prChatImages.length = 0;
     input.value = '';
@@ -2171,7 +2237,7 @@
     const ctx = buildPaperContext();
     const sys = '你是一位严谨的科研助理。用户正在精读一篇文献，请只围绕这篇论文回答，'
       + '回答要具体、可核查，必要时指明依据来自论文的哪一部分。如果论文上下文里没有相关信息，'
-      + '请明确说「论文解析结果中没有提到」，不要编造。用简体中文回答。\n\n【当前论文解析结果】\n' + (ctx || '（这篇文献还没有解析结果）');
+      + '请明确说「论文解析结果中没有提到」，不要编造。用简体中文和规范 Markdown 回答；适合比较的信息可用 Markdown 表格，代码使用带语言标识的围栏代码块，公式使用 $...$ 或 $$...$$。\n\n【当前论文解析结果】\n' + (ctx || '（这篇文献还没有解析结果）');
     // 组织为多模态 content：文本 + 图片
     const userContent = imgs.length
       ? [{ type: 'text', text: text || '请分析这些图片，并结合这篇论文回答我的问题。' },
@@ -2204,7 +2270,7 @@
     const r = await streamSSE('/api/paper-chat', {
       messages: [
         { role: 'system', content: sys },
-        ...pr.chat.filter((m) => !m.pending).slice(-9, -1).map((m) => ({ role: m.role, content: m.content })),
+        ...pr.chat.filter((m) => !m.pending && m !== userMessage && !m.error).slice(-8).map((m) => ({ role: m.role, content: m.content })),
         { role: 'user', content: userContent },
       ],
     }, {
@@ -2236,6 +2302,7 @@
       },
     });
     pr.chatAbort = null;
+    if (r.error && !holder.error) holder.error = r.error;
 
     // pending 标记去掉，转成正式消息
     delete holder.pending;
@@ -2245,6 +2312,7 @@
       holder.content = holder.error
         ? '请求失败：' + holder.error
         : (r.aborted ? '（已停止生成）' : '（AI 没有返回内容，请重试）');
+      if (!r.aborted && !holder.error) holder.error = 'AI 没有返回内容，请重试';
     } else if (r.error) {
       holder.content += '\n\n⚠️ ' + r.error;
     } else if (r.aborted) {
@@ -2715,6 +2783,17 @@
     $('prChatInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!pr.chatBusy) sendPrChat(); }
     });
+    $('prChatMsgs').addEventListener('click', (e) => {
+      const retry = e.target.closest('[data-pr-retry]');
+      if (!retry || pr.chatBusy) return;
+      const index = Number(retry.dataset.prRetry);
+      const failed = pr.chat[index];
+      if (!failed?.retryPayload) return;
+      const payload = failed.retryPayload;
+      pr.chat.splice(index, 1);
+      renderPrChat();
+      sendPrChat(payload);
+    });
     $('prChatInput').addEventListener('input', () => {
       const n = $('prChatInput');
       n.style.height = 'auto';
@@ -2862,6 +2941,217 @@
   }
   function clipTitle(s, n = 30) { s = String(s || ''); return s.length > n ? s.slice(0, n) + '…' : s; }
 
+  // ---------- Markdown 笔记 ----------
+  function activeMarkdownNote() {
+    return markdownNotes.find((note) => note.id === activeMarkdownNoteId) || null;
+  }
+
+  async function loadMarkdownNotes() {
+    markdownNotes = await api('/api/markdown-notes').catch(() => []);
+    markdownNotesLoaded = true;
+    if (activeMarkdownNoteId && !activeMarkdownNote()) activeMarkdownNoteId = null;
+    if (!activeMarkdownNoteId && markdownNotes.length) activeMarkdownNoteId = markdownNotes[0].id;
+    renderMarkdownNotes();
+  }
+
+  function renderMarkdownNoteList() {
+    const box = $('mdNoteList');
+    const query = String($('mdNoteSearch')?.value || '').trim().toLowerCase();
+    const list = markdownNotes.filter((note) => !query || `${note.title} ${note.content}`.toLowerCase().includes(query));
+    box.innerHTML = list.length ? list.map((note) => `
+      <div class="md-note-item${note.id === activeMarkdownNoteId ? ' active' : ''}" data-md-note="${note.id}">
+        <b>${esc(note.title || '未命名笔记')}</b><span>${fmtTime(note.updatedAt || note.createdAt)}</span>
+      </div>`).join('') : '<div class="pr-loading">没有匹配的笔记</div>';
+  }
+
+  function renderMarkdownPreview() {
+    const preview = $('mdPreview');
+    if (preview) preview.innerHTML = renderMarkdown($('mdSource')?.value || '');
+  }
+
+  function renderMarkdownNotes() {
+    renderMarkdownNoteList();
+    const note = activeMarkdownNote();
+    $('mdEmpty').classList.toggle('hidden', !!note);
+    $('mdEditorShell').classList.toggle('hidden', !note);
+    if (!note) return;
+    $('mdNoteTitle').value = note.title || '未命名笔记';
+    $('mdSource').value = note.content || '';
+    $('mdSaveState').textContent = '';
+    renderMarkdownPreview();
+  }
+
+  async function createMarkdownNote(title = '未命名笔记', content = '', sourceName = '') {
+    // 新建或连续导入前先落盘当前编辑内容，避免未到防抖时间就切换笔记而丢失修改。
+    if (activeMarkdownNote()) await saveActiveMarkdownNote();
+    const note = await api('/api/markdown-notes', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, content, sourceName }),
+    });
+    markdownNotes.unshift(note);
+    activeMarkdownNoteId = note.id;
+    renderMarkdownNotes();
+    setTimeout(() => (sourceName ? $('mdSource') : $('mdNoteTitle'))?.focus(), 30);
+    return note;
+  }
+
+  async function saveActiveMarkdownNote() {
+    clearTimeout(markdownSaveTimer);
+    const note = activeMarkdownNote();
+    if (!note) return;
+    const title = $('mdNoteTitle').value.trim() || '未命名笔记';
+    const content = $('mdSource').value;
+    $('mdSaveState').textContent = '保存中...';
+    try {
+      const saved = await api('/api/markdown-notes/' + note.id, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, content }),
+      });
+      Object.assign(note, saved);
+      $('mdSaveState').textContent = '已保存';
+      renderMarkdownNoteList();
+    } catch (e) {
+      $('mdSaveState').textContent = '保存失败';
+      toast('笔记保存失败：' + e.message, 'error');
+    }
+  }
+
+  function scheduleMarkdownSave() {
+    const note = activeMarkdownNote();
+    if (!note) return;
+    note.title = $('mdNoteTitle').value.trim() || '未命名笔记';
+    note.content = $('mdSource').value;
+    $('mdSaveState').textContent = '未保存';
+    renderMarkdownPreview();
+    clearTimeout(markdownSaveTimer);
+    markdownSaveTimer = setTimeout(saveActiveMarkdownNote, 650);
+  }
+
+  function insertMarkdown(before, after = '', placeholder = '') {
+    const ta = $('mdSource');
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const selected = ta.value.slice(start, end) || placeholder;
+    ta.setRangeText(before + selected + after, start, end, 'end');
+    ta.focus();
+    scheduleMarkdownSave();
+  }
+
+  function prefixMarkdownLines(prefix, ordered = false) {
+    const ta = $('mdSource');
+    const start = ta.value.lastIndexOf('\n', ta.selectionStart - 1) + 1;
+    const nextNewline = ta.value.indexOf('\n', ta.selectionEnd);
+    const end = nextNewline < 0 ? ta.value.length : nextNewline;
+    const lines = ta.value.slice(start, end).split('\n');
+    const replaced = lines.map((line, index) => (ordered ? `${index + 1}. ` : prefix) + line.replace(/^(?:#{1,6}|[-*>]|\d+[.])\s+/, '')).join('\n');
+    ta.setRangeText(replaced, start, end, 'select');
+    ta.focus();
+    scheduleMarkdownSave();
+  }
+
+  function runMarkdownCommand(command, value = '') {
+    const ta = $('mdSource');
+    if (!ta) return;
+    if (command === 'heading') return prefixMarkdownLines(value ? '#'.repeat(Number(value)) + ' ' : '');
+    if (command === 'bold') return insertMarkdown('**', '**', '加粗文字');
+    if (command === 'italic') return insertMarkdown('*', '*', '斜体文字');
+    if (command === 'highlight') return insertMarkdown('<mark>', '</mark>', '高亮文字');
+    if (command === 'align' && value) return insertMarkdown(`<div align="${value}">\n`, '\n</div>', '对齐内容');
+    if (command === 'font' && value) return insertMarkdown(`<span style="font-family: ${value}">`, '</span>', '文字');
+    if (command === 'size' && value) return insertMarkdown(`<span style="font-size: ${value}">`, '</span>', '文字');
+    if (command === 'ul') return prefixMarkdownLines('- ');
+    if (command === 'ol') return prefixMarkdownLines('', true);
+    if (command === 'quote') return prefixMarkdownLines('> ');
+    if (command === 'link') return insertMarkdown('[', '](https://)', '链接文字');
+    if (command === 'code') return insertMarkdown('```text\n', '\n```', '在这里输入代码');
+    if (command === 'formula') return insertMarkdown('$$\n', '\n$$', 'E = mc^2');
+    if (command === 'table') return insertMarkdown('', '', '| 列 1 | 列 2 | 列 3 |\n| --- | --- | --- |\n| 内容 | 内容 | 内容 |');
+  }
+
+  async function importMarkdownFiles(files) {
+    const list = [...(files || [])].filter((file) => /\.(?:md|markdown)$/i.test(file.name) || /^(?:text\/markdown|text\/plain)$/i.test(file.type));
+    if (!list.length) { toast('请导入 .md 或 .markdown 文件', 'error'); return; }
+    let imported = 0;
+    for (const file of list.slice(0, 50)) {
+      if (file.size > 5 * 1024 * 1024) { toast(`「${file.name}」超过 5MB，已跳过`, 'error'); continue; }
+      const content = await file.text();
+      await createMarkdownNote(file.name.replace(/\.(?:md|markdown)$/i, '') || '导入笔记', content, file.name);
+      imported++;
+    }
+    if (imported) toast(`已导入 ${imported} 篇 Markdown 笔记`, 'success');
+  }
+
+  async function exportMarkdownNote(format) {
+    const note = activeMarkdownNote();
+    if (!note) return;
+    await saveActiveMarkdownNote();
+    if (format === 'pdf') {
+      try {
+        const result = await api(`/api/markdown-notes/${note.id}/export-pdf`, { method: 'POST' });
+        if (result.browserPrint && result.printUrl) window.open(result.printUrl, '_blank');
+        else if (!result.canceled) toast('PDF 已导出到所选位置', 'success');
+      } catch (e) { toast(e.message, 'error'); }
+      return;
+    }
+    try {
+      const response = await fetch(`/api/markdown-notes/${note.id}/export-md`, { method: 'POST' });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '导出失败');
+      if (/application\/json/i.test(response.headers.get('content-type') || '')) {
+        const result = await response.json();
+        if (!result.canceled) toast('Markdown 已导出到所选位置', 'success');
+      } else {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url; link.download = `${note.title || 'note'}.md`; link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function bindMarkdownNotes() {
+    $('btnMdNew').addEventListener('click', () => createMarkdownNote());
+    $('btnMdImport').addEventListener('click', () => $('mdFileInput').click());
+    $('mdFileInput').addEventListener('change', (e) => { importMarkdownFiles(e.target.files); e.target.value = ''; });
+    $('mdNoteSearch').addEventListener('input', renderMarkdownNoteList);
+    $('mdNoteList').addEventListener('click', (e) => {
+      const item = e.target.closest('[data-md-note]');
+      if (!item || item.dataset.mdNote === activeMarkdownNoteId) return;
+      saveActiveMarkdownNote().then(() => { activeMarkdownNoteId = item.dataset.mdNote; renderMarkdownNotes(); });
+    });
+    $('mdSource').addEventListener('input', scheduleMarkdownSave);
+    $('mdNoteTitle').addEventListener('input', scheduleMarkdownSave);
+    $('mdToolbar').addEventListener('click', (e) => {
+      const button = e.target.closest('[data-md-command]');
+      if (button?.tagName === 'BUTTON') runMarkdownCommand(button.dataset.mdCommand, button.value);
+      const mode = e.target.closest('[data-md-mode]');
+      if (mode) {
+        document.querySelectorAll('[data-md-mode]').forEach((b) => b.classList.toggle('active', b === mode));
+        $('mdWorkspace').className = 'md-workspace ' + mode.dataset.mdMode;
+      }
+    });
+    $('mdToolbar').addEventListener('change', (e) => {
+      const select = e.target.closest('select[data-md-command]');
+      if (!select) return;
+      runMarkdownCommand(select.dataset.mdCommand, select.value);
+      select.value = '';
+    });
+    $('btnMdExport').addEventListener('click', () => exportMarkdownNote('md'));
+    $('btnMdPdf').addEventListener('click', () => exportMarkdownNote('pdf'));
+    $('btnMdDelete').addEventListener('click', async () => {
+      const note = activeMarkdownNote();
+      if (!note || !confirm(`确认删除笔记「${note.title}」？`)) return;
+      await api('/api/markdown-notes/' + note.id, { method: 'DELETE' });
+      markdownNotes = markdownNotes.filter((item) => item.id !== note.id);
+      activeMarkdownNoteId = markdownNotes[0]?.id || null;
+      renderMarkdownNotes();
+      toast('笔记已删除', 'success');
+    });
+    const zone = $('mdDropZone');
+    ['dragenter', 'dragover'].forEach((type) => zone.addEventListener(type, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.add('dragging'); }));
+    ['dragleave', 'drop'].forEach((type) => zone.addEventListener(type, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.remove('dragging'); }));
+    zone.addEventListener('drop', (e) => importMarkdownFiles(e.dataTransfer.files));
+  }
+
   // ---------- 灵感孵化 ----------
   async function loadIdeas() {
     ideas = await api('/api/ideas');
@@ -2869,32 +3159,7 @@
     renderIdeas();
   }
 
-  function ideaMarkdown(value) {
-    const lines = String(value || '').split(/\r?\n/);
-    const out = [];
-    let inList = false;
-    const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
-    for (const line of lines) {
-      const text = line.trim();
-      if (!text) { closeList(); continue; }
-      const heading = /^(#{1,3})\s+(.+)$/.exec(text);
-      if (heading) {
-        closeList();
-        out.push(`<h${Math.min(4, heading[1].length + 1)}>${esc(heading[2]).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</h${Math.min(4, heading[1].length + 1)}>`);
-        continue;
-      }
-      const safe = esc(text).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-      if (/^[-*]\s+/.test(text)) {
-        if (!inList) { out.push('<ul>'); inList = true; }
-        out.push(`<li>${safe.replace(/^[-*]\s+/, '')}</li>`);
-      } else {
-        closeList();
-        out.push(`<p>${safe}</p>`);
-      }
-    }
-    closeList();
-    return out.join('');
-  }
+  function ideaMarkdown(value) { return renderMarkdown(value); }
 
   function renderIdeas() {
     const wrap = $('ideaCards');
@@ -2913,6 +3178,7 @@
     }
     wrap.innerHTML = list.map((idea) => {
       const busy = incubatingIdeaIds.has(idea.id) || idea.status === 'incubating';
+      const error = ideaErrors.get(idea.id) || '';
       const project = projects.find((p) => p.id === idea.projectId);
       const statusText = busy ? '孵化中' : idea.status === 'incubated' ? '已孵化' : '待孵化';
       return `<article class="idea-card" data-idea="${idea.id}">
@@ -2931,11 +3197,11 @@
           <span>${fmtTime(idea.updatedAt || idea.createdAt)}</span>
         </div>
         ${(idea.tags || []).length ? `<div class="idea-tags">${idea.tags.map((tag) => `<span>${esc(tag)}</span>`).join('')}</div>` : ''}
-        <div class="idea-incubation${idea.incubation || busy ? '' : ' hidden'}" data-idea-output="${idea.id}">
-          ${idea.incubation ? ideaMarkdown(idea.incubation) : '<p class="idea-generating">正在构建假设、证据缺口与最小验证方案...</p>'}
+        <div class="idea-incubation md-render${idea.incubation || busy || error ? '' : ' hidden'}" data-idea-output="${idea.id}">
+          ${error ? `<p class="md-error-line">孵化失败：${esc(error)}</p>` : idea.incubation ? ideaMarkdown(idea.incubation) : '<p class="idea-generating">正在构建假设、证据缺口与最小验证方案...</p>'}
         </div>
         <div class="idea-card-foot">
-          <button class="btn btn-primary" data-idea-incubate="${idea.id}"${busy ? ' disabled' : ''}>${busy ? '孵化中...' : idea.incubation ? '重新孵化' : '孵化创新点'}</button>
+          <button class="btn btn-primary" data-idea-incubate="${idea.id}"${busy ? ' disabled' : ''}>${busy ? '孵化中...' : error ? '重试孵化' : idea.incubation ? '重新孵化' : '孵化创新点'}</button>
         </div>
       </article>`;
     }).join('');
@@ -2983,6 +3249,7 @@
 
   async function incubateIdea(id) {
     if (incubatingIdeaIds.has(id)) return;
+    ideaErrors.delete(id);
     incubatingIdeaIds.add(id);
     renderIdeas();
     let full = '';
@@ -2998,8 +3265,10 @@
       },
     });
     incubatingIdeaIds.delete(id);
+    const error = streamError || result.error;
+    if (error) ideaErrors.set(id, error);
     await loadIdeas();
-    if (streamError || result.error) toast(streamError || result.error, 'error');
+    if (error) toast(error, 'error');
     else if (!result.aborted) toast('创新点已孵化并保存', 'success');
   }
 
@@ -3021,13 +3290,14 @@
   async function switchView(v) {
     view = v;
     document.querySelectorAll('.nav-item[data-view]').forEach((n) => n.classList.toggle('active', n.dataset.view === v));
-    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', ideas: 'viewIdeas', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
+    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', markdown: 'viewMarkdown', ideas: 'viewIdeas', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
     for (const [key, id] of Object.entries(map)) $(id).classList.toggle('hidden', key !== v);
     const isLib = v === 'library';
     // 文献中心：主区固定不滚动，表格容器内滚动（横向滚动条贴可视区底部）
     document.querySelector('.main-area').classList.toggle('lib-mode', isLib);
     // 邮箱：三栏铺满视口，各自内部滚动
     document.querySelector('.main-area').classList.toggle('mail-mode', v === 'mail');
+    document.querySelector('.main-area').classList.toggle('markdown-mode', v === 'markdown');
     $('searchInput').classList.toggle('hidden', !isLib);
     $('btnParseAll').classList.toggle('hidden', !isLib);
     $('btnRefreshRanks').classList.toggle('hidden', !isLib);
@@ -3040,6 +3310,7 @@
     if (v === 'papers') { renderPaperTab(); }
     if (v === 'worldlib') renderWlList();
     if (v === 'notes') renderNotes();
+    if (v === 'markdown') { if (!markdownNotesLoaded) await loadMarkdownNotes(); else renderMarkdownNotes(); }
     if (v === 'ideas') { if (!ideasLoaded) await loadIdeas(); else renderIdeas(); }
     if (v === 'mail') await enterMailView();
     if (v === 'ai') {
@@ -3070,6 +3341,18 @@
     $('profileName').textContent = profile.name || '研究生';
     $('homeSub').textContent = sub || '完善个人资料后显示学校 / 专业 / 年级';
     $('profileSub').textContent = sub || '完善个人资料';
+    const encouragements = [
+      '今天先完成一个可检验的小步骤，进展不需要轰轰烈烈。',
+      '卡住不等于没有进展，把问题写清楚也是研究的一部分。',
+      '论文不是一次写成的，允许草稿先不完美。',
+      '休息不是偏离研究，它是保持判断力的一部分。',
+      '先验证最关键的假设，再决定是否扩大工作量。',
+      '把模糊的焦虑改写成一个具体问题，下一步通常就会出现。',
+      '今天读懂一张表、修正一个变量，也算扎实的推进。',
+      '研究的价值不靠忙碌证明，可靠的证据比漂亮的叙述更重要。',
+    ];
+    const dayKey = Number(todayStr().replaceAll('-', ''));
+    $('dailyEncouragement').textContent = encouragements[dayKey % encouragements.length];
     const pct = Math.round(profile.progress || 0);
     $('homeProgressLabel').textContent = pct + '%';
     $('homeProgressBar').style.width = pct + '%';
@@ -3173,7 +3456,33 @@
     submit: { color: 'var(--primary)', label: '投稿' },
     milestone: { color: 'var(--primary-light)', label: '论文节点' },
     project: { color: '#0ea5a4', label: '项目' },
+    imported: { color: '#5b6abf', label: '导入日历' },
+    festival: { color: '#c2415d', label: '节日' },
+    solarTerm: { color: '#27845f', label: '节气' },
   };
+  function calendarDateInfo(dateKey) {
+    if (!window.Solar || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return { lunar: '', events: [] };
+    try {
+      const [year, month, day] = dateKey.split('-').map(Number);
+      const solar = window.Solar.fromYmd(year, month, day);
+      const lunar = solar.getLunar();
+      const term = calendarData.preferences.solarTerms ? lunar.getJieQi() : '';
+      const festivals = calendarData.preferences.festivals
+        ? [...solar.getFestivals(), ...lunar.getFestivals()].filter(Boolean)
+        : [];
+      let lunarLabel = '';
+      if (calendarData.preferences.lunar) {
+        lunarLabel = lunar.getDay() === 1 ? `${lunar.getMonthInChinese()}月` : lunar.getDayInChinese();
+      }
+      return {
+        lunar: term || festivals[0] || lunarLabel,
+        events: [
+          ...(term ? [{ type: 'solarTerm', label: term, computed: true }] : []),
+          ...[...new Set(festivals)].map((label) => ({ type: 'festival', label, computed: true })),
+        ],
+      };
+    } catch (_) { return { lunar: '', events: [] }; }
+  }
   function calEventsByDate() {
     const map = {};
     const push = (d, type, label) => { if (!d) return; (map[d] = map[d] || []).push({ type, label }); };
@@ -3188,6 +3497,10 @@
       }
     }
     for (const p of projects) if (p.status !== '已完成' && p.endDate) push(p.endDate, 'project', `项目节点：${clipTitle(p.name, 16)}`);
+    for (const event of (calendarData.events || [])) {
+      if (!event?.date || !event?.label) continue;
+      (map[event.date] = map[event.date] || []).push({ ...event, type: 'imported' });
+    }
     return map;
   }
 
@@ -3217,12 +3530,13 @@
       } else {
         dateKey = `${y}-${mm}-${dd}`;
       }
-      const evs = events[dateKey] || [];
+      const dateInfo = calendarDateInfo(dateKey);
+      const evs = [...(events[dateKey] || []), ...dateInfo.events];
       const dots = evs.slice(0, 3).map((e) => `<i class="cal-dot" style="background:${CAL_TYPES[e.type]?.color || '#999'}"></i>`).join('');
       const more = evs.length > 3 ? `<i class="cal-more">+${evs.length - 3}</i>` : '';
       const cls = ['cal-cell', c.out ? 'out' : '', dateKey === t0 ? 'today' : '', calSelected === dateKey ? 'selected' : ''].filter(Boolean).join(' ');
       return `<div class="${cls}" data-date="${dateKey}" title="${esc(evs.map((e) => e.label).join('；'))}">
-        <span class="cal-num">${c.d}</span><span class="cal-dots">${dots}${more}</span>
+        <span class="cal-num">${c.d}</span>${dateInfo.lunar ? `<span class="cal-lunar">${esc(dateInfo.lunar)}</span>` : ''}<span class="cal-dots">${dots}${more}</span>
       </div>`;
     }).join('');
     renderCalDayEvents();
@@ -3230,11 +3544,11 @@
 
   function renderCalDayEvents() {
     const key = calSelected || todayStr();
-    const events = (calEventsByDate()[key] || []);
+    const events = [...(calEventsByDate()[key] || []), ...calendarDateInfo(key).events];
     const box = $('calDayEvents');
     const head = `<div class="cal-day-head">${calSelected ? '📆 ' + key : '📆 今天 · ' + key}<span class="side-count">${events.length} 项</span></div>`;
     box.innerHTML = head + (events.length
-      ? events.map((e) => `<div class="cal-event"><i class="cal-dot" style="background:${CAL_TYPES[e.type]?.color || '#999'}"></i><span class="cal-event-label" title="${esc(e.label)}">${esc(e.label)}</span><span class="cal-tag" style="color:${CAL_TYPES[e.type]?.color}">${CAL_TYPES[e.type]?.label || ''}</span></div>`).join('')
+      ? events.map((e) => `<div class="cal-event"><i class="cal-dot" style="background:${CAL_TYPES[e.type]?.color || '#999'}"></i><span class="cal-event-label" title="${esc(e.label)}">${esc(e.label)}</span><span class="cal-tag" style="color:${CAL_TYPES[e.type]?.color}">${CAL_TYPES[e.type]?.label || ''}</span>${e.type === 'imported' && e.id ? `<button class="cal-event-del" data-cal-event-del="${e.id}" title="删除导入事件">✕</button>` : ''}</div>`).join('')
       : '<div class="pr-loading">这一天没有安排 🎉</div>');
   }
 
@@ -3597,7 +3911,7 @@
     if (paperDraft.reviewTranslation) {
       rtWrap.classList.remove('hidden');
       rtWrap.classList.remove('expanded');
-      $('reviewTransBody').textContent = paperDraft.reviewTranslation;
+      $('reviewTransBody').innerHTML = renderMarkdown(paperDraft.reviewTranslation);
       $('btnReviewTransToggle').textContent = '展开全文';
     } else {
       rtWrap.classList.add('hidden');
@@ -3649,8 +3963,8 @@
   }
 
   // ----- 审稿意见一键翻译：AI 把英文审稿意见整理成逐条中文（忠于原文，不增不减） -----
-  async function translateReview() {
-    const text = $('paperNotes').value.trim();
+  async function translateReview(retryText = '') {
+    const text = String(retryText || $('paperNotes').value).trim();
     if (!text) { toast('请先在「审稿意见 / 备注」中粘贴英文审稿意见', 'error'); return; }
     const btn = $('btnTranslateReview');
     const wrap = $('reviewTransWrap');
@@ -3659,15 +3973,30 @@
     wrap.classList.remove('hidden');
     body.classList.add('rt-loading');
     body.textContent = '正在用 AI 整理审稿意见（忠于原文、逐条中文、不增不减）…';
+    let full = '';
+    let streamError = '';
+    const result = await streamSSE('/api/translate-review', { text }, {
+      onEvent(event) {
+        if (event.error) streamError = event.error;
+        if (event.delta) {
+          full += event.delta;
+          body.classList.remove('rt-loading');
+          body.innerHTML = renderMarkdown(full) + '<span class="chat-cursor"></span>';
+        }
+      },
+    });
+    const error = streamError || result.error || (!full && !result.aborted ? 'AI 未返回有效内容，请稍后重试' : '');
     try {
-      const res = await api('/api/translate-review', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
       body.classList.remove('rt-loading');
-      body.textContent = res.translation;
-      paperDraft.reviewTranslation = res.translation;
+      if (error) {
+        body.innerHTML = `<div class="md-error-line">${esc(error)}</div><button class="btn btn-sm md-retry" data-review-retry>重试翻译</button>`;
+        body.querySelector('[data-review-retry]')?.addEventListener('click', () => translateReview(text));
+        throw new Error(error);
+      }
+      body.innerHTML = renderMarkdown(full);
+      paperDraft.reviewTranslation = full;
       toast('翻译完成，保存论文后生效', 'success');
     } catch (e) {
-      body.classList.remove('rt-loading');
-      body.textContent = '翻译失败：' + e.message;
       toast(e.message, 'error');
     } finally {
       btn.disabled = false; btn.textContent = '🈯 一键翻译';
@@ -4007,26 +4336,7 @@
       toast('会话已删除', 'success');
     } catch (e) { toast(e.message, 'error'); }
   }
-  function chatMd(v) { // 轻量 Markdown：## 标题 / 列表 / **粗体**
-    const out = []; let inList = false;
-    for (const raw of String(v).split('\n')) {
-      const line = raw.replace(/\s+$/, '');
-      if (!line.trim()) { if (inList) { out.push('</ul>'); inList = false; } continue; }
-      const e = esc(line);
-      if (/^#{1,4}\s/.test(line)) {
-        if (inList) { out.push('</ul>'); inList = false; }
-        out.push(`<p><b>${e.replace(/^#{1,4}\s*/, '')}</b></p>`);
-      } else if (/^[-*•]\s+/.test(line) || /^\d+[.、)）]\s*/.test(line)) {
-        if (!inList) { out.push('<ul>'); inList = true; }
-        out.push(`<li>${e.replace(/^([-*•]|\d+[.、)）])\s*/, '').replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</li>`);
-      } else {
-        if (inList) { out.push('</ul>'); inList = false; }
-        out.push(`<p>${e.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</p>`);
-      }
-    }
-    if (inList) out.push('</ul>');
-    return out.join('');
-  }
+  function chatMd(v) { return renderMarkdown(v); }
   function renderChatMsgs() {
     const box = $('chatMsgs');
     if (!chatMsgs.length) {
@@ -4034,11 +4344,13 @@
       return;
     }
     const summaryHint = activeSummary ? '<div class="chat-summary-hint">🗜 早期对话已压缩为摘要，AI 仍保留其要点记忆</div>' : '';
-    box.innerHTML = summaryHint + chatMsgs.map((m) =>
-      `<div class="chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}">${m.role === 'user' ? esc(m.content) : `<div class="md">${chatMd(m.content)}</div>`}</div>`).join('');
+    box.innerHTML = summaryHint + chatMsgs.map((m, index) =>
+      `<div class="chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}${m.error ? ' error' : ''}">${m.role === 'user'
+        ? esc(m.content).replace(/\n/g, '<br />')
+        : `<div class="md md-render">${m.content ? chatMd(m.content) : ''}${m.pending ? '<span class="chat-cursor"></span>' : ''}</div>${m.error ? `<button class="btn btn-sm md-retry" data-chat-retry="${index}">重试回答</button>` : ''}`}</div>`).join('');
     box.scrollTop = box.scrollHeight;
   }
-  async function sendChat(text) {
+  async function sendChat(text, { retry = false } = {}) {
     text = String(text || '').trim();
     if (!text || chatBusy) return;
     if (!String(settings.apiKey || '').trim() && settings.aiProvider !== 'none') {
@@ -4054,58 +4366,37 @@
     }
     chatBusy = true;
     $('btnChatSend').disabled = true;
-    chatMsgs.push({ id: 'local', role: 'user', content: text });
+    if (!retry) chatMsgs.push({ id: 'local', role: 'user', content: text });
+    const holder = { id: 'local', role: 'assistant', content: '', pending: true, retryContent: text };
+    chatMsgs.push(holder);
     renderChatMsgs();
     const box = $('chatMsgs');
-    const bubble = document.createElement('div');
-    bubble.className = 'chat-bubble assistant';
-    bubble.innerHTML = '<span class="chat-cursor"></span>';
-    box.appendChild(bubble);
-    box.scrollTop = box.scrollHeight;
     let full = '';
     let errMsg = '';
     let compressed = false;
-    try {
-      const res = await fetch('/api/chat', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversationId: activeConvId, content: text }),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.error || `请求失败 (${res.status})`);
-      }
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop() || '';
-        for (const line of lines) {
-          const s = line.trim();
-          if (!s.startsWith('data:')) continue;
-          const p = s.slice(5).trim();
-          if (p === '[DONE]') continue;
-          try {
-            const j = JSON.parse(p);
-            if (j.error) errMsg = j.error;
-            if (j.compressed) compressed = true;
-            if (j.delta) {
-              full += j.delta;
-              bubble.innerHTML = `<div class="md">${chatMd(full)}</div><span class="chat-cursor"></span>`;
-              box.scrollTop = box.scrollHeight;
-            }
-          } catch (_) { /* 不完整行忽略 */ }
+    let lastPaint = 0;
+    const result = await streamSSE('/api/chat', { conversationId: activeConvId, content: text, retry }, {
+      onEvent(event) {
+        if (event.error) errMsg = event.error;
+        if (event.compressed) compressed = true;
+        if (event.delta) {
+          full += event.delta;
+          holder.content = full;
+          const now = performance.now();
+          if (now - lastPaint > 60) { lastPaint = now; renderChatMsgs(); }
         }
-      }
-    } catch (e) { errMsg = e.message; }
-    if (errMsg) bubble.innerHTML = `<div class="md">⚠ ${esc(errMsg)}</div>`;
-    else if (!full) bubble.innerHTML = '<div class="md">（模型没有返回内容，请稍后重试）</div>';
-    else bubble.innerHTML = `<div class="md">${chatMd(full)}</div>`;
-    if (full) chatMsgs.push({ id: 'local', role: 'assistant', content: full });
-    box.scrollTop = box.scrollHeight;
+      },
+    });
+    if (result.error) errMsg = result.error;
+    delete holder.pending;
+    if (errMsg || !full) {
+      holder.error = errMsg || '模型没有返回内容，请稍后重试';
+      holder.content = `请求失败：${holder.error}`;
+    } else {
+      holder.content = full;
+      delete holder.retryContent;
+    }
+    renderChatMsgs();
     chatBusy = false;
     $('btnChatSend').disabled = false;
     // 刷新会话列表（标题/时间可能变化）；发生压缩时同步摘要状态
@@ -5096,6 +5387,59 @@ a { color: #81308C; }
       calSelected = cell.dataset.date;
       renderCalendar();
     });
+    $('calOptions').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const pop = $('calOptionsPop');
+      pop.querySelectorAll('[data-cal-pref]').forEach((input) => {
+        input.checked = calendarData.preferences[input.dataset.calPref] !== false;
+      });
+      pop.classList.toggle('hidden');
+    });
+    $('calOptionsPop').addEventListener('click', (e) => e.stopPropagation());
+    $('calOptionsPop').addEventListener('change', async (e) => {
+      const input = e.target.closest('[data-cal-pref]');
+      if (!input) return;
+      try {
+        calendarData = await api('/api/calendar/preferences', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [input.dataset.calPref]: input.checked }),
+        });
+        renderCalendar();
+      } catch (err) {
+        input.checked = !input.checked;
+        toast('保存历法设置失败：' + err.message, 'error');
+      }
+    });
+    document.addEventListener('click', () => $('calOptionsPop').classList.add('hidden'));
+    $('calImport').addEventListener('click', () => {
+      $('calIcsInput').value = '';
+      $('calIcsInput').click();
+    });
+    $('calIcsInput').addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      if (file.size > 10 * 1024 * 1024) { toast('ICS 文件超过 10MB，无法导入', 'error'); return; }
+      try {
+        const result = await api('/api/calendar/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ics: await file.text(), sourceName: file.name }),
+        });
+        calendarData = result.calendar;
+        renderCalendar();
+        toast(`已导入 ${result.added} 项${result.skipped ? `，跳过 ${result.skipped} 项重复事件` : ''}`, 'success');
+      } catch (err) { toast('导入日历失败：' + err.message, 'error'); }
+    });
+    $('calDayEvents').addEventListener('click', async (e) => {
+      const button = e.target.closest('[data-cal-event-del]');
+      if (!button || !confirm('确认删除这条导入的日历事件？')) return;
+      try {
+        calendarData = await api('/api/calendar/events/' + encodeURIComponent(button.dataset.calEventDel), { method: 'DELETE' });
+        renderCalendar();
+        toast('日历事件已删除', 'success');
+      } catch (err) { toast(err.message, 'error'); }
+    });
 
     // AI 助手：多会话
     document.querySelectorAll('[data-quick]').forEach((b) => b.addEventListener('click', () => sendChat(QUICK_PROMPTS[b.dataset.quick])));
@@ -5111,6 +5455,17 @@ a { color: #81308C; }
     $('btnChatSend').addEventListener('click', () => { const v = $('chatInput').value; $('chatInput').value = ''; sendChat(v); });
     $('chatInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const v = $('chatInput').value; $('chatInput').value = ''; sendChat(v); }
+    });
+    $('chatMsgs').addEventListener('click', (e) => {
+      const button = e.target.closest('[data-chat-retry]');
+      if (!button || chatBusy) return;
+      const index = Number(button.dataset.chatRetry);
+      const failed = chatMsgs[index];
+      if (!failed?.error || !failed.retryContent) return;
+      const content = failed.retryContent;
+      chatMsgs.splice(index, 1);
+      renderChatMsgs();
+      sendChat(content, { retry: true });
     });
     $('btnClearChat').addEventListener('click', async () => {
       if (!confirm('确认清空全部会话？所有聊天记录将删除且不可恢复。')) return;
@@ -5204,11 +5559,14 @@ a { color: #81308C; }
   }
 
   async function loadWorkbenchData() {
-    profile = await api('/api/profile').catch(() => ({}));
-    projects = await api('/api/projects').catch(() => []);
-    tasks = await api('/api/tasks').catch(() => []);
-    notes = await api('/api/notes').catch(() => []);
-    papers = await api('/api/papers').catch(() => []);
+    [profile, projects, tasks, notes, papers, calendarData] = await Promise.all([
+      api('/api/profile').catch(() => ({})),
+      api('/api/projects').catch(() => []),
+      api('/api/tasks').catch(() => []),
+      api('/api/notes').catch(() => []),
+      api('/api/papers').catch(() => []),
+      api('/api/calendar').catch(() => ({ events: [], preferences: { lunar: true, solarTerms: true, festivals: true } })),
+    ]);
   }
 
   // ============ 新手引导（首次使用） ============
@@ -5505,6 +5863,7 @@ a { color: #81308C; }
     bindWorkbench();
     bindPdfReader();
     bindIdeas();
+    bindMarkdownNotes();
     await Promise.all([loadItems(), loadSettings(), loadCollections(), loadWorkbenchData()]);
     // 模型列表依赖 settings（其中 visionProfileId 用于「两段式看图」），必须放在其后，
     // 否则首次渲染设置页时视觉模型下拉会显示成「自动」而丢掉用户已保存的指定。

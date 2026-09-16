@@ -20,6 +20,8 @@ let CHAT_FILE = path.join(DATA_DIR, 'chat.json');
 let PAPERS_FILE = path.join(DATA_DIR, 'papers.json');
 let MAIL_FILE = path.join(DATA_DIR, 'mail.json');
 let IDEAS_FILE = path.join(DATA_DIR, 'ideas.json');
+let MARKDOWN_NOTES_FILE = path.join(DATA_DIR, 'markdown-notes.json');
+let CALENDAR_FILE = path.join(DATA_DIR, 'calendar.json');
 
 export function configure({ dataDir }) {
   if (dataDir) {
@@ -36,6 +38,8 @@ export function configure({ dataDir }) {
     CONVERSATIONS_FILE = path.join(DATA_DIR, 'conversations.json');
     MAIL_FILE = path.join(DATA_DIR, 'mail.json');
     IDEAS_FILE = path.join(DATA_DIR, 'ideas.json');
+    MARKDOWN_NOTES_FILE = path.join(DATA_DIR, 'markdown-notes.json');
+    CALENDAR_FILE = path.join(DATA_DIR, 'calendar.json');
   }
 }
 
@@ -89,6 +93,7 @@ const ALL_DATA_FILES = [
   'papers.json',        // 论文进度
   'mail.json',          // 邮箱账户与设置
   'ideas.json',         // 灵感孵化
+  'markdown-notes.json', // Markdown 笔记
   'conversations.json', // AI 助手会话列表
   'calendar.json',      // 科研日历
   'worldlib.json',      // 世图下载助手历史
@@ -98,7 +103,8 @@ export function dataFileNames() {
   // store.js 内的路径变量是权威来源；ALL_DATA_FILES 兜底覆盖「表里有但变量还没建」的情况
   const known = new Set(ALL_DATA_FILES);
   for (const f of [DATA_FILE, SETTINGS_FILE, COLLECTIONS_FILE, PROFILE_FILE, PROJECTS_FILE,
-    TASKS_FILE, NOTES_FILE, CHAT_FILE, PAPERS_FILE, MAIL_FILE, IDEAS_FILE, CONVERSATIONS_FILE]) {
+    TASKS_FILE, NOTES_FILE, CHAT_FILE, PAPERS_FILE, MAIL_FILE, IDEAS_FILE, MARKDOWN_NOTES_FILE,
+    CALENDAR_FILE, CONVERSATIONS_FILE]) {
     if (f) known.add(path.basename(f));
   }
   return [...known];
@@ -220,7 +226,7 @@ export function exportAll() {
     literature: 'literature.json', settings: 'settings.json', collections: 'collections.json',
     profile: 'profile.json', projects: 'projects.json', tasks: 'tasks.json', notes: 'notes.json',
     chat: 'chat.json', papers: 'papers.json', conversations: 'conversations.json', mail: 'mail.json',
-    ideas: 'ideas.json',
+    ideas: 'ideas.json', markdownNotes: 'markdown-notes.json', calendar: 'calendar.json',
   };
   for (const [k, f] of Object.entries(alias)) out[k] = out.files[f] ?? null;
   return out;
@@ -384,6 +390,55 @@ export function deleteIdea(id) {
   if (next.length === list.length) return false;
   saveIdeas(next);
   return true;
+}
+
+// ---------- Markdown 笔记 ----------
+export function listMarkdownNotes() {
+  return loadFile(MARKDOWN_NOTES_FILE, []);
+}
+
+export function getMarkdownNote(id) {
+  return listMarkdownNotes().find((note) => note.id === id) || null;
+}
+
+export function saveMarkdownNotes(list) {
+  saveFile(MARKDOWN_NOTES_FILE, Array.isArray(list) ? list : []);
+  return list;
+}
+
+export function upsertMarkdownNote(note) {
+  const list = listMarkdownNotes();
+  const idx = list.findIndex((item) => item.id === note.id);
+  if (idx >= 0) list[idx] = { ...list[idx], ...note };
+  else list.unshift(note);
+  saveMarkdownNotes(list);
+  return idx >= 0 ? list[idx] : note;
+}
+
+export function deleteMarkdownNote(id) {
+  const list = listMarkdownNotes();
+  const next = list.filter((note) => note.id !== id);
+  if (next.length === list.length) return false;
+  saveMarkdownNotes(next);
+  return true;
+}
+
+// ---------- 自定义日历事件 / 历法显示设置 ----------
+export function getCalendar() {
+  const value = loadFile(CALENDAR_FILE, { events: [], preferences: { lunar: true, solarTerms: true, festivals: true } });
+  return {
+    events: Array.isArray(value?.events) ? value.events : [],
+    preferences: { lunar: true, solarTerms: true, festivals: true, ...(value?.preferences || {}) },
+  };
+}
+
+export function saveCalendar(value) {
+  const next = {
+    events: Array.isArray(value?.events) ? value.events : [],
+    preferences: { lunar: true, solarTerms: true, festivals: true, ...(value?.preferences || {}) },
+  };
+  saveFile(CALENDAR_FILE, next);
+  return next;
 }
 
 // ---------- AI 助手多会话 ----------

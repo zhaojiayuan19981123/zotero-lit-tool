@@ -1,6 +1,6 @@
 {
   "name": "zotero-lit-tool",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "一站式科研终端 —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
   "type": "module",
   "main": "electron/main.cjs",
@@ -13,15 +13,26 @@
     "dist:mac": "electron-builder --mac",
     "dist:mac:arm64": "electron-builder --mac --arm64"
   },
-  "keywords": ["zotero", "literature", "pdf", "ai", "research"],
+  "keywords": [
+    "zotero",
+    "literature",
+    "pdf",
+    "ai",
+    "research"
+  ],
   "author": "SciTerminal",
   "license": "MIT",
   "dependencies": {
+    "dompurify": "^3.2.6",
     "express": "^4.19.2",
     "imapflow": "^2.0.5",
+    "katex": "^0.16.22",
+    "lunar-javascript": "^1.6.13",
     "mailparser": "^3.9.28",
+    "marked": "^15.0.12",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^10.0.10",
+    "sanitize-html": "^2.17.0",
     "unpdf": "^0.12.0"
   },
   "devDependencies": {
@@ -50,7 +61,12 @@
       "icon": "build/icon.icns",
       "category": "public.app-category.productivity",
       "target": [
-        { "target": "dmg", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "artifactName": "一站式科研终端-${version}-macOS-arm64.dmg"
     },
@@ -58,14 +74,27 @@
       "title": "一站式科研终端",
       "icon": "build/icon.icns",
       "contents": [
-        { "x": 130, "y": 220 },
-        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "win": {
       "icon": "build/icon.ico",
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "artifactName": "一站式科研终端-${version}-安装版.exe"
     },

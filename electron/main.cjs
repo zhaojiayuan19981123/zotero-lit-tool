@@ -1,5 +1,5 @@
 // electron/main.cjs —— Electron 主进程：启动内嵌 Express 后端 + 桌面窗口
-const { app, BrowserWindow, shell, Notification } = require('electron');
+const { app, BrowserWindow, shell, Notification, dialog } = require('electron');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const fs = require('fs');
@@ -146,7 +146,8 @@ function rescueDataFromInstallDir(defaultDataDir) {
     const installDir = path.resolve(path.dirname(app.getPath('exe')));
     if (!fs.existsSync(installDir)) return null;
     const names = ['literature.json', 'settings.json', 'mail.json', 'tasks.json',
-      'projects.json', 'notes.json', 'profile.json', 'papers.json', 'chat.json', 'conversations.json', 'ideas.json'];
+      'projects.json', 'notes.json', 'profile.json', 'papers.json', 'chat.json', 'conversations.json', 'ideas.json',
+      'markdown-notes.json', 'calendar.json'];
     const found = names.filter((n) => fs.existsSync(path.join(installDir, n)));
     if (!found.length) return null;
 
@@ -245,6 +246,37 @@ async function startBackend() {
     onDataDirChange: (dir) => writeAppConfig({ dataDir: dir === defaultDataDir ? '' : dir }),
     // 「打开数据目录」按钮：交给系统文件管理器
     openPath: (dir) => shell.openPath(dir),
+    saveTextFile: async ({ filename, data }) => {
+      const choice = await dialog.showSaveDialog(mainWindow || undefined, {
+        title: '导出 Markdown 笔记', defaultPath: filename,
+        filters: [{ name: 'Markdown 文件', extensions: ['md'] }, { name: '所有文件', extensions: ['*'] }],
+      });
+      if (choice.canceled || !choice.filePath) return { canceled: true };
+      fs.writeFileSync(choice.filePath, String(data || ''), 'utf8');
+      return { canceled: false, path: choice.filePath };
+    },
+    exportPdf: async ({ filename, html }) => {
+      const choice = await dialog.showSaveDialog(mainWindow || undefined, {
+        title: '导出 PDF', defaultPath: filename,
+        filters: [{ name: 'PDF 文件', extensions: ['pdf'] }],
+      });
+      if (choice.canceled || !choice.filePath) return { canceled: true };
+      const tempPath = path.join(app.getPath('temp'), `sciterminal-note-${Date.now()}-${Math.random().toString(36).slice(2)}.html`);
+      const baseTag = `<base href="http://127.0.0.1:${backendPort}/">`;
+      const printableHtml = String(html || '').replace('<head>', `<head>${baseTag}`);
+      fs.writeFileSync(tempPath, printableHtml, 'utf8');
+      const printWindow = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true } });
+      try {
+        await printWindow.loadFile(tempPath);
+        await printWindow.webContents.executeJavaScript('document.fonts ? document.fonts.ready.then(() => true) : true');
+        const pdf = await printWindow.webContents.printToPDF({ printBackground: true, pageSize: 'A4' });
+        fs.writeFileSync(choice.filePath, pdf);
+        return { canceled: false, path: choice.filePath };
+      } finally {
+        if (!printWindow.isDestroyed()) printWindow.destroy();
+        try { fs.unlinkSync(tempPath); } catch (_) { /* ignore */ }
+      }
+    },
   });
   markHome();
   return port;
