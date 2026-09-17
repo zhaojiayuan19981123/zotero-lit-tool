@@ -1,5 +1,6 @@
 // electron/main.cjs —— Electron 主进程：启动内嵌 Express 后端 + 桌面窗口
 const { app, BrowserWindow, shell, Notification, dialog } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const fs = require('fs');
@@ -43,6 +44,114 @@ try {
 
 let mainWindow = null;
 let backendPort = null;
+const updateSupported = app.isPackaged && process.platform === 'win32';
+
+// 更新由主进程负责，页面只能通过本地 API 读取状态和发起明确动作。
+// 浏览器开发模式不具备安装权限，也不会连接 GitHub 检查更新。
+const updateState = {
+  supported: false,
+  currentVersion: app.getVersion(),
+  phase: 'idle',
+  availableVersion: '',
+  releaseName: '',
+  releaseNotes: '',
+  percent: 0,
+  transferred: 0,
+  total: 0,
+  bytesPerSecond: 0,
+  error: '',
+};
+let updaterReady = false;
+
+function normalizeReleaseNotes(notes) {
+  if (Array.isArray(notes)) {
+    return notes.map((item) => item?.note || item?.version || '').filter(Boolean).join('\n\n');
+  }
+  return typeof notes === 'string' ? notes : '';
+}
+
+function updaterSnapshot() {
+  return { ...updateState };
+}
+
+function setupUpdater() {
+  if (updaterReady) return;
+  updaterReady = true;
+  updateState.supported = updateSupported;
+  if (!updateSupported) return;
+
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.allowPrerelease = false;
+  autoUpdater.on('checking-for-update', () => {
+    Object.assign(updateState, { phase: 'checking', error: '', percent: 0 });
+  });
+  autoUpdater.on('update-available', (info) => {
+    Object.assign(updateState, {
+      phase: 'available',
+      availableVersion: info?.version || '',
+      releaseName: info?.releaseName || '',
+      releaseNotes: normalizeReleaseNotes(info?.releaseNotes),
+      error: '',
+    });
+  });
+  autoUpdater.on('update-not-available', () => {
+    Object.assign(updateState, {
+      phase: 'not-available', availableVersion: '', releaseName: '', releaseNotes: '', error: '',
+    });
+  });
+  autoUpdater.on('download-progress', (progress) => {
+    Object.assign(updateState, {
+      phase: 'downloading',
+      percent: Number(progress?.percent || 0),
+      transferred: Number(progress?.transferred || 0),
+      total: Number(progress?.total || 0),
+      bytesPerSecond: Number(progress?.bytesPerSecond || 0),
+      error: '',
+    });
+  });
+  autoUpdater.on('update-downloaded', (info) => {
+    Object.assign(updateState, {
+      phase: 'downloaded',
+      availableVersion: info?.version || updateState.availableVersion,
+      percent: 100,
+      error: '',
+    });
+  });
+  autoUpdater.on('error', (error) => {
+    Object.assign(updateState, {
+      phase: 'error',
+      error: error?.message || '更新服务发生未知错误',
+    });
+  });
+}
+
+const updateService = {
+  getStatus() {
+    return updaterSnapshot();
+  },
+  async check() {
+    if (!updateSupported) throw new Error('自动更新仅在安装后的 Windows 桌面版中可用');
+    if (['checking', 'downloading'].includes(updateState.phase)) return updaterSnapshot();
+    Object.assign(updateState, { phase: 'checking', error: '', percent: 0 });
+    await autoUpdater.checkForUpdates();
+    return updaterSnapshot();
+  },
+  async download() {
+    if (!updateSupported) throw new Error('自动更新仅在安装后的 Windows 桌面版中可用');
+    if (updateState.phase === 'downloaded') return updaterSnapshot();
+    if (updateState.phase !== 'available') throw new Error('当前没有可下载的新版本');
+    Object.assign(updateState, { phase: 'downloading', error: '', percent: 0 });
+    await autoUpdater.downloadUpdate();
+    return updaterSnapshot();
+  },
+  install() {
+    if (!updateSupported) throw new Error('自动更新仅在安装后的 Windows 桌面版中可用');
+    if (updateState.phase !== 'downloaded') throw new Error('更新尚未下载完成');
+    setTimeout(() => autoUpdater.quitAndInstall(false, true), 500);
+    return updaterSnapshot();
+  },
+};
 
 // 单实例锁（避免重复启动多个后端）
 const gotLock = app.requestSingleInstanceLock();
@@ -242,6 +351,7 @@ async function startBackend() {
     dataDir, uploadDir, port: 0, defaultDataDir,
     defaultUploadDir: path.join(dataDir, 'uploads'),
     installDir: path.dirname(app.getPath('exe')),
+    updateService,
     // 设置里切换数据目录成功后，主进程把新目录持久化，下次启动沿用
     onDataDirChange: (dir) => writeAppConfig({ dataDir: dir === defaultDataDir ? '' : dir }),
     // 「打开数据目录」按钮：交给系统文件管理器
@@ -291,7 +401,7 @@ function createWindow() {
     title: '一站式科研终端',
     icon: path.join(__dirname, 'icon.png'),
     autoHideMenuBar: true,
-    backgroundColor: '#f7f5fa',
+    backgroundColor: '#f4f6f3',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -309,6 +419,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  setupUpdater();
   try {
     backendPort = await startBackend();
   } catch (e) {

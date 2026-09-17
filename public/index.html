@@ -13,8 +13,11 @@
   <header class="topbar">
     <div class="brand">
       <img src="favicon.png" alt="" class="brand-logo-img" />
-      <h1>一站式科研终端</h1>
-      <span class="ai-badge">AI</span>
+      <div class="brand-copy">
+        <h1>一站式科研终端</h1>
+        <span>Research Workspace</span>
+      </div>
+      <span class="ai-badge">AI READY</span>
     </div>
     <div class="topbar-actions">
       <input type="search" id="searchInput" class="search" placeholder="🔍 搜索标题 / 作者 / 关键词…" />
@@ -55,22 +58,30 @@
         <span class="profile-edit">✎</span>
       </div>
       <nav class="side-nav">
+        <div class="nav-section-label">研究工作</div>
         <div class="nav-item active" data-view="home"><span class="nav-ico">🏠</span>首页</div>
         <div class="nav-item" data-view="library"><span class="nav-ico">📚</span>文献中心</div>
         <div class="nav-item" data-view="projects"><span class="nav-ico">📂</span>项目管理</div>
         <div class="nav-item" data-view="tasks"><span class="nav-ico">✅</span>任务安排</div>
         <div class="nav-item" data-view="papers"><span class="nav-ico">📮</span>论文进度</div>
         <div class="nav-item" data-view="mail"><span class="nav-ico">📧</span>邮箱<span id="navMailBadge" class="nav-badge hidden">0</span></div>
+        <div class="nav-section-label">写作与思考</div>
         <div class="nav-item" data-view="notes"><span class="nav-ico">🧪</span>研究记录</div>
         <div class="nav-item" data-view="markdown"><span class="nav-ico">✎</span>Markdown 笔记</div>
         <div class="nav-item" data-view="ideas"><span class="nav-ico">💡</span>灵感孵化</div>
         <div class="nav-item" data-view="ai"><span class="nav-ico">🤖</span>AI 助手</div>
+        <div class="nav-section-label">工具</div>
         <div class="nav-item" data-view="worldlib"><span class="nav-ico">🌍</span>世图下载助手</div>
       </nav>
       <div class="side-foot">
         <div class="side-progress-row"><span class="dot dot-done"></span>已阅读 <b id="cntDone">0</b></div>
         <div class="side-progress-row"><span class="dot dot-reading"></span>阅读中 <b id="cntReading">0</b></div>
         <div class="side-progress-row"><span class="dot dot-unread"></span>未阅读 <b id="cntUnread">0</b></div>
+        <button id="btnCheckUpdate" class="side-action-btn" type="button">
+          <span class="side-action-icon">↻</span>
+          <span id="updateNavLabel">检查更新</span>
+          <span id="updateNavBadge" class="update-nav-badge hidden">新版本</span>
+        </button>
         <button id="btnNavSettings" class="btn btn-ghost w100" style="margin-top:6px">⚙ 设置</button>
       </div>
     </aside>
@@ -907,14 +918,14 @@
         </label>
         <label class="field"><span>DeepL API Key（选 DeepL 时填写）</span><input id="setDeeplKey" class="tb-input" type="password" placeholder="DeepL 密钥，留空则不用 DeepL" /></label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:var(--primary-soft)">🎨 主题配色（一键换色，侧边栏、正文、文字颜色全界面生效；也可以直接输入任意色值自定义）。</p>
+        <p class="modal-desc" style="background:var(--primary-soft)">主题配色用于主操作、选中状态和链接；侧边栏与语义状态色保持稳定，以保证信息识别和阅读对比度。</p>
         <label class="field"><span>预设配色</span>
           <div id="themePresets" class="theme-presets"></div>
         </label>
-        <label class="field"><span>自定义主色（点色块取色或直接输入色号，如 #81308C）</span>
+        <label class="field"><span>自定义主色（点色块取色或直接输入色号，如 #176B87）</span>
           <div class="rank-input-row">
-            <input type="color" id="themeColorPicker" class="theme-color-picker" value="#81308C" />
-            <input id="themeColorInput" class="tb-input" placeholder="#81308C" />
+            <input type="color" id="themeColorPicker" class="theme-color-picker" value="#176B87" />
+            <input id="themeColorInput" class="tb-input" placeholder="#176B87" />
             <button class="tb-btn" id="btnThemeApply">应用</button>
             <button class="tb-btn" id="btnThemeReset">恢复默认</button>
           </div>
@@ -966,6 +977,42 @@
         <span class="ob-spacer"></span>
         <button id="btnSettingsSave" class="btn btn-primary">保存设置</button>
         <button id="btnSettingsCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 应用更新 -->
+  <div id="updateModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog update-dialog">
+      <div class="modal-head">
+        <div>
+          <h3>应用更新</h3>
+          <p class="update-version-line">当前版本 <b id="updateCurrentVersion">--</b><span id="updateVersionArrow" class="hidden"> → <b id="updateAvailableVersion">--</b></span></p>
+        </div>
+        <button class="modal-close" id="btnUpdateClose" title="关闭">×</button>
+      </div>
+      <div class="modal-body update-body">
+        <div id="updateStateIcon" class="update-state-icon">↻</div>
+        <div class="update-state-copy">
+          <h4 id="updateStateTitle">准备检查更新</h4>
+          <p id="updateStateMessage">点击下方按钮，从 GitHub Releases 检查可安装的新版本。</p>
+        </div>
+        <div id="updateProgressWrap" class="update-progress-wrap hidden">
+          <div class="update-progress-track"><span id="updateProgressBar"></span></div>
+          <div class="update-progress-meta"><span id="updateProgressText">0%</span><span id="updateSpeedText"></span></div>
+        </div>
+        <div id="updateReleaseWrap" class="update-release hidden">
+          <div class="update-release-title" id="updateReleaseName">版本说明</div>
+          <div id="updateReleaseNotes" class="md-render update-release-notes"></div>
+        </div>
+        <p class="update-caution">安装前建议完成正在编辑的内容。下载完成后，应用将退出并启动安装程序；辅助式安装包在部分系统上仍可能要求确认安装选项。</p>
+      </div>
+      <div class="modal-foot">
+        <a class="btn btn-ghost" href="https://github.com/zhaojiayuan19981123/zotero-lit-tool/releases" target="_blank" rel="noopener noreferrer">查看发布页</a>
+        <span class="ob-spacer"></span>
+        <button id="btnUpdateAction" class="btn btn-primary">检查更新</button>
+        <button id="btnUpdateCancel" class="btn">关闭</button>
       </div>
     </div>
   </div>

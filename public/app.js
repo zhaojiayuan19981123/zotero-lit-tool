@@ -107,6 +107,9 @@
   let markdownSaveTimer = null;
   let calendarData = { events: [], preferences: { lunar: true, solarTerms: true, festivals: true } };
   let classMoveIds = [];
+  let updateStatus = null;
+  let updatePollTimer = null;
+  let updateActionBusy = false;
 
   const $ = (id) => document.getElementById(id);
   const el = {
@@ -267,9 +270,10 @@
     if (settings.colWidths && typeof settings.colWidths === 'object' && !Array.isArray(settings.colWidths)) {
       colWidths = { ...settings.colWidths };
     }
-    // 启动时恢复已保存的主题配色（无保存则用默认紫）
+    // 旧版本的默认紫色在 1.4.0 迁移为新的研究蓝；用户选择的其他自定义色保留。
     renderThemePresets();
-    applyTheme(settings.themeColor || DEFAULT_THEME, false);
+    const savedTheme = String(settings.themeColor || '').toUpperCase();
+    applyTheme(!savedTheme || savedTheme === '#81308C' ? DEFAULT_THEME : settings.themeColor, false);
     // 恢复全局字体与字号
     applyFont(settings.appFont || '');
     applyFontSize(settings.fontSize || 'medium');
@@ -1223,21 +1227,17 @@
 
   async function wlImport() { return wlDownloadImport(true); }
 
-  // ============ 主题配色（一键换色 + 自定义色值） ============
-  const DEFAULT_THEME = '#81308C';
+  // ============ 主题配色（稳定的学术底色 + 可定制主操作色） ============
+  const DEFAULT_THEME = '#176B87';
   const THEME_PRESETS = [
-    { name: '紫韵·默认', primary: '#81308C' },
-    { name: '马卡龙粉', primary: '#e8709a' },
-    { name: '莓果红', primary: '#c94f6d' },
-    { name: '蜜桃橙', primary: '#e07b39' },
-    { name: '琥珀金', primary: '#c98a12' },
-    { name: '薄荷绿', primary: '#2fa376' },
-    { name: '湖水青', primary: '#2a9db5' },
-    { name: '天空蓝', primary: '#3f7fd6' },
-    { name: '深邃蓝', primary: '#4a5fc1' },
-    { name: '葡萄紫', primary: '#7a5cd6' },
-    { name: '岩灰紫', primary: '#6d6a8f' },
-    { name: '石墨灰', primary: '#5b6470' },
+    { name: '研究蓝', primary: '#176B87' },
+    { name: '松柏绿', primary: '#28735D' },
+    { name: '群青蓝', primary: '#315F9B' },
+    { name: '珊瑚红', primary: '#C85C4A' },
+    { name: '琥珀金', primary: '#A87518' },
+    { name: '莓果红', primary: '#A94762' },
+    { name: '理性紫', primary: '#70578F' },
+    { name: '石墨灰', primary: '#52625B' },
   ];
 
   function hexToHsl(hex) {
@@ -1266,8 +1266,7 @@
     return '#' + to(f(0)) + to(f(8)) + to(f(4));
   }
 
-  // 由主色推导整套协调的界面色：背景、边框、面板、侧边栏、滚动条、
-  // 正文文字色相全部跟随主色，实现「一键换色、全界面生效」
+  // 主色只负责操作与选中状态。侧边栏、正文和语义色保持稳定，避免整站变成单一色相。
   function deriveTheme(primary) {
     const c = hexToHsl(primary);
     if (!c) return null;
@@ -1276,37 +1275,15 @@
       '--primary': primary,
       '--primary-hover': hslToHex(c.h, cl(c.s + 4), cl(c.l * 0.82)),
       '--primary-light': hslToHex(c.h, cl(c.s - 6), cl(c.l * 1.18 + 6)),
-      '--primary-soft': hslToHex(c.h, cl(c.s * 0.55), 96),
-      '--bg': hslToHex(c.h, cl(c.s * 0.28), 97.6),
-      '--head-bg': hslToHex(c.h, cl(c.s * 0.22), 98.6),
-      '--border': hslToHex(c.h, cl(c.s * 0.30), 91),
-      '--gray-soft': hslToHex(c.h, cl(c.s * 0.16), 94.5),
-      // 侧边栏：主色的两个加深色阶 + 同色相浅文字
-      '--side-1': hslToHex(c.h, cl(c.s * 1.06), 20),
-      '--side-2': hslToHex(c.h, cl(c.s * 1.15), 14),
-      '--side-text': hslToHex(c.h, cl(c.s * 0.68), 90),
-      // 正文文字：带主色相的低饱和深浅三档
-      '--text': hslToHex(c.h, cl(c.s * 0.30), 15),
-      '--text-2': hslToHex(c.h, cl(c.s * 0.18), 40),
-      '--text-3': hslToHex(c.h, cl(c.s * 0.14), 68),
-      '--gray': hslToHex(c.h, cl(c.s * 0.18), 60),
-      // 面板 / 悬停 / 边框 / 滚动条
-      '--border-soft': hslToHex(c.h, cl(c.s * 0.30), 94.5),
-      '--panel-soft': hslToHex(c.h, cl(c.s * 0.30), 98.2),
-      '--panel-2': hslToHex(c.h, cl(c.s * 0.18), 97.2),
-      '--panel-2-hover': hslToHex(c.h, cl(c.s * 0.14), 94.8),
-      '--row-hover': hslToHex(c.h, cl(c.s * 0.35), 98.5),
-      '--scrollbar': hslToHex(c.h, cl(c.s * 0.28), 83),
-      '--scrollbar-hover': hslToHex(c.h, cl(c.s * 0.30), 70),
-      '--btn-border': hslToHex(c.h, cl(c.s * 0.26), 86),
-      '--accent-2': hslToHex(c.h, cl(c.s * 0.90), cl(c.l * 1.15)),
-      '--dash-border': hslToHex(c.h, cl(c.s * 0.22), 81),
+      '--primary-soft': hslToHex(c.h, cl(c.s * 0.42), 95.5),
+      '--btn-border': hslToHex(c.h, cl(c.s * 0.20), 84),
+      '--accent-2': '#D7654F',
     };
   }
 
   function applyTheme(primary, persist) {
     const vars = deriveTheme(primary);
-    if (!vars) { toast('色值格式不正确，请输入如 #81308C 的色号', 'error'); return; }
+    if (!vars) { toast('色值格式不正确，请输入如 #176B87 的色号', 'error'); return; }
     const root = document.documentElement;
     for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
     $('themeColorPicker').value = primary;
@@ -1995,6 +1972,7 @@
         else if (!$('noteModal').classList.contains('hidden')) $('noteModal').classList.add('hidden');
         else if (!$('paperModal').classList.contains('hidden')) $('paperModal').classList.add('hidden');
         else if (!$('thesisModal').classList.contains('hidden')) $('thesisModal').classList.add('hidden');
+        else if (!$('updateModal').classList.contains('hidden')) $('updateModal').classList.add('hidden');
         else if (!el.drawer.classList.contains('hidden')) closeDrawer();
       }
     });
@@ -4704,11 +4682,11 @@
     const inject = `<base target="_blank">
 <style>
 html, body { margin: 0; padding: 12px 16px; font-size: 14px; line-height: 1.75; word-break: break-word;
-  font-family: "Times New Roman", "Microsoft YaHei", "PingFang SC", sans-serif; color: #241b2b; background: #fff; }
+  font-family: "Times New Roman", "Microsoft YaHei", "PingFang SC", sans-serif; color: #17231f; background: #fff; }
 img { max-width: 100%; height: auto; }
 table { max-width: 100% !important; }
 pre { white-space: pre-wrap; }
-a { color: #81308C; }
+a { color: #176b87; }
 </style>`;
     if (/<head[^>]*>/i.test(s)) return s.replace(/<head[^>]*>/i, (m) => m + inject);
     if (/<html[^>]*>/i.test(s)) return s.replace(/<html[^>]*>/i, (m) => m + inject);
@@ -5187,6 +5165,133 @@ a { color: #81308C; }
     }
     renderMailView();
     if (mailAccounts.length && !mailCur.accountId) await selectMailAccount(mailAccounts[0].id);
+  }
+
+  // ---------- 桌面应用更新 ----------
+  function formatUpdateBytes(value) {
+    const n = Number(value || 0);
+    if (!n) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const index = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+    return `${(n / (1024 ** index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+  }
+
+  function renderUpdateStatus(status = updateStatus) {
+    if (!status) return;
+    updateStatus = status;
+    const phase = status.phase || 'idle';
+    const current = status.currentVersion ? `v${status.currentVersion}` : '--';
+    const available = status.availableVersion ? `v${status.availableVersion}` : '--';
+    $('updateCurrentVersion').textContent = current;
+    $('updateAvailableVersion').textContent = available;
+    $('updateVersionArrow').classList.toggle('hidden', !status.availableVersion);
+
+    const copy = {
+      idle: ['↻', '准备检查更新', '点击下方按钮，从 GitHub Releases 检查可安装的新版本。'],
+      unsupported: ['—', '当前环境不支持自动更新', status.error || '请在安装后的 Windows 桌面版中使用此功能。'],
+      checking: ['↻', '正在检查新版本', '正在读取 GitHub Releases 的稳定版本信息…'],
+      available: ['↓', `发现新版本 ${available}`, '版本已通过更新清单验证，可以开始下载。'],
+      downloading: ['↓', `正在下载 ${available}`, '可以关闭此窗口继续使用，下载会在后台进行。'],
+      downloaded: ['✓', `${available} 已准备好`, '保存当前工作后，退出应用并启动安装程序。'],
+      'not-available': ['✓', '当前已是最新版本', `当前使用的是 ${current}，暂未发现更高版本。`],
+      error: ['!', '更新检查失败', status.error || '请检查网络、代理或 GitHub Release 配置后重试。'],
+    }[phase] || ['↻', '应用更新', '可以手动检查 GitHub Releases。'];
+    $('updateStateIcon').textContent = copy[0];
+    $('updateStateIcon').className = `update-state-icon phase-${phase}`;
+    $('updateStateTitle').textContent = copy[1];
+    $('updateStateMessage').textContent = copy[2];
+
+    const downloading = phase === 'downloading';
+    $('updateProgressWrap').classList.toggle('hidden', !downloading);
+    const percent = Math.max(0, Math.min(100, Number(status.percent || 0)));
+    $('updateProgressBar').style.width = `${percent}%`;
+    $('updateProgressText').textContent = status.total
+      ? `${percent.toFixed(1)}% · ${formatUpdateBytes(status.transferred)} / ${formatUpdateBytes(status.total)}`
+      : `${percent.toFixed(1)}%`;
+    $('updateSpeedText').textContent = status.bytesPerSecond ? `${formatUpdateBytes(status.bytesPerSecond)}/s` : '';
+
+    const hasNotes = Boolean(status.releaseName || status.releaseNotes);
+    $('updateReleaseWrap').classList.toggle('hidden', !hasNotes);
+    $('updateReleaseName').textContent = status.releaseName || `版本 ${available}`;
+    $('updateReleaseNotes').innerHTML = status.releaseNotes
+      ? renderMarkdown(status.releaseNotes)
+      : '<p>此版本未提供发布说明。</p>';
+
+    const actions = {
+      idle: ['检查更新', 'check'], checking: ['正在检查…', ''], available: ['下载更新', 'download'],
+      downloading: ['正在下载…', ''], downloaded: ['退出并安装', 'install'],
+      'not-available': ['重新检查', 'check'], error: ['重试', 'check'], unsupported: ['仅桌面版可用', ''],
+    };
+    const [label, nextAction] = actions[phase] || actions.idle;
+    const actionButton = $('btnUpdateAction');
+    actionButton.textContent = label;
+    actionButton.dataset.updateAction = nextAction;
+    actionButton.disabled = updateActionBusy || !nextAction;
+
+    const badge = $('updateNavBadge');
+    badge.classList.toggle('hidden', !['available', 'downloaded'].includes(phase));
+    badge.textContent = phase === 'downloaded' ? '待安装' : '新版本';
+    $('updateNavLabel').textContent = phase === 'downloading' ? `下载 ${Math.round(percent)}%` : (phase === 'downloaded' ? '安装更新' : '检查更新');
+    $('btnCheckUpdate').classList.toggle('has-update', ['available', 'downloaded'].includes(phase));
+  }
+
+  async function loadUpdateStatus(silent = false) {
+    try {
+      const status = await api('/api/update/status');
+      renderUpdateStatus(status);
+      return status;
+    } catch (e) {
+      if (!silent) toast('读取更新状态失败：' + e.message, 'error');
+      return null;
+    }
+  }
+
+  function beginUpdatePolling() {
+    if (updatePollTimer) return;
+    updatePollTimer = setInterval(async () => {
+      const status = await loadUpdateStatus(true);
+      if (status && !['checking', 'downloading'].includes(status.phase) && !updateActionBusy) {
+        clearInterval(updatePollTimer);
+        updatePollTimer = null;
+      }
+    }, 900);
+  }
+
+  async function runUpdateAction() {
+    const action = $('btnUpdateAction').dataset.updateAction;
+    if (!action || updateActionBusy) return;
+    updateActionBusy = true;
+    if (action === 'check') renderUpdateStatus({ ...updateStatus, phase: 'checking', error: '' });
+    if (action === 'download') renderUpdateStatus({ ...updateStatus, phase: 'downloading', percent: 0, error: '' });
+    beginUpdatePolling();
+    try {
+      renderUpdateStatus(await api(`/api/update/${action}`, { method: 'POST' }));
+    } catch (e) {
+      const latest = await loadUpdateStatus(true);
+      if (!latest || latest.phase !== 'error') renderUpdateStatus({ ...(updateStatus || {}), phase: 'error', error: e.message });
+    } finally {
+      updateActionBusy = false;
+      renderUpdateStatus(updateStatus);
+      if (!['checking', 'downloading'].includes(updateStatus?.phase)) {
+        clearInterval(updatePollTimer);
+        updatePollTimer = null;
+      }
+    }
+  }
+
+  function bindUpdater() {
+    const open = async () => {
+      $('updateModal').classList.remove('hidden');
+      await loadUpdateStatus();
+      if (['checking', 'downloading'].includes(updateStatus?.phase)) beginUpdatePolling();
+    };
+    const close = () => $('updateModal').classList.add('hidden');
+    $('btnCheckUpdate').addEventListener('click', open);
+    $('btnUpdateClose').addEventListener('click', close);
+    $('btnUpdateCancel').addEventListener('click', close);
+    $('updateModal').querySelector('.modal-mask').addEventListener('click', close);
+    $('btnUpdateAction').addEventListener('click', runUpdateAction);
+    loadUpdateStatus(true);
   }
 
   // ---------- 工作台事件绑定 ----------
@@ -5860,6 +5965,7 @@ a { color: #81308C; }
     bindGrid();
     bindLibBar();
     bindEvents();
+    bindUpdater();
     bindWorkbench();
     bindPdfReader();
     bindIdeas();

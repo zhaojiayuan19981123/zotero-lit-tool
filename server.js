@@ -380,12 +380,44 @@ export function createApp({
   installDir = null,       // 应用安装目录（用于拦截「把数据放进安装目录」这一危险操作）
   saveTextFile = null,     // Electron 注入系统另存为对话框
   exportPdf = null,        // Electron 注入 PDF 打印与另存为
+  updateService = null,    // Electron 注入更新检查、下载与安装能力
 } = {}) {
   let currentUploadDir = uploadDir;
   fs.mkdirSync(currentUploadDir, { recursive: true });
 
   const app = express();
   app.use(express.json({ limit: '30mb' }));
+
+  const browserUpdateStatus = {
+    supported: false,
+    currentVersion: '',
+    phase: 'unsupported',
+    availableVersion: '',
+    releaseName: '',
+    releaseNotes: '',
+    percent: 0,
+    transferred: 0,
+    total: 0,
+    bytesPerSecond: 0,
+    error: '自动更新仅在安装后的 Windows 桌面版中可用',
+  };
+  app.get('/api/update/status', (_req, res) => {
+    try {
+      res.json(updateService?.getStatus?.() || browserUpdateStatus);
+    } catch (e) {
+      res.status(500).json({ error: e.message || '读取更新状态失败' });
+    }
+  });
+  for (const action of ['check', 'download', 'install']) {
+    app.post(`/api/update/${action}`, async (_req, res) => {
+      try {
+        if (!updateService?.[action]) return res.status(409).json({ error: browserUpdateStatus.error });
+        res.json(await updateService[action]());
+      } catch (e) {
+        res.status(409).json({ error: e.message || '更新操作失败' });
+      }
+    });
+  }
 
   const storage = multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, currentUploadDir),
@@ -2153,11 +2185,11 @@ export async function startServer(options = {}) {
   const {
     dataDir, uploadDir, port = 0,
     publicDir = path.join(__dirname, 'public'),
-    defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir, saveTextFile, exportPdf,
+    defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir, saveTextFile, exportPdf, updateService,
   } = options;
   if (dataDir) store.configure({ dataDir });
   const { app } = createApp({
-    uploadDir, defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir, saveTextFile, exportPdf,
+    uploadDir, defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir, saveTextFile, exportPdf, updateService,
   });
 
   // 启动时自动做一份数据快照：覆盖安装 / 升级 / 误操作后都能从「设置 → 数据备份」找回。

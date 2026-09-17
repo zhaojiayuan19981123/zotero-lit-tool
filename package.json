@@ -1,12 +1,13 @@
 {
   "name": "zotero-lit-tool",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "一站式科研终端 —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "test": "node --test test/update-api.test.mjs",
     "electron": "electron .",
     "dist": "electron-builder --win",
     "dist:dir": "electron-builder --win dir",
@@ -24,6 +25,7 @@
   "license": "MIT",
   "dependencies": {
     "dompurify": "^3.2.6",
+    "electron-updater": "^6.6.2",
     "express": "^4.19.2",
     "imapflow": "^2.0.5",
     "katex": "^0.16.22",
@@ -47,6 +49,14 @@
     "directories": {
       "output": "dist"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "zhaojiayuan19981123",
+        "repo": "zotero-lit-tool",
+        "releaseType": "release"
+      }
+    ],
     "files": [
       "server.js",
       "src/**/*",
@@ -96,7 +106,7 @@
           ]
         }
       ],
-      "artifactName": "一站式科研终端-${version}-安装版.exe"
+      "artifactName": "zotero-lit-tool-setup-${version}.exe"
     },
     "nsis": {
       "oneClick": false,
@@ -111,7 +121,7 @@
       "installerHeaderIcon": "build/icon.ico",
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true,
-      "artifactName": "一站式科研终端-${version}-安装版.exe"
+      "artifactName": "zotero-lit-tool-setup-${version}.exe"
     }
   }
 }
