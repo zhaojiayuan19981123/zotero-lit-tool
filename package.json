@@ -12,7 +12,8 @@
     "dist": "electron-builder --win",
     "dist:dir": "electron-builder --win dir",
     "dist:mac": "electron-builder --mac",
-    "dist:mac:arm64": "electron-builder --mac --arm64"
+    "dist:mac:arm64": "electron-builder --mac dmg --arm64",
+    "dist:mac:x64": "electron-builder --mac dmg --x64"
   },
   "keywords": [
     "zotero",
@@ -71,14 +72,9 @@
       "icon": "build/icon.icns",
       "category": "public.app-category.productivity",
       "target": [
-        {
-          "target": "dmg",
-          "arch": [
-            "arm64"
-          ]
-        }
+        "dmg"
       ],
-      "artifactName": "一站式科研终端-${version}-macOS-arm64.dmg"
+      "artifactName": "zotero-lit-tool-${version}-macos-${arch}.dmg"
     },
     "dmg": {
       "title": "一站式科研终端",

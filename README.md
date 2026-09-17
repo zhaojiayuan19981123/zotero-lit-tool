@@ -28,6 +28,19 @@ Windows 用户无需安装 Node.js，可直接下载安装程序：
 
 当前安装包未进行商业代码签名。如果 Windows SmartScreen 显示保护提示，请确认文件来自本仓库的 Releases 页面，然后选择「更多信息」和「仍要运行」。
 
+### macOS 安装包
+
+GitHub Releases 同时提供两种 macOS 安装包：
+
+| 文件 | 适用设备 |
+|---|---|
+| `zotero-lit-tool-1.4.0-macos-arm64.dmg` | Apple Silicon（M1、M2、M3、M4 等）Mac |
+| `zotero-lit-tool-1.4.0-macos-x64.dmg` | Intel 处理器 Mac |
+
+下载与处理器架构对应的 DMG，打开后将「一站式科研终端」拖入 Applications。当前 macOS 构建未使用 Apple Developer ID 签名，也未经过 Apple 公证，因此 Gatekeeper 可能阻止首次直接启动。请仅从本仓库 Releases 下载，并在确认校验值后，通过「系统设置 → 隐私与安全性」允许打开。正式面向更广泛用户分发前，应配置 Apple Developer ID 签名和公证。
+
+macOS 版本目前不支持应用内自动更新。升级时需从 Releases 下载对应架构的新 DMG；Windows 安装版可以使用侧边栏中的「检查更新」。
+
 ### 应用内更新
 
 安装后的 Windows 桌面版可在左侧栏底部点击「检查更新」。应用会读取本仓库最新的正式 GitHub Release，并按以下流程更新：
@@ -589,6 +602,8 @@ Windows 安装配置默认不会在卸载时删除用户数据，但仍建议先
 自动更新不会改变当前数据目录。Windows 桌面版数据通常位于 `%APPDATA%\SciTerminal\data`，旧版用户也可能仍使用 `%APPDATA%\zotero-lit-tool`；实际路径以设置页面为准。安装配置不会主动删除应用数据，但发布新版本前仍应验证迁移逻辑，并建议用户先导出备份。
 
 当前安装程序没有商业代码签名，因此新版本仍可能触发 SmartScreen。面向广泛用户发布时，应使用受信任的 Windows 代码签名证书，并在持续集成或隔离的签名环境中保护私钥。
+
+仓库中的 `.github/workflows/release.yml` 会在推送 `v*` 标签后，分别在 GitHub 托管的 Windows 和 macOS 构建机上生成 Windows x64、macOS arm64、macOS x64 安装包，创建正式 Release，并附带 `SHA256SUMS.txt`。在没有配置 Apple 签名凭据时，工作流会明确关闭证书自动发现，产出的 macOS 包属于未签名、未公证构建。
 
 不要将本地 `data/`、`uploads/`、`node_modules/`、API Key 或用户文献上传到 Release 或源代码仓库。
 

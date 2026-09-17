@@ -1,0 +1,114 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build Windows installer
+        run: npm run dist
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          if-no-files-found: error
+          path: |
+            dist/zotero-lit-tool-setup-*.exe
+            dist/zotero-lit-tool-setup-*.exe.blockmap
+            dist/latest.yml
+
+  macos:
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - arm64
+          - x64
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.0"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS DMG
+        run: npx electron-builder --mac dmg --${{ matrix.arch }} --publish never
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-release
+          if-no-files-found: error
+          path: dist/zotero-lit-tool-*-macos-${{ matrix.arch }}.dmg
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - windows
+      - macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 一站式科研终端 ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          generate_release_notes: true
+          body: |
+            ## 安装包说明
+
+            - Windows x64：`zotero-lit-tool-setup-1.4.0.exe`
+            - Apple Silicon Mac：`zotero-lit-tool-1.4.0-macos-arm64.dmg`
+            - Intel Mac：`zotero-lit-tool-1.4.0-macos-x64.dmg`
+
+            Windows 客户端自动更新还需要本 Release 中的同名 `.blockmap` 和 `latest.yml`，请勿重命名这些文件。
+
+            当前 Windows 安装包没有商业代码签名；macOS 安装包没有 Apple Developer ID 签名和公证。请仅从本仓库下载并核对 `SHA256SUMS.txt`。macOS 首次启动若被 Gatekeeper 阻止，请在「系统设置 → 隐私与安全性」中确认允许打开。
+          files: release-assets/*
