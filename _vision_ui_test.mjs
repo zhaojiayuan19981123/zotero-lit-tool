@@ -45,6 +45,16 @@ console.log('boot diagnostics', JSON.stringify({
   onboardingVisible: await page.locator('#onboarding').isVisible().catch(() => false),
   pageErrors,
 }, null, 2));
+
+await page.locator('#btnModelSwitch').click();
+await page.locator('#modelPanel:not(.hidden)').waitFor();
+assert.equal(await page.locator('#modelPanel [data-mpid]').count(), 3);
+const modelPanel = await page.locator('#modelPanel').boundingBox();
+assert.ok(modelPanel && modelPanel.y > 0 && modelPanel.y + modelPanel.height <= 980);
+await page.locator('#modelPanel [data-mpid="vision"]').click();
+await page.locator('#modelPanel').waitFor({ state: 'hidden' });
+assert.match(await page.locator('#modelBtnText').innerText(), /GLM-4\.5V/);
+
 await page.locator('#btnSettings').click();
 await page.locator('#settingsModal:not(.hidden)').waitFor();
 
@@ -80,6 +90,7 @@ await page.screenshot({ path: path.resolve('./_vision_ui_test.png'), fullPage: f
 console.log(JSON.stringify({
   settingsModal: true,
   visionSelector: await page.locator('#setVisionProfile').inputValue(),
+  modelSwitcher: true,
   newVisionChips: 5,
   manualOverrideRoundTrip: true,
 }, null, 2));

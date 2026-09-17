@@ -104,9 +104,9 @@ jobs:
           body: |
             ## 安装包说明
 
-            - Windows x64：`zotero-lit-tool-setup-1.4.0.exe`
-            - Apple Silicon Mac：`zotero-lit-tool-1.4.0-macos-arm64.dmg`
-            - Intel Mac：`zotero-lit-tool-1.4.0-macos-x64.dmg`
+            - Windows x64：`zotero-lit-tool-setup-<version>.exe`
+            - Apple Silicon Mac：`zotero-lit-tool-<version>-macos-arm64.dmg`
+            - Intel Mac：`zotero-lit-tool-<version>-macos-x64.dmg`
 
             Windows 客户端自动更新还需要本 Release 中的同名 `.blockmap` 和 `latest.yml`，请勿重命名这些文件。
 
