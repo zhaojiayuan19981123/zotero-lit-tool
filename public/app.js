@@ -111,6 +111,11 @@
   let reviewSaveTimer = null;
   const reviewingIds = new Set();
   const reviewErrors = new Map();
+  let noteAiResult = '';
+  let noteAiAbort = null;
+  let noteAiBusy = false;
+  let noteContentInsertPos = null;
+  let noteAiRequestId = 0;
   let calendarData = { events: [], preferences: { lunar: true, solarTerms: true, festivals: true } };
   let classMoveIds = [];
   let updateStatus = null;
@@ -3760,7 +3765,7 @@
         </div>
         ${p.description ? `<div style="font-size:12.5px;color:var(--text-2);margin-bottom:12px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2">${esc(p.description)}</div>` : ''}
         <div class="proj-progress-row"><div class="proj-progress-bar"><span style="width:${p.progress || 0}%"></span></div><span class="proj-progress-num">${p.progress || 0}%</span></div>
-        <div class="proj-links"><span>📚 文献 <b>${litN}</b></span><span>✅ 待办任务 <b>${taskN}</b></span><span>📝 记录 <b>${noteN}</b></span></div>
+        <div class="proj-links"><span>📚 文献 <b>${litN}</b></span><span>✅ 待办任务 <b>${taskN}</b></span><button class="proj-notes-link" data-project-notes="${p.id}" title="查看该项目的研究记录">📝 记录 <b>${noteN}</b></button></div>
       </div>`;
     }).join('');
   }
@@ -3816,8 +3821,9 @@
     try {
       await api('/api/projects/' + projModalId, { method: 'DELETE' });
       projects = projects.filter((p) => p.id !== projModalId);
+      notes = notes.map((n) => n.projectId === projModalId ? { ...n, projectId: null } : n);
       $('projModal').classList.add('hidden');
-      renderProjects(); renderHome();
+      renderProjects(); renderNotes(); renderHome();
       toast('项目已删除', 'success');
     } catch (e) { toast(e.message, 'error'); }
   }
@@ -4346,9 +4352,10 @@
   function renderNotes() {
     const filter = $('noteProjFilter').value;
     const opts = ['<option value="">全部项目</option>'].concat(projects.map((p) => `<option value="${p.id}">${esc(clipTitle(p.name, 16))}</option>`)).join('');
-    if ($('noteProjFilter').dataset.filled !== '1') { $('noteProjFilter').innerHTML = opts; $('noteProjFilter').dataset.filled = '1'; }
-    $('noteProjFilter').value = filter;
-    const list = filter ? notes.filter((n) => n.projectId === filter) : notes;
+    const activeFilter = projects.some((p) => p.id === filter) ? filter : '';
+    $('noteProjFilter').innerHTML = opts;
+    $('noteProjFilter').value = activeFilter;
+    const list = activeFilter ? notes.filter((n) => n.projectId === activeFilter) : notes;
     $('noteCards').innerHTML = list.length ? list.map((n) => {
       const proj = projects.find((p) => p.id === n.projectId);
       const paper = papers.find((p) => p.id === n.paperId && p.kind === 'journal');
@@ -4361,13 +4368,55 @@
   }
 
   let noteModalId = null;
+  function resetNoteAi() {
+    noteAiRequestId += 1;
+    noteAiResult = '';
+    noteAiBusy = false;
+    noteAiAbort?.abort();
+    noteAiAbort = null;
+    noteContentInsertPos = null;
+    $('noteAiDraft').value = '';
+    $('noteAiStatus').textContent = '';
+    $('noteAiStatus').classList.remove('error');
+    $('noteAiOutput').innerHTML = '';
+    $('noteAiOutput').classList.add('hidden');
+    $('btnNoteAiGenerate').disabled = false;
+    $('btnNoteAiStop').classList.add('hidden');
+    $('btnNoteAiInsert').classList.add('hidden');
+    $('btnNoteAiInsert').disabled = true;
+  }
+  function rememberNoteContentPosition() {
+    const ta = $('noteContent');
+    noteContentInsertPos = { start: ta.selectionStart ?? ta.value.length, end: ta.selectionEnd ?? ta.value.length };
+  }
+  function insertIntoNoteContent(text, position = null) {
+    const ta = $('noteContent');
+    const requestedStart = position?.start ?? ta.selectionStart ?? ta.value.length;
+    const start = Math.min(Math.max(0, requestedStart), ta.value.length);
+    // 研究记录的辅助输出始终是插入，不会用选区替换用户已经写好的文字。
+    const end = start;
+    const before = ta.value.slice(0, start);
+    const after = ta.value.slice(end);
+    const prefix = before.trim() && !before.endsWith('\n') ? '\n\n' : before.trim() ? '\n' : '';
+    const suffix = after.trim() && !after.startsWith('\n') ? '\n\n' : after.trim() ? '\n' : '';
+    const inserted = prefix + text.trim() + suffix;
+    ta.setRangeText(inserted, start, end, 'end');
+    ta.focus();
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    rememberNoteContentPosition();
+  }
+  function closeNoteModal() {
+    resetNoteAi();
+    $('noteModal').classList.add('hidden');
+  }
   function openNoteModal(id) {
     noteModalId = id || null;
     const n = id ? notes.find((x) => x.id === id) : null;
     $('noteModalTitle').textContent = n ? '编辑研究记录' : '新建研究记录';
     const projOpts = ['<option value="">不关联项目</option>'].concat(projects.map((p) => `<option value="${p.id}">${esc(clipTitle(p.name, 18))}</option>`)).join('');
     $('noteProject').innerHTML = projOpts;
-    $('noteProject').value = n?.projectId || '';
+    const filteredProject = $('noteProjFilter').value;
+    $('noteProject').value = n?.projectId || (!id && projects.some((p) => p.id === filteredProject) ? filteredProject : '');
     const journalPapers = papers.filter((p) => p.kind === 'journal');
     const paperOpts = ['<option value="">不关联小论文</option>'].concat(journalPapers.map((p) => `<option value="${p.id}">《${esc(clipTitle(p.title, 24))}》</option>`)).join('');
     $('notePaper').innerHTML = paperOpts;
@@ -4375,6 +4424,8 @@
     $('noteStudy').value = n?.studyNo || '';
     $('noteTitle').value = n?.title || '';
     $('noteContent').value = n?.content || '';
+    $('btnNoteDelete').classList.toggle('hidden', !n);
+    resetNoteAi();
     $('noteModal').classList.remove('hidden');
     setTimeout(() => $('noteTitle').focus(), 50);
   }
@@ -4395,8 +4446,8 @@
         const created = await api('/api/notes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         notes.unshift(created);
       }
-      $('noteModal').classList.add('hidden');
-      renderNotes(); renderChatMeta();
+      closeNoteModal();
+      renderNotes(); renderProjects(); renderChatMeta(); renderHome();
       toast('记录已保存', 'success');
     } catch (e) { toast(e.message, 'error'); }
   }
@@ -4405,8 +4456,67 @@
     try {
       await api('/api/notes/' + id, { method: 'DELETE' });
       notes = notes.filter((n) => n.id !== id);
-      renderNotes(); renderChatMeta();
+      renderNotes(); renderProjects(); renderChatMeta(); renderHome();
+      toast('研究记录已删除', 'success');
     } catch (e) { toast(e.message, 'error'); }
+  }
+  async function organizeNoteDraft() {
+    const fragments = $('noteAiDraft').value.trim();
+    if (!fragments) { toast('请先输入需要整理的零散文字', 'error'); return; }
+    if (noteAiBusy) return;
+    rememberNoteContentPosition();
+    noteAiBusy = true;
+    const requestId = ++noteAiRequestId;
+    noteAiResult = '';
+    noteAiAbort = new AbortController();
+    $('noteAiStatus').textContent = '正在整理为可插入的 Markdown 草稿...';
+    $('noteAiStatus').classList.remove('error');
+    $('noteAiOutput').innerHTML = '';
+    $('noteAiOutput').classList.remove('hidden');
+    $('btnNoteAiGenerate').disabled = true;
+    $('btnNoteAiStop').classList.remove('hidden');
+    $('btnNoteAiInsert').classList.add('hidden');
+    let full = ''; let streamError = '';
+    const result = await streamSSE('/api/notes/organize', {
+      fragments, title: $('noteTitle').value.trim(), projectId: $('noteProject').value || null,
+      paperId: $('notePaper').value || null, studyNo: $('noteStudy').value.trim(), existingContent: $('noteContent').value,
+    }, {
+      signal: noteAiAbort.signal,
+      onEvent(event) {
+        if (requestId !== noteAiRequestId) return;
+        if (event.error) streamError = event.error;
+        if (event.delta) {
+          full += event.delta;
+          $('noteAiOutput').innerHTML = renderMarkdown(full) + '<span class="chat-cursor"></span>';
+        }
+      },
+    });
+    if (requestId !== noteAiRequestId) return;
+    noteAiBusy = false;
+    noteAiAbort = null;
+    $('btnNoteAiGenerate').disabled = false;
+    $('btnNoteAiStop').classList.add('hidden');
+    const error = streamError || result.error;
+    if (error) {
+      $('noteAiStatus').textContent = `整理失败：${error}`;
+      $('noteAiStatus').classList.add('error');
+      $('noteAiOutput').innerHTML = `<button class="btn btn-sm" data-note-ai-retry>重试整理</button>`;
+      $('btnNoteAiInsert').classList.add('hidden');
+      toast(error, 'error');
+      return;
+    }
+    if (result.aborted) { $('noteAiStatus').textContent = '已停止生成；原记录没有改动。'; return; }
+    noteAiResult = full.trim();
+    if (!noteAiResult) {
+      $('noteAiStatus').textContent = '模型没有返回有效内容，请重试。';
+      $('noteAiStatus').classList.add('error');
+      $('noteAiOutput').innerHTML = `<button class="btn btn-sm" data-note-ai-retry>重试整理</button>`;
+      return;
+    }
+    $('noteAiOutput').innerHTML = renderMarkdown(noteAiResult);
+    $('noteAiStatus').textContent = '已生成草稿。确认后插入到当前记录，原内容不会被替换。';
+    $('btnNoteAiInsert').disabled = false;
+    $('btnNoteAiInsert').classList.remove('hidden');
   }
 
   // ---------- 个人资料 ----------
@@ -5555,6 +5665,15 @@ a { color: #176b87; }
     $('btnProjSave').addEventListener('click', saveProjModal);
     $('btnProjDelete').addEventListener('click', deleteProj);
     $('projCards').addEventListener('click', (e) => {
+      const notesLink = e.target.closest('[data-project-notes]');
+      if (notesLink) {
+        e.stopPropagation();
+        switchView('notes').then(() => {
+          $('noteProjFilter').value = notesLink.dataset.projectNotes;
+          renderNotes();
+        });
+        return;
+      }
       const card = e.target.closest('[data-proj]');
       if (card) openProjModal(card.dataset.proj);
     });
@@ -5579,18 +5698,37 @@ a { color: #176b87; }
     // 实验记录（研究记录）
     $('btnAddNote').addEventListener('click', () => openNoteModal(null));
     $('noteProjFilter').addEventListener('change', renderNotes);
-    $('btnNoteClose').addEventListener('click', () => $('noteModal').classList.add('hidden'));
-    $('btnNoteCancel').addEventListener('click', () => $('noteModal').classList.add('hidden'));
+    $('btnNoteClose').addEventListener('click', closeNoteModal);
+    $('btnNoteCancel').addEventListener('click', closeNoteModal);
+    $('noteModal').querySelector('.modal-mask').addEventListener('click', closeNoteModal);
     $('btnNoteSave').addEventListener('click', saveNoteModal);
+    $('btnNoteDelete').addEventListener('click', async () => {
+      if (!noteModalId) return;
+      const id = noteModalId;
+      await deleteNote(id);
+      if (!notes.some((n) => n.id === id)) closeNoteModal();
+    });
     $('btnNoteTemplateEcon').addEventListener('click', () => {
-      const ta = $('noteContent');
-      if (ta.value.trim()) { if (!confirm('当前内容将被模板替换，继续？')) return; }
-      ta.value = NOTE_ECON_TEMPLATE;
+      insertIntoNoteContent(NOTE_ECON_TEMPLATE);
     });
     $('btnNoteTemplate').addEventListener('click', () => {
-      const ta = $('noteContent');
-      if (ta.value.trim()) { if (!confirm('当前内容将被模板替换，继续？')) return; }
-      ta.value = NOTE_TEMPLATE;
+      insertIntoNoteContent(NOTE_TEMPLATE);
+    });
+    $('noteContent').addEventListener('select', rememberNoteContentPosition);
+    $('noteContent').addEventListener('keyup', rememberNoteContentPosition);
+    $('noteContent').addEventListener('click', rememberNoteContentPosition);
+    $('noteContent').addEventListener('input', rememberNoteContentPosition);
+    $('btnNoteAiGenerate').addEventListener('click', organizeNoteDraft);
+    $('btnNoteAiStop').addEventListener('click', () => noteAiAbort?.abort());
+    $('btnNoteAiInsert').addEventListener('click', () => {
+      if (!noteAiResult) return;
+      insertIntoNoteContent(noteAiResult, noteContentInsertPos);
+      $('noteAiStatus').textContent = '草稿已插入正文，仍需点击“保存”写入研究记录。';
+      $('btnNoteAiInsert').disabled = true;
+      toast('AI 草稿已插入记录正文', 'success');
+    });
+    $('noteAiOutput').addEventListener('click', (e) => {
+      if (e.target.closest('[data-note-ai-retry]')) organizeNoteDraft();
     });
     $('noteCards').addEventListener('click', (e) => {
       const card = e.target.closest('[data-note]');

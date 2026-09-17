@@ -300,7 +300,7 @@
         <div class="view-toolbar">
           <button class="tb-btn accent" id="btnAddNote">＋ 新建研究记录</button>
           <select id="noteProjFilter" class="tb-select"><option value="">全部项目</option></select>
-          <span class="tb-label">支持 Study 划分与经管实证研究模板</span>
+          <span class="tb-label">支持自定义 Study 划分、项目联动与研究模板</span>
         </div>
         <div id="noteCards" class="note-cards"></div>
       </section>
@@ -674,11 +674,13 @@
           <label class="field"><span>关联项目</span><select id="noteProject" class="tb-select"></select></label>
           <label class="field"><span>关联小论文</span><select id="notePaper" class="tb-select"></select></label>
           <label class="field"><span>Study 划分（一篇论文拆多个研究时使用）</span>
-            <select id="noteStudy" class="tb-select">
-              <option value="">不划分</option>
-              <option>Study 1</option><option>Study 2</option><option>Study 3</option>
-              <option>Study 4</option><option>Study 5</option>
-            </select>
+            <input id="noteStudy" class="tb-input" list="noteStudyOptions" placeholder="如 Study 1、Study 12 或 Pilot" />
+            <datalist id="noteStudyOptions">
+              <option value="Study 1"></option><option value="Study 2"></option><option value="Study 3"></option>
+              <option value="Study 4"></option><option value="Study 5"></option><option value="Study 6"></option>
+              <option value="Study 7"></option><option value="Study 8"></option><option value="Study 9"></option>
+              <option value="Study 10"></option><option value="Study 11"></option><option value="Study 12"></option>
+            </datalist>
           </label>
         </div>
         <label class="field"><span>记录内容（Markdown 式要点）</span>
@@ -688,8 +690,22 @@
           <button class="btn" id="btnNoteTemplateEcon">📋 插入经管实证研究模板</button>
           <button class="btn" id="btnNoteTemplate">📋 通用实验 SOP 模板</button>
         </div>
+        <section class="note-ai-panel" aria-labelledby="noteAiHeading">
+          <div class="note-ai-head">
+            <div><b id="noteAiHeading">AI 整理零散记录</b><span>生成 Markdown 草稿，确认后插入正文</span></div>
+          </div>
+          <textarea id="noteAiDraft" class="note-ai-input" rows="4" placeholder="粘贴零散想法、实验现象、待核查事项或会议速记…"></textarea>
+          <div class="note-ai-actions">
+            <button id="btnNoteAiGenerate" class="btn btn-primary">✨ 整理为研究记录</button>
+            <button id="btnNoteAiStop" class="btn hidden">停止生成</button>
+            <button id="btnNoteAiInsert" class="btn hidden" disabled>↳ 插入到记录</button>
+          </div>
+          <div id="noteAiStatus" class="note-ai-status" aria-live="polite"></div>
+          <div id="noteAiOutput" class="note-ai-output hidden"></div>
+        </section>
       </div>
       <div class="modal-foot">
+        <button id="btnNoteDelete" class="btn hidden" style="color:var(--red);margin-right:auto">🗑 删除记录</button>
         <button id="btnNoteSave" class="btn btn-primary">保存</button>
         <button id="btnNoteCancel" class="btn">取消</button>
       </div>
