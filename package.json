@@ -1,13 +1,13 @@
 {
   "name": "zotero-lit-tool",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "一站式科研终端 —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --test test/update-api.test.mjs",
+    "test": "node --test test",
     "electron": "electron .",
     "dist": "electron-builder --win",
     "dist:dir": "electron-builder --win dir",
@@ -32,6 +32,7 @@
     "katex": "^0.16.22",
     "lunar-javascript": "^1.6.13",
     "mailparser": "^3.9.28",
+    "mammoth": "^1.8.0",
     "marked": "^15.0.12",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^10.0.10",

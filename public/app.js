@@ -105,6 +105,12 @@
   let markdownNotesLoaded = false;
   let activeMarkdownNoteId = null;
   let markdownSaveTimer = null;
+  let reviews = [];
+  let reviewsLoaded = false;
+  let activeReviewId = null;
+  let reviewSaveTimer = null;
+  const reviewingIds = new Set();
+  const reviewErrors = new Map();
   let calendarData = { events: [], preferences: { lunar: true, solarTerms: true, festivals: true } };
   let classMoveIds = [];
   let updateStatus = null;
@@ -712,6 +718,7 @@
     const overlay = $('dragOverlay');
     let dragDepth = 0;
     document.addEventListener('dragenter', (e) => {
+      if (e.target.closest('#viewMarkdown, #mdDropZone, #viewReviewer, #reviewDropZone')) return;
       if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) { dragDepth++; overlay.classList.remove('hidden'); }
     });
     document.addEventListener('dragover', (e) => { e.preventDefault(); });
@@ -720,6 +727,7 @@
       e.preventDefault();
       dragDepth = 0;
       overlay.classList.add('hidden');
+      if (e.target.closest('#viewMarkdown, #mdDropZone, #viewReviewer, #reviewDropZone')) return;
       const files = [...(e.dataTransfer?.files || [])].filter((f) => /\.pdf$/i.test(f.name));
       if (files.length && !e.target.closest('.cell-attach')) handleBatchUpload(files);
     });
@@ -1266,7 +1274,7 @@
     return '#' + to(f(0)) + to(f(8)) + to(f(4));
   }
 
-  // 主色只负责操作与选中状态。侧边栏、正文和语义色保持稳定，避免整站变成单一色相。
+  // 主色驱动操作区和侧边栏的同一套主题，语义色仍保持稳定。
   function deriveTheme(primary) {
     const c = hexToHsl(primary);
     if (!c) return null;
@@ -1277,6 +1285,14 @@
       '--primary-light': hslToHex(c.h, cl(c.s - 6), cl(c.l * 1.18 + 6)),
       '--primary-soft': hslToHex(c.h, cl(c.s * 0.42), 95.5),
       '--btn-border': hslToHex(c.h, cl(c.s * 0.20), 84),
+      '--side-1': hslToHex(c.h, cl(c.s * 0.42 + 18), 26),
+      '--side-2': hslToHex(c.h, cl(c.s * 0.38 + 14), 18),
+      '--side-text': hslToHex(c.h, cl(c.s * 0.20 + 12), 92),
+      '--side-muted': hslToHex(c.h, cl(c.s * 0.20 + 10), 72),
+      '--side-hover': `hsla(${Math.round(c.h)}, ${Math.round(cl(c.s * 0.42 + 12))}%, 86%, .12)`,
+      '--side-active': `hsla(${Math.round(c.h)}, ${Math.round(cl(c.s * 0.42 + 12))}%, 92%, .19)`,
+      '--side-border': `hsla(${Math.round(c.h)}, ${Math.round(cl(c.s * 0.3 + 8))}%, 96%, .18)`,
+      '--side-marker': hslToHex(c.h, cl(c.s * 0.64 + 12), 72),
       '--accent-2': '#D7654F',
     };
   }
@@ -3046,14 +3062,18 @@
   }
 
   async function importMarkdownFiles(files) {
-    const list = [...(files || [])].filter((file) => /\.(?:md|markdown)$/i.test(file.name) || /^(?:text\/markdown|text\/plain)$/i.test(file.type));
-    if (!list.length) { toast('请导入 .md 或 .markdown 文件', 'error'); return; }
+    const input = [...(files || [])];
+    const list = input.filter((file) => /\.(?:md|markdown)$/i.test(file.name));
+    if (!list.length) { toast('请导入扩展名为 .md 或 .markdown 的文件', 'error'); return; }
+    if (input.length !== list.length) toast('已忽略不支持的文件，仅导入 Markdown 文件', 'error');
     let imported = 0;
     for (const file of list.slice(0, 50)) {
       if (file.size > 5 * 1024 * 1024) { toast(`「${file.name}」超过 5MB，已跳过`, 'error'); continue; }
-      const content = await file.text();
-      await createMarkdownNote(file.name.replace(/\.(?:md|markdown)$/i, '') || '导入笔记', content, file.name);
-      imported++;
+      try {
+        const content = (await file.text()).replace(/^\uFEFF/, '');
+        await createMarkdownNote(file.name.replace(/\.(?:md|markdown)$/i, '') || '导入笔记', content, file.name);
+        imported++;
+      } catch (e) { toast(`无法读取「${file.name}」：${e.message}`, 'error'); }
     }
     if (imported) toast(`已导入 ${imported} 篇 Markdown 笔记`, 'success');
   }
@@ -3128,6 +3148,15 @@
     ['dragenter', 'dragover'].forEach((type) => zone.addEventListener(type, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.add('dragging'); }));
     ['dragleave', 'drop'].forEach((type) => zone.addEventListener(type, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.remove('dragging'); }));
     zone.addEventListener('drop', (e) => importMarkdownFiles(e.dataTransfer.files));
+    const view = $('viewMarkdown');
+    ['dragenter', 'dragover'].forEach((type) => view.addEventListener(type, (e) => {
+      if (![...(e.dataTransfer?.files || [])].some((file) => /\.(?:md|markdown)$/i.test(file.name))) return;
+      e.preventDefault(); e.stopPropagation(); view.classList.add('md-view-dragging');
+    }));
+    ['dragleave', 'drop'].forEach((type) => view.addEventListener(type, (e) => {
+      if (type === 'drop') { e.preventDefault(); e.stopPropagation(); importMarkdownFiles(e.dataTransfer.files); }
+      view.classList.remove('md-view-dragging');
+    }));
   }
 
   // ---------- 灵感孵化 ----------
@@ -3147,7 +3176,7 @@
     const list = ideas.filter((idea) => {
       if (status !== 'all' && idea.status !== status) return false;
       if (!query) return true;
-      return [idea.title, idea.content, ...(idea.tags || [])].join(' ').toLowerCase().includes(query);
+      return [idea.title, idea.content, idea.field, idea.researchMode, ...(idea.tags || [])].join(' ').toLowerCase().includes(query);
     });
     $('ideaCount').textContent = `${list.length} / ${ideas.length} 条`;
     if (!list.length) {
@@ -3159,6 +3188,7 @@
       const error = ideaErrors.get(idea.id) || '';
       const project = projects.find((p) => p.id === idea.projectId);
       const statusText = busy ? '孵化中' : idea.status === 'incubated' ? '已孵化' : '待孵化';
+      const modeLabel = { empirical: '实证类', model: '模型类', ccf: 'CCF 算法类' }[idea.researchMode] || '实证类';
       return `<article class="idea-card" data-idea="${idea.id}">
         <div class="idea-card-head">
           <span class="idea-status status-${busy ? 'incubating' : idea.status}">${statusText}</span>
@@ -3170,6 +3200,7 @@
         <h3>${esc(idea.title || '未命名灵感')}</h3>
         <p class="idea-source">${esc(idea.content || '')}</p>
         <div class="idea-meta">
+          <span>模式：${modeLabel}${idea.field ? ` · ${esc(idea.field)}` : ''}</span>
           ${project ? `<span>项目：${esc(project.name || '未命名')}</span>` : ''}
           ${(idea.literatureIds || []).length ? `<span>证据文献：${idea.literatureIds.length} 篇</span>` : '<span>尚未关联文献</span>'}
           <span>${fmtTime(idea.updatedAt || idea.createdAt)}</span>
@@ -3191,6 +3222,8 @@
     $('ideaModalTitle').textContent = id ? '编辑灵感' : '记录灵感';
     $('ideaTitle').value = idea.title || '';
     $('ideaContent').value = idea.content || '';
+    $('ideaResearchMode').value = ['empirical', 'model', 'ccf'].includes(idea.researchMode) ? idea.researchMode : 'empirical';
+    $('ideaField').value = idea.field || '';
     $('ideaTags').value = (idea.tags || []).join('，');
     $('ideaProject').innerHTML = '<option value="">不关联项目</option>' + projects.map((p) => `<option value="${p.id}"${p.id === idea.projectId ? ' selected' : ''}>${esc(p.name || '未命名项目')}</option>`).join('');
     const selected = new Set(idea.literatureIds || []);
@@ -3204,6 +3237,8 @@
     const body = {
       title: $('ideaTitle').value.trim(),
       content: $('ideaContent').value.trim(),
+      researchMode: $('ideaResearchMode').value,
+      field: $('ideaField').value.trim(),
       tags: $('ideaTags').value,
       projectId: $('ideaProject').value || null,
       literatureIds: [...$('ideaLiterature').querySelectorAll('input:checked')].map((input) => input.value),
@@ -3265,10 +3300,180 @@
     $('btnIdeaSave').addEventListener('click', saveIdea);
   }
 
+  // ---------- 模拟审稿 ----------
+  function activeReview() { return reviews.find((review) => review.id === activeReviewId) || null; }
+
+  async function loadReviews() {
+    reviews = await api('/api/reviews').catch(() => []);
+    reviewsLoaded = true;
+    if (activeReviewId && !activeReview()) activeReviewId = null;
+    if (!activeReviewId && reviews.length) activeReviewId = reviews[0].id;
+    renderReviews();
+  }
+
+  function renderReviewList() {
+    const list = $('reviewList');
+    list.innerHTML = reviews.length ? reviews.map((review) => {
+      const busy = reviewingIds.has(review.id) || review.status === 'reviewing';
+      return `<button class="review-list-item${review.id === activeReviewId ? ' active' : ''}" data-review-id="${review.id}">
+        <b>${esc(review.title || '未命名文稿')}</b>
+        <span>${review.fileType?.toUpperCase() || '文稿'}${busy ? ' · 审阅中' : review.result ? ' · 已完成' : ' · 待审阅'}</span>
+      </button>`;
+    }).join('') : '<div class="pr-loading">还没有导入文稿</div>';
+  }
+
+  function renderReviews() {
+    renderReviewList();
+    const active = activeReview();
+    $('reviewEmpty').classList.toggle('hidden', !!active);
+    $('reviewWorkspace').classList.toggle('hidden', !active);
+    if (!active) return;
+    $('reviewTitle').value = active.title || '';
+    $('reviewExpertise').value = active.expertise || '';
+    $('reviewJournal').value = active.targetJournal || '';
+    $('reviewCustomPrompt').value = active.customPrompt || '';
+    $('reviewRank').textContent = active.journalRank || '尚未查询 EasyScholar 等级';
+    $('reviewMeta').textContent = `${active.originalName || ''}${active.pages ? ` · ${active.pages} 页` : ''}${active.truncated ? ` · 已截取前 80,000 字符（原文 ${active.textLength} 字符）` : ''}`;
+    const busy = reviewingIds.has(active.id) || active.status === 'reviewing';
+    const error = reviewErrors.get(active.id) || '';
+    $('btnReviewGenerate').disabled = busy;
+    $('btnReviewGenerate').textContent = busy ? '正在生成审稿意见...' : error ? '重试模拟审稿' : active.result ? '重新生成模拟审稿' : '生成模拟审稿意见';
+    $('reviewOutput').innerHTML = error
+      ? `<p class="md-error-line">模拟审稿失败：${esc(error)}</p><button class="btn btn-sm md-retry" data-review-retry="${active.id}">重试</button>`
+      : active.result ? renderMarkdown(active.result) : '<p class="idea-generating">设置审稿角色和目标期刊后，生成结构化的模拟同行评审意见。</p>';
+  }
+
+  async function saveActiveReview() {
+    clearTimeout(reviewSaveTimer);
+    const review = activeReview();
+    if (!review || reviewingIds.has(review.id)) return;
+    $('reviewSaveState').textContent = '保存中...';
+    try {
+      const saved = await api('/api/reviews/' + review.id, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: $('reviewTitle').value.trim(), expertise: $('reviewExpertise').value.trim(), targetJournal: $('reviewJournal').value.trim(), customPrompt: $('reviewCustomPrompt').value.trim() }),
+      });
+      Object.assign(review, saved);
+      $('reviewSaveState').textContent = '已保存';
+      renderReviewList();
+    } catch (e) { $('reviewSaveState').textContent = '保存失败'; toast('审稿配置保存失败：' + e.message, 'error'); }
+  }
+
+  function scheduleReviewSave() {
+    const review = activeReview();
+    if (!review) return;
+    review.title = $('reviewTitle').value.trim() || '未命名文稿';
+    review.expertise = $('reviewExpertise').value.trim();
+    review.targetJournal = $('reviewJournal').value.trim();
+    review.customPrompt = $('reviewCustomPrompt').value.trim();
+    $('reviewSaveState').textContent = '未保存';
+    clearTimeout(reviewSaveTimer);
+    reviewSaveTimer = setTimeout(saveActiveReview, 650);
+  }
+
+  async function uploadReviewFile(file) {
+    if (!file) return;
+    if (!/\.(?:pdf|docx)$/i.test(file.name)) { toast('模拟审稿仅支持 PDF 或 DOCX；旧版 .doc 请先另存为 .docx', 'error'); return; }
+    if (file.size > 100 * 1024 * 1024) { toast('文稿超过 100MB，无法导入', 'error'); return; }
+    const form = new FormData(); form.append('file', file);
+    toast('正在提取文稿正文...');
+    try {
+      const review = await api('/api/reviews/upload', { method: 'POST', body: form });
+      reviews.unshift(review); activeReviewId = review.id; renderReviews();
+      toast('文稿已导入，可开始配置审稿条件', 'success');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  async function queryReviewRank() {
+    const review = activeReview();
+    if (!review) return;
+    await saveActiveReview();
+    $('reviewRank').textContent = '正在查询...';
+    try {
+      const saved = await api(`/api/reviews/${review.id}/rank`, { method: 'POST' });
+      Object.assign(review, saved); renderReviews(); toast('期刊等级已更新', 'success');
+    } catch (e) { $('reviewRank').textContent = '查询失败：' + e.message; toast(e.message, 'error'); }
+  }
+
+  async function generateReview() {
+    const review = activeReview();
+    if (!review || reviewingIds.has(review.id)) return;
+    await saveActiveReview();
+    reviewErrors.delete(review.id); reviewingIds.add(review.id); renderReviews();
+    let full = ''; let streamError = '';
+    const result = await streamSSE(`/api/reviews/${review.id}/generate`, {}, {
+      onEvent(event) {
+        if (event.error) streamError = event.error;
+        if (event.delta) {
+          full += event.delta;
+          const out = $('reviewOutput');
+          if (out) out.innerHTML = renderMarkdown(full) + '<span class="chat-cursor"></span>';
+        }
+      },
+    });
+    reviewingIds.delete(review.id);
+    const error = streamError || result.error;
+    if (error) reviewErrors.set(review.id, error);
+    await loadReviews();
+    if (error) toast(error, 'error');
+    else if (!result.aborted) toast('模拟审稿意见已生成并保存', 'success');
+  }
+
+  async function exportReview(format) {
+    const review = activeReview();
+    if (!review?.result) { toast('请先生成审稿意见', 'error'); return; }
+    try {
+      if (format === 'pdf') {
+        const data = await api(`/api/reviews/${review.id}/export-pdf`, { method: 'POST' });
+        if (data.browserPrint && data.printUrl) window.open(data.printUrl, '_blank');
+        else if (!data.canceled) toast('PDF 已导出到所选位置', 'success');
+        return;
+      }
+      const response = await fetch(`/api/reviews/${review.id}/export-md`, { method: 'POST' });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '导出失败');
+      if (/application\/json/i.test(response.headers.get('content-type') || '')) {
+        const data = await response.json(); if (!data.canceled) toast('Markdown 已导出到所选位置', 'success');
+      } else {
+        const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a');
+        link.href = url; link.download = `${review.title || 'review'}.md`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function bindReviewer() {
+    $('btnReviewUpload').addEventListener('click', () => $('reviewFileInput').click());
+    $('reviewDropZone').addEventListener('click', () => $('reviewFileInput').click());
+    $('reviewFileInput').addEventListener('change', (e) => { uploadReviewFile(e.target.files?.[0]); e.target.value = ''; });
+    $('reviewList').addEventListener('click', (e) => {
+      const item = e.target.closest('[data-review-id]');
+      if (!item || item.dataset.reviewId === activeReviewId) return;
+      saveActiveReview().then(() => { activeReviewId = item.dataset.reviewId; renderReviews(); });
+    });
+    ['reviewTitle', 'reviewExpertise', 'reviewJournal', 'reviewCustomPrompt'].forEach((id) => $(id).addEventListener('input', scheduleReviewSave));
+    $('btnReviewRank').addEventListener('click', queryReviewRank);
+    $('btnReviewGenerate').addEventListener('click', generateReview);
+    $('reviewOutput').addEventListener('click', (e) => { if (e.target.closest('[data-review-retry]')) generateReview(); });
+    $('btnReviewExportMd').addEventListener('click', () => exportReview('md'));
+    $('btnReviewExportPdf').addEventListener('click', () => exportReview('pdf'));
+    $('btnReviewDelete').addEventListener('click', async () => {
+      const review = activeReview();
+      if (!review || !confirm(`确认删除「${review.title}」及其审稿意见？`)) return;
+      try { await api('/api/reviews/' + review.id, { method: 'DELETE' }); reviews = reviews.filter((item) => item.id !== review.id); activeReviewId = reviews[0]?.id || null; renderReviews(); toast('审稿文稿已删除', 'success'); }
+      catch (e) { toast(e.message, 'error'); }
+    });
+    const zone = $('reviewDropZone');
+    ['dragenter', 'dragover'].forEach((type) => zone.addEventListener(type, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.add('dragging'); }));
+    ['dragleave', 'drop'].forEach((type) => zone.addEventListener(type, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.remove('dragging'); }));
+    zone.addEventListener('drop', (e) => uploadReviewFile(e.dataTransfer.files?.[0]));
+    const view = $('viewReviewer');
+    ['dragenter', 'dragover'].forEach((type) => view.addEventListener(type, (e) => { if ([...(e.dataTransfer?.files || [])].some((file) => /\.(?:pdf|docx)$/i.test(file.name))) { e.preventDefault(); e.stopPropagation(); view.classList.add('review-view-dragging'); } }));
+    ['dragleave', 'drop'].forEach((type) => view.addEventListener(type, (e) => { if (type === 'drop') { e.preventDefault(); e.stopPropagation(); uploadReviewFile(e.dataTransfer.files?.[0]); } view.classList.remove('review-view-dragging'); }));
+  }
+
   async function switchView(v) {
     view = v;
     document.querySelectorAll('.nav-item[data-view]').forEach((n) => n.classList.toggle('active', n.dataset.view === v));
-    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', markdown: 'viewMarkdown', ideas: 'viewIdeas', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
+    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', markdown: 'viewMarkdown', ideas: 'viewIdeas', reviewer: 'viewReviewer', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
     for (const [key, id] of Object.entries(map)) $(id).classList.toggle('hidden', key !== v);
     const isLib = v === 'library';
     // 文献中心：主区固定不滚动，表格容器内滚动（横向滚动条贴可视区底部）
@@ -3276,6 +3481,7 @@
     // 邮箱：三栏铺满视口，各自内部滚动
     document.querySelector('.main-area').classList.toggle('mail-mode', v === 'mail');
     document.querySelector('.main-area').classList.toggle('markdown-mode', v === 'markdown');
+    document.querySelector('.main-area').classList.toggle('reviewer-mode', v === 'reviewer');
     $('searchInput').classList.toggle('hidden', !isLib);
     $('btnParseAll').classList.toggle('hidden', !isLib);
     $('btnRefreshRanks').classList.toggle('hidden', !isLib);
@@ -3290,6 +3496,7 @@
     if (v === 'notes') renderNotes();
     if (v === 'markdown') { if (!markdownNotesLoaded) await loadMarkdownNotes(); else renderMarkdownNotes(); }
     if (v === 'ideas') { if (!ideasLoaded) await loadIdeas(); else renderIdeas(); }
+    if (v === 'reviewer') { if (!reviewsLoaded) await loadReviews(); else renderReviews(); }
     if (v === 'mail') await enterMailView();
     if (v === 'ai') {
       renderChatMeta();
@@ -5675,7 +5882,8 @@ a { color: #176b87; }
   }
 
   // ============ 新手引导（首次使用） ============
-  const OB_KEY = 'littable_onboarded_v1';
+  const OB_KEY = 'littable_onboarded_v2';
+  const OB_VERSION = 2;
   const OB_STEPS = [
     {
       emoji: '👋', title: '欢迎使用一站式科研终端',
@@ -5793,6 +6001,79 @@ a { color: #176b87; }
     },
   ];
 
+  // v2 focuses on the configuration required for every AI workflow. The previous
+  // feature tour is intentionally replaced so existing users see the new setup path once.
+  OB_STEPS.splice(0, OB_STEPS.length,
+    {
+      emoji: '👋', title: '先完成 AI 配置',
+      desc: 'AI 助手、灵感孵化和模拟审稿都会使用当前激活的模型。接下来按实际设置顺序完成一条可用模型配置，再选择性接入 easyScholar。',
+      points: [
+        { ico: '🔒', html: 'API 密钥只保存在你的本机数据目录，不会显示在界面列表中。' },
+        { ico: '🧪', html: '配置后先<b>测试连接</b>，再保存并设为使用中。' },
+        { ico: '🏅', html: 'easyScholar 是可选项，仅用于提供期刊等级背景信息。' },
+      ], target: null, center: true,
+    },
+    {
+      emoji: '⚙️', title: '第 1 步 · 打开 AI 设置',
+      desc: '点击侧边栏底部的<b>设置</b>，所有模型、视觉模型和 easyScholar 配置都在这里管理。',
+      points: [
+        { ico: '🧩', html: '可以保存多条模型配置，并在顶栏快速切换当前模型。' },
+        { ico: '💡', html: '未配置模型时，涉及 AI 的功能会提示你先完成本步骤。' },
+      ], target: '#btnNavSettings', view: 'home',
+    },
+    {
+      emoji: '➕', title: '第 2 步 · 添加一条模型',
+      desc: '已为你打开模型编辑表单。选择供应商后，继续填写接口地址、密钥和模型名称。',
+      points: [
+        { ico: '📌', html: '供应商预设会填入常见接口地址；其他 OpenAI 兼容服务可选择自定义。' },
+        { ico: '📝', html: '备注名称可用于区分“日常阅读”“审稿”或“看图”等用途。' },
+      ], target: '#mlEditor', view: 'home', settings: true, openModelEditor: true,
+    },
+    {
+      emoji: '🔑', title: '第 3 步 · 填写接口信息',
+      desc: '依次填写供应商、Base URL、API 密钥和模型名称。Base URL 填到版本根路径，例如以 <code>/v1</code> 结尾，程序会补全对话接口路径。',
+      points: [
+        { ico: '🌐', html: '<b>Base URL</b>：使用模型供应商提供的 OpenAI 兼容地址。' },
+        { ico: '🔐', html: '<b>API 密钥</b>：只填写你自己的密钥，不要把密钥写入笔记、论文或截图。' },
+        { ico: '🤖', html: '<b>模型名称</b>：必须与该供应商账户可用的模型 ID 完全一致。' },
+      ], target: '#mlBaseURL', view: 'home', settings: true, openModelEditor: true,
+    },
+    {
+      emoji: '🔌', title: '第 4 步 · 测试并保存',
+      desc: '点击<b>测试连接</b>确认地址、密钥和模型 ID 可以共同工作；成功后点击保存。若失败，请根据返回的 HTTP 状态或错误信息逐项核对。',
+      points: [
+        { ico: '1️⃣', html: '先检查密钥是否有效、是否有余额或调用权限。' },
+        { ico: '2️⃣', html: '再检查 Base URL 不是完整的 <code>/chat/completions</code> 地址。' },
+        { ico: '3️⃣', html: '最后检查模型 ID 与供应商文档一致。' },
+      ], target: '#btnMlTest', view: 'home', settings: true, openModelEditor: true,
+    },
+    {
+      emoji: '✅', title: '第 5 步 · 设为使用中',
+      desc: '保存后，在模型卡片上选择<b>使用中</b>的那条配置。顶栏的模型切换菜单也会显示它。模型未激活时，AI 工作流不会猜测该使用哪条密钥。',
+      points: [
+        { ico: '👁', html: '需要分析图片或图表时，可在下方为“两段式看图”指定视觉模型。' },
+        { ico: '↔', html: '切换模型不会删除其他配置，适合按任务使用不同模型。' },
+      ], target: '#mlList', view: 'home', settings: true,
+    },
+    {
+      emoji: '🏅', title: '第 6 步 · 可选配置 easyScholar',
+      desc: '如需显示期刊等级，在设置中填写你的 easyScholar SecretKey。模拟审稿会把查询结果作为严格度背景，不会把它当作真实期刊决定。',
+      points: [
+        { ico: '🔎', html: '目标期刊名称必须由用户填写，查询不到时应核对中英文全称。' },
+        { ico: '⚠️', html: '等级数据可能更新或缺失，因此不能替代正式投稿指南和人工判断。' },
+      ], target: '#setEasyKey', view: 'home', settings: true,
+    },
+    {
+      emoji: '🧭', title: '配置完成后从这里开始',
+      desc: '现在可以在灵感孵化中选择实证、模型或 CCF 算法模式；在模拟审稿中拖入 PDF 或 DOCX 获取 Markdown 格式的建设性意见。',
+      points: [
+        { ico: '💡', html: '<b>灵感孵化</b>会明确证据缺口，并把新颖性判断标注为待文献验证。' },
+        { ico: '🔎', html: '<b>模拟审稿</b>会流式输出，可重试并导出 Markdown 或 PDF。' },
+        { ico: '✎', html: '<b>Markdown 笔记</b>支持拖入 <code>.md</code> 或 <code>.markdown</code> 文件。' },
+      ], target: null, center: true,
+    },
+  );
+
   let obActive = false;
   let obIndex = 0;
 
@@ -5809,14 +6090,14 @@ a { color: #176b87; }
     // 持久化到后端数据目录（settings.onboarded），跨启动、跨版本、跨端口都稳定保留；
     // 不再依赖浏览器 localStorage（其按 origin 隔离，后端随机端口会导致每次重置）。
     settings.onboarded = true;
+    settings.onboardingVersion = OB_VERSION;
     api('/api/onboarding/done', { method: 'POST' }).catch(() => {});
     try { localStorage.setItem(OB_KEY, '1'); } catch (_) { /* ignore */ }
   }
 
   function obShouldShow() {
-    // 后端持久化标记 + 旧版 localStorage 标记，任一表示“已看过”就不显示，
-    // 兼容老用户（此前仅写 localStorage）升级后不重复弹出。
-    const backendSeen = settings && settings.onboarded === true;
+    // 旧版完成标记不足以覆盖 v2 的 API 设置引导；只有已完成 v2 才抑制展示。
+    const backendSeen = settings && Number(settings.onboardingVersion || 0) >= OB_VERSION;
     let legacySeen = false;
     try { legacySeen = localStorage.getItem(OB_KEY) === '1'; } catch (_) { /* ignore */ }
     if (legacySeen && !backendSeen) {
@@ -5918,12 +6199,15 @@ a { color: #176b87; }
     obStop();
   }
 
-  function obGoto(i) {
+  async function obGoto(i) {
     if (i < 0 || i >= OB_STEPS.length) return;
     obIndex = i;
     const step = OB_STEPS[i];
     // 若该步绑定了视图，先切换到对应视图，确保界面可见
-    if (step.view) switchView(step.view);
+    if (step.view) await switchView(step.view);
+    if (step.settings) await openSettingsModal();
+    if (step.openModelEditor && $('mlEditor')?.classList.contains('hidden')) openMlEditor(null);
+    if (!step.settings && !$('settingsModal')?.classList.contains('hidden')) $('settingsModal').classList.add('hidden');
     // 等待视图切换/渲染后再定位高亮
     requestAnimationFrame(() => requestAnimationFrame(obRender));
   }
@@ -5970,6 +6254,7 @@ a { color: #176b87; }
     bindPdfReader();
     bindIdeas();
     bindMarkdownNotes();
+    bindReviewer();
     await Promise.all([loadItems(), loadSettings(), loadCollections(), loadWorkbenchData()]);
     // 模型列表依赖 settings（其中 visionProfileId 用于「两段式看图」），必须放在其后，
     // 否则首次渲染设置页时视觉模型下拉会显示成「自动」而丢掉用户已保存的指定。

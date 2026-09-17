@@ -256,7 +256,7 @@ function rescueDataFromInstallDir(defaultDataDir) {
     if (!fs.existsSync(installDir)) return null;
     const names = ['literature.json', 'settings.json', 'mail.json', 'tasks.json',
       'projects.json', 'notes.json', 'profile.json', 'papers.json', 'chat.json', 'conversations.json', 'ideas.json',
-      'markdown-notes.json', 'calendar.json'];
+      'reviews.json', 'markdown-notes.json', 'calendar.json'];
     const found = names.filter((n) => fs.existsSync(path.join(installDir, n)));
     if (!found.length) return null;
 

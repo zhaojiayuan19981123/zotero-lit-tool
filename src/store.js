@@ -20,6 +20,7 @@ let CHAT_FILE = path.join(DATA_DIR, 'chat.json');
 let PAPERS_FILE = path.join(DATA_DIR, 'papers.json');
 let MAIL_FILE = path.join(DATA_DIR, 'mail.json');
 let IDEAS_FILE = path.join(DATA_DIR, 'ideas.json');
+let REVIEWS_FILE = path.join(DATA_DIR, 'reviews.json');
 let MARKDOWN_NOTES_FILE = path.join(DATA_DIR, 'markdown-notes.json');
 let CALENDAR_FILE = path.join(DATA_DIR, 'calendar.json');
 
@@ -38,6 +39,7 @@ export function configure({ dataDir }) {
     CONVERSATIONS_FILE = path.join(DATA_DIR, 'conversations.json');
     MAIL_FILE = path.join(DATA_DIR, 'mail.json');
     IDEAS_FILE = path.join(DATA_DIR, 'ideas.json');
+    REVIEWS_FILE = path.join(DATA_DIR, 'reviews.json');
     MARKDOWN_NOTES_FILE = path.join(DATA_DIR, 'markdown-notes.json');
     CALENDAR_FILE = path.join(DATA_DIR, 'calendar.json');
   }
@@ -93,6 +95,7 @@ const ALL_DATA_FILES = [
   'papers.json',        // 论文进度
   'mail.json',          // 邮箱账户与设置
   'ideas.json',         // 灵感孵化
+  'reviews.json',       // 模拟审稿
   'markdown-notes.json', // Markdown 笔记
   'conversations.json', // AI 助手会话列表
   'calendar.json',      // 科研日历
@@ -103,7 +106,7 @@ export function dataFileNames() {
   // store.js 内的路径变量是权威来源；ALL_DATA_FILES 兜底覆盖「表里有但变量还没建」的情况
   const known = new Set(ALL_DATA_FILES);
   for (const f of [DATA_FILE, SETTINGS_FILE, COLLECTIONS_FILE, PROFILE_FILE, PROJECTS_FILE,
-    TASKS_FILE, NOTES_FILE, CHAT_FILE, PAPERS_FILE, MAIL_FILE, IDEAS_FILE, MARKDOWN_NOTES_FILE,
+    TASKS_FILE, NOTES_FILE, CHAT_FILE, PAPERS_FILE, MAIL_FILE, IDEAS_FILE, REVIEWS_FILE, MARKDOWN_NOTES_FILE,
     CALENDAR_FILE, CONVERSATIONS_FILE]) {
     if (f) known.add(path.basename(f));
   }
@@ -226,7 +229,7 @@ export function exportAll() {
     literature: 'literature.json', settings: 'settings.json', collections: 'collections.json',
     profile: 'profile.json', projects: 'projects.json', tasks: 'tasks.json', notes: 'notes.json',
     chat: 'chat.json', papers: 'papers.json', conversations: 'conversations.json', mail: 'mail.json',
-    ideas: 'ideas.json', markdownNotes: 'markdown-notes.json', calendar: 'calendar.json',
+    ideas: 'ideas.json', reviews: 'reviews.json', markdownNotes: 'markdown-notes.json', calendar: 'calendar.json',
   };
   for (const [k, f] of Object.entries(alias)) out[k] = out.files[f] ?? null;
   return out;
@@ -298,6 +301,7 @@ export function getSettings() {
     dataDir: '',
     // 新手引导是否已看过（持久化到数据目录，跨启动/跨版本稳定保留）
     onboarded: false,
+    onboardingVersion: 0,
     // 用户调节的表格列宽 { 列key: 像素 }（持久化到数据目录，跨启动保留）
     colWidths: {},
   });
@@ -389,6 +393,37 @@ export function deleteIdea(id) {
   const next = list.filter((idea) => idea.id !== id);
   if (next.length === list.length) return false;
   saveIdeas(next);
+  return true;
+}
+
+// ---------- 模拟审稿 ----------
+export function listReviews() {
+  return loadFile(REVIEWS_FILE, []);
+}
+
+export function getReview(id) {
+  return listReviews().find((review) => review.id === id) || null;
+}
+
+export function saveReviews(list) {
+  saveFile(REVIEWS_FILE, Array.isArray(list) ? list : []);
+  return list;
+}
+
+export function upsertReview(review) {
+  const list = listReviews();
+  const idx = list.findIndex((item) => item.id === review.id);
+  if (idx >= 0) list[idx] = { ...list[idx], ...review };
+  else list.unshift(review);
+  saveReviews(list);
+  return idx >= 0 ? list[idx] : review;
+}
+
+export function deleteReview(id) {
+  const list = listReviews();
+  const next = list.filter((review) => review.id !== id);
+  if (next.length === list.length) return false;
+  saveReviews(next);
   return true;
 }
 

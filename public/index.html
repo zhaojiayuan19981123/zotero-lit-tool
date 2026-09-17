@@ -69,6 +69,7 @@
         <div class="nav-item" data-view="notes"><span class="nav-ico">🧪</span>研究记录</div>
         <div class="nav-item" data-view="markdown"><span class="nav-ico">✎</span>Markdown 笔记</div>
         <div class="nav-item" data-view="ideas"><span class="nav-ico">💡</span>灵感孵化</div>
+        <div class="nav-item" data-view="reviewer"><span class="nav-ico">🔎</span>模拟审稿</div>
         <div class="nav-item" data-view="ai"><span class="nav-ico">🤖</span>AI 助手</div>
         <div class="nav-section-label">工具</div>
         <div class="nav-item" data-view="worldlib"><span class="nav-ico">🌍</span>世图下载助手</div>
@@ -380,6 +381,48 @@
         <div id="ideaCards" class="idea-grid"></div>
       </section>
 
+      <!-- ===== 视图：模拟审稿 ===== -->
+      <section id="viewReviewer" class="view hidden reviewer-view">
+        <aside class="reviewer-side">
+          <div class="reviewer-side-head">
+            <b>审稿文稿</b>
+            <button class="btn btn-primary btn-sm" id="btnReviewUpload">导入文稿</button>
+          </div>
+          <div id="reviewDropZone" class="review-drop-zone">
+            <b>拖入 PDF 或 DOCX</b>
+            <span>文稿只在本机提取正文；不支持旧版 .doc</span>
+          </div>
+          <div id="reviewList" class="review-list"></div>
+        </aside>
+        <main class="reviewer-main">
+          <div id="reviewEmpty" class="review-empty">导入一篇 PDF 或 DOCX，开始模拟同行评审</div>
+          <div id="reviewWorkspace" class="review-workspace hidden">
+            <div class="review-title-row">
+              <div>
+                <input id="reviewTitle" class="md-note-title" maxlength="180" placeholder="文稿标题" />
+                <span id="reviewMeta" class="review-meta"></span>
+              </div>
+              <div class="review-export-actions">
+                <button class="btn btn-sm" id="btnReviewExportMd">导出 MD</button>
+                <button class="btn btn-sm" id="btnReviewExportPdf">导出 PDF</button>
+                <button class="icon-btn danger" id="btnReviewDelete" title="删除文稿和审稿意见">🗑</button>
+              </div>
+            </div>
+            <div class="review-config-grid">
+              <label class="field"><span>审稿人领域角色</span><input id="reviewExpertise" class="tb-input" maxlength="160" placeholder="例如：战略管理与因果识别领域专家" /></label>
+              <label class="field"><span>目标期刊 / 会议</span><div class="review-journal-row"><input id="reviewJournal" class="tb-input" maxlength="240" placeholder="用于获取 EasyScholar 等级" /><button class="btn btn-sm" id="btnReviewRank">查询等级</button></div><span id="reviewRank" class="review-rank"></span></label>
+              <label class="field review-custom-field"><span>自定义审稿要求</span><textarea id="reviewCustomPrompt" rows="3" maxlength="4000" placeholder="例如：优先关注理论机制、识别策略或可复现性。不会覆盖真实性约束。"></textarea></label>
+            </div>
+            <div class="review-action-row">
+              <span id="reviewSaveState" class="md-save-state"></span>
+              <span class="tb-spacer"></span>
+              <button id="btnReviewGenerate" class="btn btn-primary">生成模拟审稿意见</button>
+            </div>
+            <article id="reviewOutput" class="md-render review-output"></article>
+          </div>
+        </main>
+      </section>
+
       <!-- ===== 视图：世图科研下载助手 ===== -->
       <section id="viewWorldlib" class="view hidden">
         <div class="worldlib-wrap">
@@ -487,6 +530,7 @@
   <input type="file" id="fileInput" accept=".pdf,application/pdf" multiple hidden />
   <input type="file" id="cellFileInput" accept=".pdf,application/pdf" hidden />
   <input type="file" id="mdFileInput" accept=".md,.markdown,text/markdown,text/plain" multiple hidden />
+  <input type="file" id="reviewFileInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden />
   <input type="file" id="calIcsInput" accept=".ics,text/calendar" hidden />
 
   <!-- 右侧阅读抽屉 -->
@@ -547,6 +591,8 @@
         <label class="field"><span>标题</span><input id="ideaTitle" class="tb-input w100" maxlength="120" placeholder="一句话概括这个想法" /></label>
         <label class="field"><span>灵感原文 *</span><textarea id="ideaContent" rows="7" placeholder="记录问题、观察、矛盾、可能机制或任何尚未成形的想法"></textarea></label>
         <div class="prof-grid">
+          <label class="field"><span>研究模式</span><select id="ideaResearchMode" class="tb-select"><option value="empirical">实证类</option><option value="model">模型类</option><option value="ccf">CCF 算法类</option></select></label>
+          <label class="field"><span>研究领域</span><input id="ideaField" class="tb-input" maxlength="120" placeholder="例如：数字经济、博弈论、计算机视觉" /></label>
           <label class="field"><span>标签</span><input id="ideaTags" class="tb-input" placeholder="多个标签用逗号分隔" /></label>
           <label class="field"><span>关联项目</span><select id="ideaProject" class="tb-select"><option value="">不关联项目</option></select></label>
         </div>
@@ -918,7 +964,7 @@
         </label>
         <label class="field"><span>DeepL API Key（选 DeepL 时填写）</span><input id="setDeeplKey" class="tb-input" type="password" placeholder="DeepL 密钥，留空则不用 DeepL" /></label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:var(--primary-soft)">主题配色用于主操作、选中状态和链接；侧边栏与语义状态色保持稳定，以保证信息识别和阅读对比度。</p>
+        <p class="modal-desc" style="background:var(--primary-soft)">主题配色会同步应用于主操作、选中状态、链接与侧边栏；语义状态色保持稳定，以保证信息识别和阅读对比度。</p>
         <label class="field"><span>预设配色</span>
           <div id="themePresets" class="theme-presets"></div>
         </label>
