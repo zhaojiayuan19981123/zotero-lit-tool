@@ -253,7 +253,7 @@ input, select, textarea { font-family: inherit; }
 .stat-badge { padding: 3px 12px; border-radius: 20px; font-size: 12px; background: var(--gray-soft); color: var(--text-2); margin-bottom: 6px; }
 
 /* ---------- 工作区：侧边栏 + 主区 ---------- */
-.workbench { display: flex; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.workbench { display: flex; flex: 1 1 0; min-height: 0; height: 0; overflow: hidden; }
 /* 主区：自身不滚动，只把「确定的高度」交给当前视图，由视图内部滚动。
    这样每个视图的可见底边都严格等于窗口底边，不会出现内容越过下边界。 */
 .main-area { flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
@@ -743,6 +743,7 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .pr-page-input { width: 48px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 6px; text-align: center; font-size: 13px; }
 .pr-page-total { font-size: 13px; color: var(--text-3); }
 .pr-zoom-label { font-size: 13px; color: var(--text-2); min-width: 40px; text-align: center; }
+.pr-rotation-label { font-size: 12px; color: var(--text-3); min-width: 28px; text-align: center; font-variant-numeric: tabular-nums; }
 .pr-tools { display: flex; align-items: center; gap: 6px; }
 .pr-colors { display: flex; gap: 4px; }
 .pr-color { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
@@ -953,6 +954,9 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
   font-family: inherit; font-size: 13px; line-height: 1.7; outline: none;
 }
 .pr-src:focus { border-color: var(--primary); }
+.pr-selection-options { display: flex; align-items: center; gap: 10px; color: var(--text-2); font-size: 12px; }
+.pr-join-label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.pr-join-label input { width: 18px; height: 18px; margin: 0; accent-color: var(--primary); }
 .pr-lang-row { display: flex; align-items: center; gap: 8px; }
 .pr-lang-row .tb-select { flex: 1; }
 .pr-lang-arrow { color: var(--text-3); font-size: 14px; }
@@ -1193,7 +1197,7 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .mail-notif-close:hover { background: var(--gray-soft); color: var(--text); }
 
 /* 视图容器 */
-.main-area > .view { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 20px 40px; animation: viewIn .18s ease; }
+.main-area > .view { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 4px 20px 40px; animation: viewIn .18s ease; }
 @keyframes viewIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 .view-toolbar { display: flex; align-items: center; gap: 10px; padding: 12px 0; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
@@ -2015,4 +2019,20 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
   .review-custom-field { grid-column: auto; }
   .review-action-row { align-items: stretch; flex-wrap: wrap; }
   .review-action-row .tb-spacer { display: none; }
+}
+
+
+/* ---------- 灵感孵化：固定工具栏，卡片区只在剩余高度内滚动 ----------
+   #viewIdeas 自身由 flex 严格限制在工作区，避免内容撑开窗口造成底部留白。
+   不使用 scrollbar-gutter：内容不足时右侧不会留下一条像“进度条”的空槽。 */
+.main-area > #viewIdeas {
+  display: flex; flex: 1 1 0; flex-direction: column; min-height: 0; height: 0;
+  overflow: hidden; padding: 0 0 0 20px;
+}
+#viewIdeas .idea-toolbar {
+  position: static; flex: 0 0 auto; margin: 0; padding: 16px 20px 12px 0;
+}
+#viewIdeas .idea-grid {
+  flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; align-content: start;
+  padding: 10px 20px 16px 0;
 }

@@ -26,6 +26,7 @@ const KEEP_RANKS = [
   { key: 'xrTop', label: '新锐分区' },
   { key: 'xr', label: '新锐分区' },
   { key: 'ajg', label: 'ABS' },
+  { key: 'utd24', label: 'UTD24' },
   { key: 'ssci', label: 'SSCI' },
 ];
 
@@ -76,7 +77,7 @@ export function formatRank(data) {
 
   // 若 4 类等级均无数据，返回明确占位，避免 summary 为空字符串被前端/后端误判为「未查询」而反复请求
   if (!items.length) {
-    return { summary: '未收录于中科院/新锐/ABS/SSCI 分区', items: [] };
+    return { summary: '未收录于中科院/新锐/ABS/UTD24/SSCI 分区', items: [] };
   }
 
   return {
@@ -84,3 +85,4 @@ export function formatRank(data) {
     items,
   };
 }
+

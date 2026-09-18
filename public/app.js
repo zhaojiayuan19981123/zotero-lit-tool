@@ -1345,12 +1345,28 @@
   function uiZoom() { const z = parseFloat(document.body.style.zoom); return isNaN(z) || z <= 0 ? 1 : z; }
 
   // ============ 设置 ============
+  // 按所选翻译提供方切换密钥字段显隐（label[data-tr-for] 里逗号分隔 provider id）
+  function updateTranslateProviderFields() {
+    const cur = $('setTranslateProvider').value;
+    document.querySelectorAll('.tr-field').forEach((el) => {
+      const forProviders = (el.dataset.trFor || '').split(',').map((s) => s.trim()).filter(Boolean);
+      el.classList.toggle('hidden', !forProviders.includes(cur));
+    });
+  }
   function fillSettingsForm() {
     $('setLanguage').value = settings.language || 'zh';
     $('setEasyKey').value = settings.easyScholarKey || '';
     $('setTranslateProvider').value = settings.translateProvider || 'siliconflow';
     $('setDeeplKey').value = settings.deeplKey || '';
     $('setDeeplEndpoint').value = settings.deeplEndpoint || '';
+    $('setVolcKey').value = settings.volcKey || '';
+    $('setVolcRegion').value = settings.volcRegion || '';
+    $('setYoudaoKey').value = settings.youdaoKey || '';
+    $('setYoudaoVocabId').value = settings.youdaoVocabId || '';
+    $('setBaiduKey').value = settings.baiduKey || '';
+    $('setTencentKey').value = settings.tencentKey || '';
+    $('setTencentRegion').value = settings.tencentRegion || '';
+    updateTranslateProviderFields();
     $('setPdfFontPath').value = (settings.pdfTranslate && settings.pdfTranslate.fontPath) || '';
     $('setDataDir').value = settings.dataDir || '';
     $('setAppFont').value = settings.appFont || '';
@@ -1375,6 +1391,13 @@
       translateProvider: $('setTranslateProvider').value,
       deeplKey: $('setDeeplKey').value.trim(),
       deeplEndpoint: $('setDeeplEndpoint').value.trim(),
+      volcKey: $('setVolcKey').value.trim(),
+      volcRegion: $('setVolcRegion').value.trim(),
+      youdaoKey: $('setYoudaoKey').value.trim(),
+      youdaoVocabId: $('setYoudaoVocabId').value.trim(),
+      baiduKey: $('setBaiduKey').value.trim(),
+      tencentKey: $('setTencentKey').value.trim(),
+      tencentRegion: $('setTencentRegion').value.trim(),
       pdfTranslate: {
         ...((settings && settings.pdfTranslate) || {}),
         fontPath: $('setPdfFontPath').value.trim(),
@@ -1912,6 +1935,9 @@
     $('btnSettingsCancel').addEventListener('click', () => el.settingsModal.classList.add('hidden'));
     $('btnSettingsSave').addEventListener('click', saveSettingsFromForm);
 
+    // 翻译提供方切换：即时显隐对应密钥字段
+    $('setTranslateProvider').addEventListener('change', updateTranslateProviderFields);
+
     // 全局字体/字号：下拉即预览，保存后持久化
     $('setAppFont').addEventListener('change', () => applyFont($('setAppFont').value));
     $('setFontSize').addEventListener('change', () => applyFontSize($('setFontSize').value));
@@ -2007,10 +2033,15 @@
   }
 
   // ==================== PDF 阅读器（连续页面 + 右侧翻译面板） ====================
+  const pdfReaderUtils = window.PdfReaderUtils;
+  if (!pdfReaderUtils) throw new Error('PDF 阅读器工具加载失败');
+
   const pr = {
     open: false, doc: null, scale: 1.4, pageNum: 1, totalPages: 1,
     recordId: null, highlightColor: 'yellow', currentSelection: null,
-    pageSizes: [],   // [{w,h}] 每页 scale=1 尺寸
+    pageSizes: [],   // [{w,h,rotation}] 每页默认旋转下 scale=1 尺寸
+    pageRotations: new Map(), // page -> 相对 PDF 原始方向的显示旋转（仅当前阅读会话）
+    lastJoinedSelectionKey: '',
     rendered: new Set(), // 已渲染页码
     observer: null,
     tab: 'translate',    // 当前右侧面板页签
@@ -2019,6 +2050,42 @@
     chatAbort: null,     // 流式生成中用于「停止」的 AbortController
   };
   const prChatImages = []; // 待发送图片 [{name, dataUrl}]（按论文重置）
+
+  function getPageExtraRotation(pageNum) {
+    return pdfReaderUtils.normalizeRotation(pr.pageRotations.get(pageNum) || 0);
+  }
+
+  function getPageDisplaySize(pageNum) {
+    return pdfReaderUtils.getDisplaySize(pr.pageSizes[pageNum - 1], getPageExtraRotation(pageNum));
+  }
+
+  function getPageViewport(page, pageNum, scale = pr.scale) {
+    const baseRotation = Number(page.rotate) || 0;
+    return page.getViewport({ scale, rotation: pdfReaderUtils.normalizeRotation(baseRotation + getPageExtraRotation(pageNum)) });
+  }
+
+  function updateRotationLabel() {
+    const label = $('prRotationLabel');
+    if (label) label.textContent = getPageExtraRotation(pr.pageNum) + '°';
+  }
+
+  function rotateCurrentPage(delta) {
+    if (!pr.doc) return;
+    const pageNum = pr.pageNum;
+    const next = pdfReaderUtils.normalizeRotation(getPageExtraRotation(pageNum) + delta);
+    if (next) pr.pageRotations.set(pageNum, next); else pr.pageRotations.delete(pageNum);
+    const wrap = $('prPages').querySelector(`.pr-page-wrap[data-page="${pageNum}"]`);
+    if (wrap) {
+      pr.rendered.delete(pageNum);
+      const size = getPageDisplaySize(pageNum);
+      wrap.style.width = (size.w * pr.scale) + 'px';
+      wrap.style.height = (size.h * pr.scale) + 'px';
+      wrap.innerHTML = '';
+      renderPageInto(wrap, pageNum);
+    }
+    updateRotationLabel();
+    toast(`第 ${pageNum} 页已${delta > 0 ? '向右' : '向左'}旋转（仅本次阅读）`, 'success');
+  }
 
   // ---------- 右侧页签切换 ----------
   function switchPrTab(name) {
@@ -2729,8 +2796,7 @@
     prChatImages.length = 0;
     $('pdfReader').classList.remove('hidden');
     $('prFilename').textContent = it.originalName || '';
-    $('prTransResult').innerHTML = '<div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>';
-    $('prSourceText').value = '';
+    resetSelectionTranslation({ preserveMode: false, clearBrowserSelection: false });
     $('prThoughts').value = it.thoughts || '';
     $('prThoughtsState').textContent = it.thoughts ? '已保存' : '';
     // 右侧「解析结果」与正在阅读的文献同步刷新
@@ -2753,6 +2819,9 @@
   function closePdfReader() {
     pr.open = false;
     pr.doc = null;
+    pr.currentSelection = null;
+    pr.lastJoinedSelectionKey = '';
+    pr.pageRotations.clear();
     pr.rendered.clear();
     if (pr.observer) { pr.observer.disconnect(); pr.observer = null; }
     // 关窗时终止仍在进行的流式回答，避免后台白白跑完
@@ -2771,7 +2840,10 @@
       pr.doc = doc;
       pr.totalPages = doc.numPages;
       pr.pageNum = 1;
+      pr.pageRotations.clear();
+      pr.lastJoinedSelectionKey = '';
       pr.rendered.clear();
+      updateRotationLabel();
       $('prPageTotal').textContent = doc.numPages;
       $('prPageInput').max = doc.numPages;
       $('prPageInput').value = 1;
@@ -2780,7 +2852,7 @@
       for (let i = 1; i <= doc.numPages; i++) {
         const p = await doc.getPage(i);
         const v = p.getViewport({ scale: 1 });
-        pr.pageSizes.push({ w: v.width, h: v.height });
+        pr.pageSizes.push({ w: v.width, h: v.height, rotation: Number(p.rotate) || 0 });
       }
       buildPlaceholders();
       renderNotesList();
@@ -2792,7 +2864,7 @@
     container.innerHTML = '';
     if (pr.observer) pr.observer.disconnect();
     for (let i = 1; i <= pr.totalPages; i++) {
-      const size = pr.pageSizes[i - 1];
+      const size = getPageDisplaySize(i);
       const wrap = document.createElement('div');
       wrap.className = 'pr-page-wrap';
       wrap.dataset.page = i;
@@ -2828,15 +2900,21 @@
     if (cur !== pr.pageNum) {
       pr.pageNum = cur;
       $('prPageInput').value = cur;
+      updateRotationLabel();
     }
   }
 
   async function renderPageInto(wrap, pageNum) {
     if (!pr.doc || pr.rendered.has(pageNum)) return;
     pr.rendered.add(pageNum);
+    // 旋转、缩放或切换文献时，旧的异步渲染可能晚到；令旧结果失效，避免覆盖新方向的页面。
+    const token = `${pageNum}:${getPageExtraRotation(pageNum)}:${pr.scale}:${Date.now()}:${Math.random()}`;
+    wrap.dataset.renderToken = token;
+    const isCurrentRender = () => pr.open && pr.doc && wrap.dataset.renderToken === token;
     try {
       const page = await pr.doc.getPage(pageNum);
-      const viewport = page.getViewport({ scale: pr.scale });
+      if (!isCurrentRender()) return;
+      const viewport = getPageViewport(page, pageNum);
       const dpr = window.devicePixelRatio || 1;
 
       wrap.innerHTML = '';
@@ -2854,12 +2932,14 @@
         canvasContext: ctx, viewport,
         transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
       }).promise;
+      if (!isCurrentRender()) return;
       wrap.appendChild(canvas);
 
       // 文本层（划词）
       const textLayer = document.createElement('div');
       textLayer.className = 'pr-text-layer';
       await buildTextLayer(page, viewport, textLayer);
+      if (!isCurrentRender()) return;
       wrap.appendChild(textLayer);
 
       // 高亮/笔记层
@@ -2870,32 +2950,32 @@
       renderAnnotations(hlLayer, pageNum, pr.scale);
       wrap.appendChild(hlLayer);
     } catch (e) {
-      pr.rendered.delete(pageNum);
+      if (isCurrentRender()) pr.rendered.delete(pageNum);
     }
   }
 
   async function buildTextLayer(page, viewport, layerDiv) {
     const content = await page.getTextContent();
-    const scale = viewport.scale;
-    // 用离屏 canvas 量测每个文本片段在 sans-serif 下的实际渲染宽度，
-    // 再用 scaleX 拉伸到 PDF 原始宽度，让选区矩形与画布字形对齐
     const measure = document.createElement('canvas').getContext('2d');
+    // 使用 viewport.transform 把 PDF 坐标变到画布坐标；这和 canvas 使用同一个
+    // PDF.js viewport，因此 90°/270° 旋转后文本层仍可正确划词。
     for (const item of content.items) {
       if (!item.str) continue;
-      const tx = item.transform;
+      const tx = pdfReaderUtils.multiplyTransforms(viewport.transform, item.transform);
       const fontHeight = Math.hypot(tx[2], tx[3]);
+      if (!fontHeight) continue;
       const angle = Math.atan2(tx[1], tx[0]);
       const div = document.createElement('span');
       div.textContent = item.str;
-      div.style.left = (tx[4] * scale) + 'px';
-      div.style.top = (viewport.height - tx[5] * scale - fontHeight * scale) + 'px';
-      div.style.fontSize = (fontHeight * scale) + 'px';
+      div.style.left = tx[4] + 'px';
+      div.style.top = (tx[5] - fontHeight) + 'px';
+      div.style.fontSize = fontHeight + 'px';
       div.style.fontFamily = 'sans-serif';
       const transforms = [];
       if (Math.abs(angle) > 0.001) transforms.push(`rotate(${angle}rad)`);
-      const targetWidth = (item.width || 0) * scale;
+      const targetWidth = (item.width || 0) * viewport.scale;
       if (targetWidth > 0) {
-        measure.font = `${fontHeight * scale}px sans-serif`;
+        measure.font = `${fontHeight}px sans-serif`;
         const measured = measure.measureText(item.str).width;
         if (measured > 0) transforms.push(`scaleX(${(targetWidth / measured).toFixed(4)})`);
       }
@@ -2913,36 +2993,62 @@
   function renderAnnotations(layer, pageNum, scale) {
     const it = items.find((x) => x.id === pr.recordId);
     const anns = (it?.annotations || []).filter((a) => a.page === pageNum);
+    const size = pr.pageSizes[pageNum - 1];
+    const rotation = getPageExtraRotation(pageNum);
+    const displayRect = (rect) => pdfReaderUtils.toDisplayRect(rect, size, rotation);
     for (const a of anns) {
-      const [x1, y1, x2, y2] = a.rect;
+      const rect = a.rect || [0, 0, 0, 0];
       if (a.type === 'highlight') {
+        const r = displayRect(rect);
         const div = document.createElement('div');
         div.style.position = 'absolute';
-        div.style.left = (x1 * scale) + 'px';
-        div.style.top = (y1 * scale) + 'px';
-        div.style.width = ((x2 - x1) * scale) + 'px';
-        div.style.height = ((y2 - y1) * scale) + 'px';
+        div.style.left = (r.x1 * scale) + 'px';
+        div.style.top = (r.y1 * scale) + 'px';
+        div.style.width = ((r.x2 - r.x1) * scale) + 'px';
+        div.style.height = ((r.y2 - r.y1) * scale) + 'px';
         div.style.background = HIGHLIGHT_COLORS[a.color] || '#ffe08a';
         div.style.opacity = '0.45';
         layer.appendChild(div);
       } else if (a.type === 'underline') {
         const lineH = Math.max(1.5, 1.4 * scale);
-        for (const r of (a.rects || [])) {
+        for (const raw of (a.rects || [])) {
+          const r = displayRect([raw.x1, raw.y1, raw.x2, raw.y2]);
           const u = document.createElement('div');
           u.style.position = 'absolute';
-          u.style.left = (r.x1 * scale) + 'px';
-          u.style.top = (r.y2 * scale - lineH) + 'px';
-          u.style.width = ((r.x2 - r.x1) * scale) + 'px';
-          u.style.height = lineH + 'px';
+          const width = (r.x2 - r.x1) * scale;
+          const height = (r.y2 - r.y1) * scale;
+          // 下划线也跟随页面方向：90°/270° 后是竖线，180° 后落在文字的视觉下方。
+          if (rotation === 90) {
+            u.style.left = (r.x1 * scale) + 'px';
+            u.style.top = (r.y1 * scale) + 'px';
+            u.style.width = lineH + 'px';
+            u.style.height = height + 'px';
+          } else if (rotation === 270) {
+            u.style.left = (r.x2 * scale - lineH) + 'px';
+            u.style.top = (r.y1 * scale) + 'px';
+            u.style.width = lineH + 'px';
+            u.style.height = height + 'px';
+          } else if (rotation === 180) {
+            u.style.left = (r.x1 * scale) + 'px';
+            u.style.top = (r.y1 * scale) + 'px';
+            u.style.width = width + 'px';
+            u.style.height = lineH + 'px';
+          } else {
+            u.style.left = (r.x1 * scale) + 'px';
+            u.style.top = (r.y2 * scale - lineH) + 'px';
+            u.style.width = width + 'px';
+            u.style.height = lineH + 'px';
+          }
           u.style.background = HIGHLIGHT_COLORS[a.color] || '#e8a213';
           u.style.borderRadius = '1px';
           layer.appendChild(u);
         }
       } else if (a.type === 'note') {
+        const r = displayRect(rect);
         const m = document.createElement('div');
         m.className = 'pr-note-marker';
-        m.style.left = (x1 * scale) + 'px';
-        m.style.top = (y1 * scale) + 'px';
+        m.style.left = (r.x1 * scale) + 'px';
+        m.style.top = (r.y1 * scale) + 'px';
         m.style.background = '#e8a213';
         m.title = a.note || '';
         m.addEventListener('click', (e) => { e.stopPropagation(); showNotePopover(a, e.clientX, e.clientY); });
@@ -3009,10 +3115,12 @@
     if (!rects.length) return null;
     const wrapRect = wrap.getBoundingClientRect();
     const scale = pr.scale;
-    const normRects = rects.map((r) => ({
+    const size = pr.pageSizes[pageNum - 1];
+    const rotation = getPageExtraRotation(pageNum);
+    const normRects = rects.map((r) => pdfReaderUtils.toCanonicalRect({
       x1: (r.left - wrapRect.left) / scale, y1: (r.top - wrapRect.top) / scale,
       x2: (r.right - wrapRect.left) / scale, y2: (r.bottom - wrapRect.top) / scale,
-    }));
+    }, size, rotation));
     return { text, pageNum, rects: normRects, clientRects: rects };
   }
 
@@ -3044,8 +3152,29 @@
 
   // 划词 → 自动填充右侧翻译面板并立即翻译（无需点击「译」）
   let translateAbort = null;
+  function resetSelectionTranslation({ preserveMode = true, clearBrowserSelection = true } = {}) {
+    if (translateAbort) { translateAbort.abort(); translateAbort = null; }
+    pr.lastJoinedSelectionKey = '';
+    pr.currentSelection = null;
+    $('prSourceText').value = '';
+    $('prTransResult').innerHTML = '<div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>';
+    if (!preserveMode) $('prJoinMode').checked = false;
+    if (clearBrowserSelection) window.getSelection()?.removeAllRanges();
+  }
+
   function translateSelection(text) {
-    $('prSourceText').value = text;
+    const source = $('prSourceText');
+    if ($('prJoinMode').checked) {
+      const key = pdfReaderUtils.selectionKey(pr.currentSelection);
+      // 工具条里的「翻译」只重译当前拼接结果，不能把同一段重复塞进去。
+      if (key && key !== pr.lastJoinedSelectionKey) {
+        source.value = pdfReaderUtils.joinSelectionText(source.value, text);
+        pr.lastJoinedSelectionKey = key;
+      }
+    } else {
+      source.value = text;
+      pr.lastJoinedSelectionKey = '';
+    }
     doPanelTranslate();
   }
 
@@ -3140,8 +3269,8 @@
     if (!pr.doc) return;
     const container = document.querySelector('.pr-main');
     const avail = container.clientWidth - 64;
-    const size = pr.pageSizes[0];
-    if (size) {
+    const size = getPageDisplaySize(pr.pageNum);
+    if (size?.w) {
       pr.scale = Math.max(0.5, Math.min(4, avail / size.w));
       $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%';
       rebuildAllPages();
@@ -3224,6 +3353,10 @@
     $('prZoomOut').addEventListener('click', () => { pr.scale = Math.max(0.5, pr.scale - 0.2); $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%'; rebuildAllPages(); });
     $('prZoomIn').addEventListener('click', () => { pr.scale = Math.min(4, pr.scale + 0.2); $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%'; rebuildAllPages(); });
     $('prFitWidth').addEventListener('click', fitWidth);
+    $('prRotateLeft').addEventListener('click', () => rotateCurrentPage(-90));
+    $('prRotateRight').addEventListener('click', () => rotateCurrentPage(90));
+    $('prJoinMode').addEventListener('change', () => { pr.lastJoinedSelectionKey = ''; });
+    $('prClearSelection').addEventListener('click', () => { resetSelectionTranslation(); toast('已清空选区与译文', 'success'); });
 
     // Ctrl + 鼠标滚轮 / 笔记本触控板捏合 缩放（Chromium 中捏合手势会带 ctrlKey 的 wheel 事件）
     let zoomDebounce = null;

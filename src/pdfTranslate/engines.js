@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as catalog from '../modelCatalog.js';
 import { cjkRatio } from './layout.js';
+import { translateBatchWithProvider, translateProviderLabel, NON_LLM_PROVIDERS } from '../translateProviders.js';
 
 // ==================== 目标语言 ====================
 
@@ -608,9 +609,50 @@ export function createDeepLEngine({ settings, options = {}, onLog }) {
 
 // ==================== 对外统一入口 ====================
 
+/**
+ * 通用「传统翻译服务」引擎（火山 / 有道 / 百度 / 腾讯 / MyMemory）。
+ * 逐段（或火山 API 按小批）调用 translateProviders.js 里的实现；
+ * 免密钥网页接口按「每段一次请求 + 最小间隔」节流，避免被上游限流。
+ */
+export function createProviderEngine({ provider, settings, options = {} }) {
+  const label = translateProviderLabel(provider) || provider;
+  // 免密钥网页接口对请求频率敏感；有密钥的商业 API 可以放宽
+  const minInterval = provider === 'volcapi' ? 60 : Math.max(0, options.minIntervalMs ?? 220);
+  let lastCall = 0;
+
+  const throttle = async (signal) => {
+    const wait = lastCall + minInterval - Date.now();
+    if (wait > 0) await sleep(wait, signal);
+    lastCall = Date.now();
+  };
+
+  return {
+    id: provider,
+    label,
+    // 火山 API 支持 TextList 批量；其余逐段
+    batchLimits: provider === 'volcapi' ? { maxChars: 3000, maxItems: 8 } : { maxChars: 4000, maxItems: 1 },
+    describe() { return { kind: provider }; },
+    async translateBatch(texts, { signal } = {}) {
+      await throttle(signal);
+      try {
+        return await translateBatchWithProvider(provider, texts, settings, options.targetLang);
+      } catch (e) {
+        if (/ 429$|429:|FlowLimit|限流|Too Many/i.test(e?.message || '')) e.retryable = true;
+        e.message = `${label}：${e.message}`;
+        throw e;
+      }
+    },
+  };
+}
+
 export function createEngine({ engine = 'auto', settings, options = {}, onLog }) {
-  const kind = engine === 'auto' ? (settings.translateProvider === 'deepl' ? 'deepl' : 'llm') : engine;
+  let kind = engine;
+  if (kind === 'auto') {
+    const provider = settings.translateProvider || 'siliconflow';
+    kind = NON_LLM_PROVIDERS.has(provider) ? provider : 'llm';
+  }
   if (kind === 'deepl') return createDeepLEngine({ settings, options, onLog });
+  if (NON_LLM_PROVIDERS.has(kind)) return createProviderEngine({ provider: kind, settings, options });
   return createLlmEngine({ settings, profileId: options.profileId, options, onLog });
 }
 

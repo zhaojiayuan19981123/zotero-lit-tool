@@ -296,14 +296,21 @@ export function getSettings() {
     language: 'zh',
     easyScholarKey: '', // easyScholar 期刊等级查询 SecretKey
     // 划词翻译
-    translateProvider: 'siliconflow', // 'siliconflow' | 'deepl' | 'free'
+    translateProvider: 'siliconflow', // 'siliconflow' | 'deepl' | 'volcweb' | 'youdaoweb' | 'volcapi' | 'youdaoapi' | 'baidu' | 'tencent' | 'free'
     deeplKey: '', // DeepL API Key
     deeplEndpoint: '', // 自建 DeepLX 端点（留空则按 Key 后缀自动选官方 Free/Pro 端点）
+    volcKey: '', // 火山引擎机器翻译：AccessKeyId#SecretAccessKey
+    volcRegion: '', // 火山引擎地域，留空 = cn-north-1
+    youdaoKey: '', // 有道智云：应用ID#应用密钥
+    youdaoVocabId: '', // 有道智云词汇表 ID（可选）
+    baiduKey: '', // 百度翻译开放平台：AppID#密钥
+    tencentKey: '', // 腾讯云机器翻译：SecretId#SecretKey
+    tencentRegion: '', // 腾讯云地域，留空 = ap-shanghai
     // 文献全文翻译（PDF）：默认参数。字段说明见 src/pdfTranslate/index.js
     // 这里只落「用户改过的部分」，渲染/版面相关的默认值由 DEFAULT_PDF_TRANSLATE_OPTIONS 兜底，
     // 以后调默认参数不需要迁移已存的 settings.json。
     pdfTranslate: {
-      engine: 'auto',        // auto(跟随划词翻译的引擎设置) | llm | deepl
+      engine: 'auto',        // auto(跟随划词翻译的引擎设置) | llm | deepl | volcweb | youdaoweb | volcapi | youdaoapi | baidu | tencent | free
       targetLang: 'zh',
       sourceLang: 'auto',
       // mono(单语译文版) | dual(双语对照版) | reflow(重排版) | both(单语+双语) | all(三种全出)
@@ -340,6 +347,9 @@ export function getSettings() {
 
 export function saveSettings(settings) {
   const next = syncLegacyFields(migrateSettings(settings));
+  // 1.7.2 起已移除外文文献检索；保存时清除旧的服务选择与 SerpAPI Key。
+  delete next.literatureSearchProvider;
+  delete next.serpApiKey;
   saveFile(SETTINGS_FILE, next);
   return next;
 }
@@ -576,3 +586,4 @@ export function deleteMailAccount(id) {
   saveMailAccounts(next);
   return next.length !== list.length;
 }
+
