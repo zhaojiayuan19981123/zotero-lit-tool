@@ -979,6 +979,10 @@
           </select>
         </label>
         <label class="field"><span>DeepL API Key（选 DeepL 时填写）</span><input id="setDeeplKey" class="tb-input" type="password" placeholder="DeepL 密钥，留空则不用 DeepL" /></label>
+        <label class="field"><span>DeepL 端点（可选，自建 DeepLX 时填）</span><input id="setDeeplEndpoint" class="tb-input" placeholder="留空 = 按 Key 自动选官方 Free / Pro 端点；自建例：http://127.0.0.1:1188/translate" /></label>
+        <label class="field"><span>全文翻译中文字体（可选）</span><input id="setPdfFontPath" class="tb-input" placeholder="留空 = 自动探测系统字体，找不到会自动下载 Noto Sans SC" /></label>
+        <p class="modal-desc">译文的字体家族（黑体系 / 宋体系 / 跟随原文）、粗细、字号与并发数，在阅读器左侧
+          <b>「📄 全文翻译」</b>面板里按篇调整，并可用「存为默认」持久化。这里只需在需要指定某个特定字体文件时填写。</p>
         <div class="field-sep"></div>
         <p class="modal-desc" style="background:var(--primary-soft)">主题配色会同步应用于主操作、选中状态、链接与侧边栏；语义状态色保持稳定，以保证信息识别和阅读对比度。</p>
         <label class="field"><span>预设配色</span>
@@ -1139,6 +1143,7 @@
       <aside class="pr-trans-panel">
         <div class="pr-tabs" id="prTabs">
           <button class="pr-tab active" data-prtab="translate">🌐 划词翻译</button>
+          <button class="pr-tab" data-prtab="fulltext">📄 全文翻译</button>
           <button class="pr-tab" data-prtab="analysis">📋 解析结果</button>
           <button class="pr-tab" data-prtab="chat">🤖 AI 对话</button>
         </div>
@@ -1169,6 +1174,106 @@
           <div class="pr-panel-sep"></div>
           <div class="pr-panel-sub">📝 笔记与高亮 <span class="side-count" id="prNotesCount">0</span></div>
           <div id="prNotesList" class="pr-notes-list"></div>
+        </div>
+
+        <!-- ---------- 全文翻译（整篇 PDF：解析版式 → 分段翻译 → 回写 PDF） ---------- -->
+        <div class="pr-panel-body pr-pane hidden" data-prpane="fulltext">
+          <div class="ft-head">
+            <span class="ft-title">整篇文献翻译</span>
+            <span id="ftEngineState" class="ft-badge"></span>
+          </div>
+          <p class="ft-note">按段落翻译整篇 PDF。可产出三种成品：<b>单语译文版</b>（保留原版面，原位覆盖成中文）、<b>双语对照版</b>（左原文右译文）、<b>重排版</b>（丢弃原版面，按阅读顺序重排成 A4 单栏，公式 / 图 / 表格原样保留，最适合连续阅读）。</p>
+
+          <div class="ft-grid">
+            <label class="ft-field"><span>翻译引擎</span>
+              <select id="ftEngine" class="tb-select w100">
+                <option value="auto">跟随划词翻译设置</option>
+                <option value="llm">大模型</option>
+                <option value="deepl">DeepL</option>
+              </select>
+            </label>
+            <label class="ft-field"><span>目标语言</span>
+              <select id="ftTarget" class="tb-select w100"></select>
+            </label>
+            <label class="ft-field"><span>输出成品</span>
+              <select id="ftMode" class="tb-select w100">
+                <option value="both">单语译文版 + 双语对照版</option>
+                <option value="all">重排版 + 单语译文版 + 双语对照版</option>
+                <option value="reflow">只要重排版</option>
+                <option value="mono">只要单语译文版</option>
+                <option value="dual">只要双语对照版</option>
+              </select>
+            </label>
+            <label class="ft-field"><span>页码范围</span>
+              <input id="ftPages" class="tb-input w100" placeholder="留空 = 全部（例：1-5,8,12-）" />
+            </label>
+            <label class="ft-field"><span>字体家族</span>
+              <select id="ftFontFamily" class="tb-select w100">
+                <option value="auto">跟随原文（推荐）</option>
+                <option value="sans">黑体系（雅黑 / 苹方 / Noto Sans）</option>
+                <option value="serif">宋体系（宋体 / 宋体-简 / Noto Serif）</option>
+              </select>
+            </label>
+            <label class="ft-field"><span>译文粗细</span>
+              <select id="ftFontWeight" class="tb-select w100">
+                <option value="medium">偏清晰（推荐）</option>
+                <option value="regular">常规</option>
+                <option value="bold">加粗</option>
+              </select>
+            </label>
+            <label class="ft-field"><span>译文字号</span>
+              <input id="ftFontSize" class="tb-input w100" type="number" min="0" max="24" step="0.5" placeholder="0 = 跟随原文" />
+            </label>
+            <label class="ft-field"><span>并发请求数</span>
+              <input id="ftConcurrency" class="tb-input w100" type="number" min="1" max="16" step="1" placeholder="1-16，默认 8" />
+            </label>
+          </div>
+
+          <div class="ft-toggles">
+            <label class="ml-switch"><input type="checkbox" id="ftKeepFormulas" checked /> 公式保留原文</label>
+            <label class="ml-switch"><input type="checkbox" id="ftKeepTables" checked /> 表格保留原文</label>
+            <label class="ml-switch"><input type="checkbox" id="ftRefs" /> 翻译参考文献</label>
+            <label class="ml-switch"><input type="checkbox" id="ftRespectBold" checked /> 原文加粗处同步加粗</label>
+            <label class="ml-switch"><input type="checkbox" id="ftReflowKeepFigures" checked /> 重排版保留公式 / 图表</label>
+            <label class="ml-switch"><input type="checkbox" id="ftReflowIndent" checked /> 重排版正文首行缩进</label>
+          </div>
+          <p class="ft-hint-line">并发数越高越快，但撞到接口限流会自动降速重试；「译文字号」留 0 即跟随原文字号。</p>
+
+          <details class="ft-details">
+            <summary>术语表 <span class="ft-detail-hint">（保证全文译名一致）</span></summary>
+            <textarea id="ftGlossary" class="pr-src ft-glossary" placeholder="每行一条：原文 = 译文&#10;attention = 注意力机制&#10;ablation study = 消融实验"></textarea>
+            <div class="ft-detail-foot">
+              <span id="ftGlossaryCount" class="ft-hint-text"></span>
+              <button id="ftGlossarySave" class="btn btn-ghost btn-sm">存为默认</button>
+            </div>
+          </details>
+
+          <div class="ft-actions">
+            <button id="ftEstimate" class="btn">预估</button>
+            <button id="ftStart" class="btn btn-primary">开始全文翻译</button>
+            <button id="ftSaveDefaults" class="btn btn-ghost" title="把当前面板上的参数存为默认，下次打开自动带上">存为默认</button>
+          </div>
+          <div id="ftEstimateInfo" class="ft-info hidden"></div>
+
+          <div id="ftProgress" class="ft-progress hidden">
+            <div class="ft-bar"><div class="ft-bar-inner" id="ftBarInner"></div></div>
+            <div class="ft-stage-row">
+              <span id="ftStage">排队中</span>
+              <span id="ftPercent">0%</span>
+            </div>
+            <button id="ftCancel" class="btn btn-ghost btn-sm">取消任务</button>
+          </div>
+
+          <div id="ftOutputs" class="ft-outputs"></div>
+
+          <details class="ft-details" id="ftLogWrap" hidden>
+            <summary>运行日志</summary>
+            <pre id="ftLogs" class="ft-logs"></pre>
+          </details>
+
+          <div class="pr-panel-sep"></div>
+          <div class="pr-panel-sub">🕘 翻译记录 <span class="side-count" id="ftHistoryCount">0</span></div>
+          <div id="ftHistory" class="ft-history"></div>
         </div>
 
         <!-- ---------- 解析结果（与左侧阅读的文献同步） ---------- -->

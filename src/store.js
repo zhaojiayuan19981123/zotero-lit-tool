@@ -100,6 +100,7 @@ const ALL_DATA_FILES = [
   'conversations.json', // AI 助手会话列表
   'calendar.json',      // 科研日历
   'worldlib.json',      // 世图下载助手历史
+  'pdf-translations.json', // 全文翻译作业历史
 ];
 
 export function dataFileNames() {
@@ -297,6 +298,32 @@ export function getSettings() {
     // 划词翻译
     translateProvider: 'siliconflow', // 'siliconflow' | 'deepl' | 'free'
     deeplKey: '', // DeepL API Key
+    deeplEndpoint: '', // 自建 DeepLX 端点（留空则按 Key 后缀自动选官方 Free/Pro 端点）
+    // 文献全文翻译（PDF）：默认参数。字段说明见 src/pdfTranslate/index.js
+    // 这里只落「用户改过的部分」，渲染/版面相关的默认值由 DEFAULT_PDF_TRANSLATE_OPTIONS 兜底，
+    // 以后调默认参数不需要迁移已存的 settings.json。
+    pdfTranslate: {
+      engine: 'auto',        // auto(跟随划词翻译的引擎设置) | llm | deepl
+      targetLang: 'zh',
+      sourceLang: 'auto',
+      // mono(单语译文版) | dual(双语对照版) | reflow(重排版) | both(单语+双语) | all(三种全出)
+      mode: 'both',
+      pageRange: '',
+      keepFormulas: true,    // 公式保留原文
+      keepTables: true,      // 表格保留原文
+      translateReferences: false, // 参考文献默认不翻
+      glossary: [],          // [{source, target}]
+      concurrency: 8,        // 并发上限（自适应池会从更低起步、顺利时逐步逼近它）
+      // ---- 译文观感 ----
+      fontWeight: 'medium',  // regular(常规) | medium(偏清晰，默认) | bold(加粗)
+      fontFamily: 'auto',    // auto(跟随原文正文是衬线还是无衬线) | sans | serif
+      fontSize: 0,           // 0 = 跟随原文自动；>0 = 全篇统一到该 pt
+      respectBold: true,     // 原文加粗处（标题/强调）自动用更重的档位
+      fontPath: '',          // 自定义中文字体（.ttf/.ttc/.otf）
+      // ---- 重排版 ----
+      reflowKeepFigures: true, // 公式/表格/插图裁下来贴回重排文档
+      reflowIndent: true,      // 正文段落首行缩进两字
+    },
     // 数据保存目录（空 = 使用默认用户数据目录）
     dataDir: '',
     // 新手引导是否已看过（持久化到数据目录，跨启动/跨版本稳定保留）

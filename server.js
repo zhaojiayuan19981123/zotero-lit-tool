@@ -15,6 +15,8 @@ import * as store from './src/store.js';
 import { queryPublicationRank, formatRank } from './src/easyscholar.js';
 import { translate } from './src/translate.js';
 import { registerMailRoutes } from './src/mailRoutes.js';
+import { registerPdfTranslateRoutes } from './src/pdfTranslate/routes.js';
+import { DEFAULT_PDF_TRANSLATE_OPTIONS } from './src/pdfTranslate/index.js';
 import { pruneConnections } from './src/mail.js';
 import * as catalog from './src/modelCatalog.js';
 
@@ -2308,6 +2310,19 @@ export function createApp({
   }, 60000);
   if (typeof mailPruneTimer.unref === 'function') mailPruneTimer.unref();
 
+  // ---------- 文献全文翻译（PDF） ----------
+  // 版式解析 → 分段翻译 → 回写 PDF，产出「单语译文版」与「双语对照版」。
+  // 翻译引擎复用应用里已配置的模型配置（大模型）与 DeepL Key，用户不必重复填。
+  const pdfTranslateService = registerPdfTranslateRoutes(app, {
+    store,
+    getUploadDir: () => currentUploadDir,
+    upload,
+    fixFileName,
+    // 把「完整默认参数」交给路由：设置接口要把它和用户存过的值合并后回给前端，
+    // 前端据此填充所有控件（含新增的字体族/字重/字号/重排开关）
+    defaultOptions: DEFAULT_PDF_TRANSLATE_OPTIONS,
+  });
+
   // ---------- 设置 ----------
   app.get('/api/settings', (_req, res) => res.json(store.getSettings()));
 
@@ -2477,7 +2492,7 @@ export function createApp({
     next();
   });
 
-  return { app, getUploadDir: () => currentUploadDir };
+  return { app, getUploadDir: () => currentUploadDir, pdfTranslate: pdfTranslateService };
 }
 
 // ---------- 启动 ----------

@@ -14,7 +14,10 @@ dist/
 *.log
 test.pdf
 
-# 测试产物
+# 开发期临时脚本与测试产物
+# 临时脚本统一放工作区级 .pdfsandbox/，不要提交进仓库；
+# 尤其不要用 *.test.* / *_test.* / *-test.* 命名放在仓库内——会被 node --test 自动发现，污染测试结果
+.pdfsandbox/
 _vision_ui_test.png
 _vision_*_test_data/
 

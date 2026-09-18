@@ -1350,6 +1350,8 @@
     $('setEasyKey').value = settings.easyScholarKey || '';
     $('setTranslateProvider').value = settings.translateProvider || 'siliconflow';
     $('setDeeplKey').value = settings.deeplKey || '';
+    $('setDeeplEndpoint').value = settings.deeplEndpoint || '';
+    $('setPdfFontPath').value = (settings.pdfTranslate && settings.pdfTranslate.fontPath) || '';
     $('setDataDir').value = settings.dataDir || '';
     $('setAppFont').value = settings.appFont || '';
     $('setFontSize').value = settings.fontSize || 'medium';
@@ -1372,6 +1374,11 @@
       easyScholarKey: $('setEasyKey').value.trim(),
       translateProvider: $('setTranslateProvider').value,
       deeplKey: $('setDeeplKey').value.trim(),
+      deeplEndpoint: $('setDeeplEndpoint').value.trim(),
+      pdfTranslate: {
+        ...((settings && settings.pdfTranslate) || {}),
+        fontPath: $('setPdfFontPath').value.trim(),
+      },
       dataDir: $('setDataDir').value.trim(),
       appFont: $('setAppFont').value,
       fontSize: $('setFontSize').value,
@@ -2019,7 +2026,373 @@
     document.querySelectorAll('.pr-tab').forEach((b) => b.classList.toggle('active', b.dataset.prtab === pr.tab));
     document.querySelectorAll('.pr-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.prpane !== pr.tab));
     if (pr.tab === 'analysis') renderPrAnalysis();
+    if (pr.tab === 'fulltext') openFullTextTab();
     if (pr.tab === 'chat') { renderPrChat(); setTimeout(() => $('prChatInput')?.focus(), 60); }
+  }
+
+  // ============ 全文翻译（整篇 PDF） ============
+  // 与「划词翻译」的分工：划词是看一句翻一句；这里是整篇——服务端解析版面、按段落翻译，
+  // 再把译文按原版式回写进 PDF，公式 / 图 / 表格 / 页眉页脚的位置保持不变。
+  // 前端只负责「配参数 → 起作业 → 跟进度 → 拿成品」。
+  const ft = {
+    meta: null,     // GET /api/pdf-translate/settings 的结果（引擎可用性 / 目标语言 / 字体）
+    job: null,      // 当前正在跟踪的作业
+    stream: null,   // EventSource
+    busy: false,
+  };
+
+  function ftEl(id) { return document.getElementById(id); }
+
+  /** 成品类型 → 展示名。服务端会在 outputs[].label 里回传，这里只作为兜底 */
+  const FT_KIND_LABEL = { mono: '单语译文版', dual: '双语对照版', reflow: '重排版' };
+  const FT_KIND_SHORT = { mono: '单语', dual: '双语', reflow: '重排' };
+
+  /** 读一个数字输入框：空/非法 → 用默认值；否则夹到 [min, max] */
+  function ftNumber(id, min, max, def) {
+    const el = ftEl(id);
+    if (!el) return def;
+    const raw = String(el.value ?? '').trim();
+    if (raw === '') return def;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return def;
+    return Math.max(min, Math.min(max, n));
+  }
+
+  /** 从表单读出本次翻译的参数（术语表按文本原样提交，服务端会解析成结构化词条） */
+  function ftOptions() {
+    return {
+      engine: ftEl('ftEngine').value,
+      targetLang: ftEl('ftTarget').value,
+      mode: ftEl('ftMode').value,
+      pageRange: ftEl('ftPages').value.trim(),
+      keepFormulas: ftEl('ftKeepFormulas').checked,
+      keepTables: ftEl('ftKeepTables').checked,
+      translateReferences: ftEl('ftRefs').checked,
+      // 译文观感：字体家族 / 粗细 / 字号，以及「原文加粗处同步加粗」
+      fontFamily: ftEl('ftFontFamily').value,
+      fontWeight: ftEl('ftFontWeight').value,
+      fontSize: ftNumber('ftFontSize', 0, 24, 0),
+      respectBold: ftEl('ftRespectBold').checked,
+      // 重排版开关
+      reflowKeepFigures: ftEl('ftReflowKeepFigures').checked,
+      reflowIndent: ftEl('ftReflowIndent').checked,
+      // 并发上限：自适应池会在 1/4 起步、顺利时逼近这个值
+      concurrency: ftNumber('ftConcurrency', 1, 16, 8),
+      glossary: ftEl('ftGlossary').value,
+    };
+  }
+
+  async function openFullTextTab() {
+    try {
+      const meta = await api('/api/pdf-translate/settings');
+      ft.meta = meta;
+      fillFtForm(meta);
+      await refreshFtHistory();
+    } catch (e) {
+      toast('读取全文翻译设置失败：' + e.message, 'error');
+    }
+  }
+
+  function fillFtForm(meta) {
+    const o = meta.options || {};
+    const tgt = ftEl('ftTarget');
+    if (tgt && !tgt.options.length) {
+      tgt.innerHTML = (meta.targetLangs || []).map((l) => `<option value="${esc(l.id)}">${esc(l.label)}</option>`).join('');
+    }
+    if (tgt) tgt.value = o.targetLang || 'zh';
+    ftEl('ftEngine').value = o.engine || 'auto';
+    ftEl('ftMode').value = o.mode || 'both';
+    ftEl('ftPages').value = o.pageRange || '';
+    ftEl('ftKeepFormulas').checked = o.keepFormulas !== false;
+    ftEl('ftKeepTables').checked = o.keepTables !== false;
+    ftEl('ftRefs').checked = o.translateReferences === true;
+    // 译文观感与重排开关（服务端已把默认值合并进来，这里只需回填）
+    ftEl('ftFontFamily').value = o.fontFamily || 'auto';
+    ftEl('ftFontWeight').value = o.fontWeight || 'medium';
+    ftEl('ftFontSize').value = Number(o.fontSize) > 0 ? o.fontSize : '';
+    ftEl('ftConcurrency').value = Number(o.concurrency) > 0 ? o.concurrency : 8;
+    ftEl('ftRespectBold').checked = o.respectBold !== false;
+    ftEl('ftReflowKeepFigures').checked = o.reflowKeepFigures !== false;
+    ftEl('ftReflowIndent').checked = o.reflowIndent !== false;
+    // 术语表：数组 → 每行一条「原文 = 译文」
+    const terms = Array.isArray(o.glossary) ? o.glossary : [];
+    ftEl('ftGlossary').value = terms.map((g) => `${g.source} = ${g.target}`).join('\n');
+    ftGlossaryCount();
+    // 引擎可用性提示
+    const eng = meta.engine || {};
+    const font = meta.font || {};
+    const parts = [];
+    if (eng.llmReady) parts.push('大模型可用');
+    else parts.push('大模型未配置');
+    if (eng.deeplReady) parts.push('DeepL 可用');
+    parts.push(font.label ? `字体：${font.label}` : '字体待下载');
+    ftEl('ftEngineState').textContent = parts.join(' · ');
+    ftEl('ftEngineState').className = 'ft-badge' + (eng.llmReady || eng.deeplReady ? '' : ' ft-badge-warn');
+  }
+
+  function ftGlossaryCount() {
+    const n = ftEl('ftGlossary').value.split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith('#')).length;
+    ftEl('ftGlossaryCount').textContent = n ? `已填 ${n} 条术语` : '未填术语（可选）';
+  }
+
+  function setFtBusy(busy) {
+    ft.busy = busy;
+    const start = ftEl('ftStart');
+    if (!start) return;
+    start.disabled = busy;
+    start.textContent = busy ? '翻译中…' : '开始全文翻译';
+    ftEl('ftEstimate').disabled = busy;
+    const save = ftEl('ftSaveDefaults');
+    if (save) save.disabled = busy;
+    ftEl('ftProgress').classList.toggle('hidden', !busy && !ft.job);
+  }
+
+  function closeFtStream() {
+    if (ft.stream) { try { ft.stream.close(); } catch (_) { /* ignore */ } ft.stream = null; }
+  }
+
+  // ---------- 预估 ----------
+  async function estimateFullText() {
+    const it = items.find((x) => x.id === pr.recordId);
+    if (!it) { toast('未找到当前文献', 'error'); return; }
+    const info = ftEl('ftEstimateInfo');
+    info.classList.remove('hidden');
+    info.textContent = '正在解析版面…';
+    try {
+      const r = await api('/api/pdf-translate/estimate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ literatureId: it.id, options: ftOptions() }),
+      });
+      const outs = (r.outputs || []).map((o) => o.label).join(' + ');
+      // fontFamily 是服务端按原文推断后的结果（auto 已解析成 sans / serif）
+      const fam = r.fontFamily === 'serif' ? '宋体系' : '黑体系';
+      info.innerHTML = `本次将翻译 <b>${r.blocks}</b> 段、约 <b>${r.chars}</b> 字`
+        + `（共 ${r.totalPages} 页，选中 ${r.selectedPages} 页，预计 <b>${r.requests}</b> 次接口请求，并发上限 ${r.concurrency}）`
+        + (outs ? `<br/>将产出：<b>${esc(outs)}</b>` : '')
+        + (r.bodySize ? ` · 原文正文 ${r.bodySize} pt，译文用${fam}字体` : '');
+    } catch (e) {
+      info.textContent = '预估失败：' + e.message;
+    }
+  }
+
+  // ---------- 开始翻译 ----------
+  async function startFullText() {
+    if (ft.busy) return;
+    const it = items.find((x) => x.id === pr.recordId);
+    if (!it) { toast('未找到当前文献', 'error'); return; }
+    if (!it.filename) { toast('该文献没有 PDF 附件', 'error'); return; }
+    const options = ftOptions();
+    const eng = ft.meta?.engine || {};
+    // 只在用户「显式选了某个引擎」时做前置检查；auto 交给服务端按划词设置决定
+    if (options.engine === 'deepl' && !eng.deeplReady) {
+      toast('还没有配置 DeepL Key，请到「设置 → 划词翻译」填写', 'error');
+      return;
+    }
+    if (options.engine === 'llm' && !eng.llmReady) {
+      toast('还没有配置大模型，请到「设置 → AI 模型」添加一条可用配置', 'error');
+      return;
+    }
+    setFtBusy(true);
+    ftEl('ftLogWrap').hidden = false;
+    ftEl('ftLogs').textContent = '';
+    ftEl('ftEstimateInfo').classList.add('hidden');
+    try {
+      const job = await api('/api/pdf-translate/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ literatureId: it.id, options }),
+      });
+      ft.job = job;
+      renderFtJob(job);
+      subscribeFtJob(job.id);
+    } catch (e) {
+      toast(e.message, 'error');
+      setFtBusy(false);
+    }
+  }
+
+  /** 订阅作业进度；SSE 不可用时退化为轮询 */
+  function subscribeFtJob(id) {
+    closeFtStream();
+    if (typeof EventSource === 'undefined') {
+      const timer = setInterval(async () => {
+        try {
+          const j = await api('/api/pdf-translate/jobs/' + encodeURIComponent(id));
+          renderFtJob(j);
+          if (['done', 'failed', 'cancelled'].includes(j.status)) {
+            clearInterval(timer);
+            setFtBusy(false);
+            refreshFtHistory();
+          }
+        } catch (_) { clearInterval(timer); setFtBusy(false); }
+      }, 1500);
+      return;
+    }
+    const es = new EventSource('/api/pdf-translate/jobs/' + encodeURIComponent(id) + '/stream');
+    ft.stream = es;
+    const consume = (ev) => {
+      let job = null;
+      try { job = JSON.parse(ev.data); } catch (_) { return; }
+      renderFtJob(job);
+      if (['done', 'failed', 'cancelled'].includes(job.status)) {
+        closeFtStream();
+        setFtBusy(false);
+        refreshFtHistory();
+      }
+    };
+    es.addEventListener('snapshot', consume);
+    es.addEventListener('update', consume);
+    // 连接异常时 EventSource 会自行重连，这里不需要额外处理
+  }
+
+  function renderFtJob(job) {
+    if (!job) return;
+    ft.job = job;
+    const stageText = {
+      queued: '排队中', font: '准备字体', analyze: '解析版面', translate: '翻译中',
+      render: '生成 PDF', done: '已完成',
+    }[job.stage] || job.stage || '';
+    ftEl('ftStage').textContent = job.message || stageText;
+    ftEl('ftPercent').textContent = Math.round(job.percent || 0) + '%';
+    ftEl('ftBarInner').style.width = Math.max(2, Math.min(100, job.percent || 0)) + '%';
+    ftEl('ftBarInner').className = 'ft-bar-inner'
+      + (job.status === 'failed' ? ' ft-bar-fail' : '')
+      + (job.status === 'done' ? ' ft-bar-done' : '');
+    ftEl('ftProgress').classList.remove('hidden');
+    if (job.logs) {
+      const box = ftEl('ftLogs');
+      box.textContent = job.logs.join('\n');
+      box.scrollTop = box.scrollHeight;
+      if (job.logs.length) ftEl('ftLogWrap').hidden = false;
+    }
+    renderFtOutputs(job);
+    if (job.status === 'failed' && job.error) toast('全文翻译失败：' + job.error, 'error');
+  }
+
+  function renderFtOutputs(job) {
+    const box = ftEl('ftOutputs');
+    const list = job?.outputs || [];
+    box.innerHTML = list.map((o) => `
+      <div class="ft-out">
+        <div class="ft-out-main">
+          <span class="ft-out-kind ft-kind-${esc(o.kind)}">${esc(o.label || FT_KIND_LABEL[o.kind] || o.kind)}</span>
+          <span class="ft-out-name" title="${esc(o.fileName)}">${esc(o.fileName)}</span>
+          <span class="ft-out-meta">${fmtSize(o.size)} · ${o.pages} 页 · ${o.blocks} 段译文${o.overflowBlocks ? ` · ${o.overflowBlocks} 段已缩号` : ''}</span>
+        </div>
+        <div class="ft-out-actions">
+          <button class="btn btn-ghost btn-sm" data-ft-open="${esc(o.url)}" data-ft-name="${esc(o.fileName)}">在应用内看</button>
+          <button class="btn btn-ghost btn-sm" data-ft-tab="${esc(o.url)}">新窗口</button>
+          <a class="btn btn-ghost btn-sm" href="${esc(o.url)}" download="${esc(o.fileName)}">下载</a>
+        </div>
+      </div>`).join('');
+  }
+
+  /**
+   * 在应用内的左侧阅读器里打开译文 PDF。
+   * 单语 / 双语两种成品与原稿页数一致，页码不会错位；重排版是全新排的 A4 单栏，
+   * 页数与页码都对不上原稿——这里把文件名标清楚，免得用户以为看错了文件。
+   */
+  function previewTranslatedPdf(url, name) {
+    $('prFilename').textContent = name + '（译文预览）';
+    loadPdfDocument(url);
+    toast('已在左侧打开译文 PDF');
+  }
+
+  // ---------- 翻译记录（只看本篇，避免与其它文献串台） ----------
+  async function refreshFtHistory() {
+    try {
+      const list = await api('/api/pdf-translate/jobs');
+      const mine = (Array.isArray(list) ? list : []).filter((j) => j.literatureId === pr.recordId);
+      ftEl('ftHistoryCount').textContent = String(mine.length);
+      // 本篇还有在跑的作业（例如中途切走了文献）→ 重新接上进度
+      const active = mine.find((j) => j.status === 'running' || j.status === 'queued');
+      if (active && (!ft.job || ft.job.id !== active.id)) {
+        renderFtJob(active);
+        setFtBusy(true);
+        subscribeFtJob(active.id);
+      }
+      const box = ftEl('ftHistory');
+      if (!mine.length) { box.innerHTML = '<div class="ft-empty">本篇还没有翻译记录</div>'; return; }
+      const label = { queued: '排队中', running: '进行中', done: '已完成', failed: '失败', cancelled: '已取消' };
+      box.innerHTML = mine.slice(0, 12).map((j) => `
+        <div class="ft-hist">
+          <div class="ft-hist-head">
+            <span class="ft-hist-status ft-st-${esc(j.status)}">${label[j.status] || j.status}</span>
+            <span class="ft-hist-time">${esc(fmtTime(j.createdAt))}</span>
+          </div>
+          <div class="ft-hist-meta">${j.stats?.chars ? `约 ${j.stats.chars} 字` : ''}${j.engineLabel ? ` · ${esc(j.engineLabel)}` : ''}${j.error ? ` · ${esc(j.error)}` : ''}</div>
+          ${(j.outputs || []).map((o) => `
+            <div class="ft-hist-out">
+              <span class="ft-out-kind ft-kind-${esc(o.kind)}">${esc(FT_KIND_SHORT[o.kind] || o.kind)}</span>
+              <button class="btn btn-ghost btn-sm" data-ft-open="${esc(o.url)}" data-ft-name="${esc(o.fileName)}">在应用内看</button>
+              <a class="btn btn-ghost btn-sm" href="${esc(o.url)}" download="${esc(o.fileName)}">下载</a>
+            </div>`).join('')}
+        </div>`).join('');
+    } catch (_) { /* 记录读取失败不影响主流程 */ }
+  }
+
+  function bindFullText() {
+    ftEl('ftEstimate').addEventListener('click', estimateFullText);
+    ftEl('ftStart').addEventListener('click', startFullText);
+    ftEl('ftGlossary').addEventListener('input', ftGlossaryCount);
+    ftEl('ftCancel').addEventListener('click', async () => {
+      if (!ft.job) return;
+      try { await api(`/api/pdf-translate/jobs/${encodeURIComponent(ft.job.id)}/cancel`, { method: 'POST' }); } catch (_) { /* ignore */ }
+    });
+    // 术语表「存为默认」：写进 settings.pdfTranslate.glossary，下次翻译自动带上
+    ftEl('ftGlossarySave').addEventListener('click', async () => {
+      try {
+        await api('/api/pdf-translate/settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ glossary: ftEl('ftGlossary').value }),
+        });
+        await loadFtDefaultsCache();
+        toast('术语表已保存为默认', 'success');
+      } catch (e) { toast(e.message, 'error'); }
+    });
+    // 「存为默认」：把面板上这一整套参数（含输出成品 / 字体 / 字号 / 并发）持久化
+    ftEl('ftSaveDefaults').addEventListener('click', async () => {
+      const o = ftOptions();
+      try {
+        await api('/api/pdf-translate/settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            engine: o.engine,
+            targetLang: o.targetLang,
+            mode: o.mode,
+            keepFormulas: o.keepFormulas,
+            keepTables: o.keepTables,
+            translateReferences: o.translateReferences,
+            fontFamily: o.fontFamily,
+            fontWeight: o.fontWeight,
+            fontSize: o.fontSize,
+            respectBold: o.respectBold,
+            reflowKeepFigures: o.reflowKeepFigures,
+            reflowIndent: o.reflowIndent,
+            concurrency: o.concurrency,
+            glossary: o.glossary,
+          }),
+        });
+        await loadFtDefaultsCache();
+        toast('当前设置已存为默认', 'success');
+      } catch (e) { toast(e.message, 'error'); }
+    });
+    // 成品操作（事件委托）
+    ftEl('ftOutputs').addEventListener('click', onFtOutputClick);
+    ftEl('ftHistory').addEventListener('click', onFtOutputClick);
+  }
+
+  function onFtOutputClick(e) {
+    const open = e.target.closest('[data-ft-open]');
+    if (open) { previewTranslatedPdf(open.dataset.ftOpen, open.dataset.ftName); return; }
+    const tab = e.target.closest('[data-ft-tab]');
+    if (tab) { window.open(tab.dataset.ftTab, '_blank'); }
+  }
+
+  /** 术语表等服务端默认值改了之后，刷新本地缓存，避免下次打开面板又是旧值 */
+  async function loadFtDefaultsCache() {
+    try { ft.meta = await api('/api/pdf-translate/settings'); } catch (_) { /* ignore */ }
   }
 
   // ---------- 解析结果面板（与左侧正在阅读的文献同步） ----------
@@ -2362,6 +2735,17 @@
     $('prThoughtsState').textContent = it.thoughts ? '已保存' : '';
     // 右侧「解析结果」与正在阅读的文献同步刷新
     renderPrAnalysis();
+    // 全文翻译面板：切文献时清掉上一篇的进度与成品，避免串台（在跑的服务端作业不会被取消）
+    ft.job = null;
+    closeFtStream();
+    setFtBusy(false);
+    $('ftOutputs').innerHTML = '';
+    $('ftEstimateInfo').classList.add('hidden');
+    $('ftProgress').classList.add('hidden');
+    $('ftLogWrap').hidden = true;
+    $('ftLogs').textContent = '';
+    $('ftHistoryCount').textContent = '0';
+    $('ftHistory').innerHTML = '<div class="ft-empty">本篇还没有翻译记录</div>';
     switchPrTab(pr.tab || 'translate');
     loadPdfDocument('/uploads/' + encodeURIComponent(it.filename));
   }
@@ -2373,6 +2757,8 @@
     if (pr.observer) { pr.observer.disconnect(); pr.observer = null; }
     // 关窗时终止仍在进行的流式回答，避免后台白白跑完
     stopPrChat();
+    // 全文翻译只是不再跟踪进度；服务端作业会继续跑完，下次打开面板自动接上
+    closeFtStream();
     pr.chatBusy = false;
     $('pdfReader').classList.add('hidden');
     $('prPages').innerHTML = '';
@@ -6390,6 +6776,9 @@ a { color: #176b87; }
     bindUpdater();
     bindWorkbench();
     bindPdfReader();
+    // 全文翻译面板的事件绑定。原先漏了这一句，导致「预估 / 开始全文翻译」点了没反应——
+    // 按钮存在、请求却一个都不发，排查时很容易误判成后端问题。
+    bindFullText();
     bindIdeas();
     bindMarkdownNotes();
     bindReviewer();

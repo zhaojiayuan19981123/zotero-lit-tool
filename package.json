@@ -1,13 +1,14 @@
 {
   "name": "zotero-lit-tool",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "一站式科研终端 —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --test test",
+    "test": "node --test",
+    "test:files": "node --test \"test/*.test.mjs\"",
     "electron": "electron .",
     "dist": "electron-builder --win",
     "dist:dir": "electron-builder --win dir",
@@ -25,6 +26,7 @@
   "author": "SciTerminal",
   "license": "MIT",
   "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
     "dompurify": "^3.2.6",
     "electron-updater": "^6.6.2",
     "express": "^4.19.2",
@@ -36,6 +38,7 @@
     "marked": "^15.0.12",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^10.0.10",
+    "pdf-lib": "^1.17.1",
     "sanitize-html": "^2.17.0",
     "unpdf": "^0.12.0"
   },
