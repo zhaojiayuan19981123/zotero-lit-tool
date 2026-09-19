@@ -15,12 +15,38 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { resolveModes, MODES, OUTPUT_META, parsePageRange } from '../src/pdfTranslate/index.js';
+import { looksLikeTable } from '../src/pdfTranslate/analyze.js';
 import { planStroke, INK_TARGET } from '../src/pdfTranslate/fontMetrics.js';
 import { isTtc, extractTtcFont } from '../src/pdfTranslate/fonts.js';
 import { runAdaptivePool, isThrottleError } from '../src/pdfTranslate/engines.js';
 import { readingOrder, wrapFlow, buildElements, renderReflowPdf } from '../src/pdfTranslate/reflow.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+
+// ==================== 版面误判：结构化摘要不能当成表格 ====================
+
+test('结构化摘要的长句列不应被表格保护规则跳过', () => {
+  const lines = Array.from({ length: 5 }, (_, row) => ({
+    text: row === 0
+      ? 'Short video sharing platforms have rapidly expanded the online content market.'
+      : 'Users consumption behavior is dynamic and exhibits fine-grained temporal dependencies.',
+    items: [
+      { x: 300, text: row === 0 ? 'Short video sharing platforms' : 'Users consumption behavior' },
+      { x: 430, text: 'have rapidly expanded the online content market.' },
+      { x: 560, text: 'and exhibits fine-grained temporal dependencies.' },
+    ],
+  }));
+  assert.equal(looksLikeTable({ lineCount: lines.length, lines }), false);
+});
+
+test('短单元格且列位置稳定的块仍可识别为表格', () => {
+  const lines = Array.from({ length: 4 }, (_, row) => ({
+    text: `A${row} B${row} C${row}`,
+    items: [{ x: 100, text: `A${row}` }, { x: 180, text: `B${row}` }, { x: 260, text: `C${row}` }],
+  }));
+  assert.equal(looksLikeTable({ lineCount: lines.length, lines }), true);
+});
 
 // ==================== 输出模式 ====================
 

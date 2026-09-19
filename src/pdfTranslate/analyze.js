@@ -573,9 +573,23 @@ function canMerge(block, line) {
   const right = region ? region.x1 : prev.x1;
   const indentStep = Math.max(3, prev.size * 0.6);
   if (line.x0 - prev.x0 > indentStep) return why('段首缩进');
-  // 上一行没排满（离文本区右边界还有一大截）说明段落已结束
-  const shortTol = Math.max(prev.size * 1.6, (right - (region?.x0 ?? prev.x0)) * 0.05);
-  if ((right - prev.x1) > shortTol) return why(`上行为短行 ${(right - prev.x1).toFixed(1)}>${shortTol.toFixed(1)}`);
+  // 标题经常是两行换行，而且第一行天然不排满。若两行左边界、字号和字形
+  // 都一致，应视为同一个标题块；否则会把标题拆成多个翻译请求，译文逐行回写
+  // 后就会出现截图中那种“中文碎片插进英文标题/摘要”的错位效果。
+  const sameStart = Math.abs(line.x0 - prev.x0) <= Math.max(2, prev.size * 0.45);
+  const styleMatch = line.bold === prev.bold && line.italic === prev.italic
+    && Math.abs(sizeRatio - 1) <= 0.12;
+  const headingContinuation = block.lines.length < 3
+    && sameStart && styleMatch
+    // 标题可能不是 bold 字体文件，因此同时用字号兜底；12pt 是保守阈值，
+    // 正文常见 8–11pt，不会把普通段落的短行大量误合并。
+    && (prev.bold || line.bold || Math.min(prev.size, line.size) >= 12)
+    && !isListItemStart(line.text);
+  if (!headingContinuation) {
+    // 上一行没排满（离文本区右边界还有一大截）说明段落已结束
+    const shortTol = Math.max(prev.size * 1.6, (right - (region?.x0 ?? prev.x0)) * 0.05);
+    if ((right - prev.x1) > shortTol) return why(`上行为短行 ${(right - prev.x1).toFixed(1)}>${shortTol.toFixed(1)}`);
+  }
   // 字体风格突变（加粗小标题）另起一段
   if (line.bold !== prev.bold && line.size > prev.size) return why('字重变化');
   if (isListItemStart(line.text)) return why('列表项起首');
@@ -849,6 +863,23 @@ function variableRatio(text) {
 
 function looksLikeTable(block) {
   if (block.lineCount < 2 || block.lines.length < 2) return false;
+
+  // 论文首页经常把 ABSTRACT 做成「左侧小标签 + 右侧长句」的结构化摘要。
+  // 这种版式在 PDF 文本层里看起来也像一个有固定列的表格，但它不是表格：
+  // 如果按表格跳过，结果就会出现“左边的标签被翻译、右边的英文段落仍保留”
+  // 的错位页面（这是全文翻译最容易被误判的一类）。
+  // 先排除明显的连续 prose，再判断真正的表格网格。
+  const proseLines = block.lines.filter((line) => {
+    const t = String(line.text || '').trim();
+    return t.length >= 34
+      && /[A-Za-z\u4e00-\u9fff]{3,}/.test(t)
+      && /[.,;:!?，。；：！？]/.test(t);
+  });
+  const proseChars = block.lines.reduce((n, line) => n + String(line.text || '').replace(/\s/g, '').length, 0);
+  const proseRatio = proseLines.length / Math.max(1, block.lines.length);
+  const avgLineChars = proseChars / Math.max(1, block.lines.length);
+  if (proseLines.length >= 2 && (proseRatio >= 0.45 || avgLineChars >= 42)) return false;
+
   const counts = block.lines.map((l) => l.items.length);
   const med = medianOf(counts);
   if (med < 3) return false;
@@ -864,7 +895,10 @@ function looksLikeTable(block) {
   }
   let aligned = 0;
   for (const [, n] of buckets) if (n >= 2) aligned++;
-  return aligned >= 3 && aligned >= block.lines.length * 0.6;
+  // 真表格通常至少有 3 个稳定列，而且每行的短单元格较多；
+  // 这里提高“稳定列”门槛，避免把正文/结构化摘要误伤。
+  return aligned >= 3 && aligned >= block.lines.length * 0.6
+    && block.lines.filter((l) => String(l.text || '').trim().length < 34).length >= 2;
 }
 
 function findReferenceStart(blocks) {
