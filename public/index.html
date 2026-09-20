@@ -61,6 +61,7 @@
         <div class="nav-section-label">研究工作</div>
         <div class="nav-item active" data-view="home"><span class="nav-ico">🏠</span>首页</div>
         <div class="nav-item" data-view="library"><span class="nav-ico">📚</span>文献中心</div>
+        <div class="nav-item" data-view="topjournals"><span class="nav-ico">🏛️</span>顶刊追踪<span id="navTopJournalBadge" class="nav-badge hidden">0</span></div>
         <div class="nav-item" data-view="projects"><span class="nav-ico">📂</span>项目管理</div>
         <div class="nav-item" data-view="tasks"><span class="nav-ico">✅</span>任务安排</div>
         <div class="nav-item" data-view="papers"><span class="nav-ico">📮</span>论文进度</div>
@@ -256,6 +257,29 @@
         </div>
       </section>
 
+      <!-- ===== 视图：UTD 顶刊追踪 ===== -->
+      <section id="viewTopJournals" class="view hidden top-journal-view">
+        <div class="top-journal-head">
+          <div>
+            <div class="eyebrow">UTD 24 · 公开元数据追踪</div>
+            <h2>顶刊追踪</h2>
+            <p>签到后领取每本已订阅期刊的未重复文章；文章元数据来自 Crossref，并保留出版社原文入口。</p>
+          </div>
+          <div class="top-journal-head-actions">
+            <button id="btnTopJournalSync" class="tb-btn">↻ 同步最新文章</button>
+            <button id="btnTopJournalCheckin" class="tb-btn accent">✓ 签到并领取今日文章</button>
+          </div>
+        </div>
+        <div id="topJournalStats" class="top-journal-stats"></div>
+        <nav class="top-journal-tabs" id="topJournalTabs">
+          <button class="active" data-top-journal-tab="today">今日推送</button>
+          <button data-top-journal-tab="latest">最新文章</button>
+          <button data-top-journal-tab="library">我的累积</button>
+          <button data-top-journal-tab="calendar">打卡日历</button>
+          <button data-top-journal-tab="manage">期刊管理</button>
+        </nav>
+        <div id="topJournalContent" class="top-journal-content"></div>
+      </section>
       <!-- ===== 视图：项目管理 ===== -->
       <section id="viewProjects" class="view hidden">
         <div class="view-toolbar">

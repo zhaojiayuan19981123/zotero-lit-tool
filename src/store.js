@@ -23,6 +23,7 @@ let IDEAS_FILE = path.join(DATA_DIR, 'ideas.json');
 let REVIEWS_FILE = path.join(DATA_DIR, 'reviews.json');
 let MARKDOWN_NOTES_FILE = path.join(DATA_DIR, 'markdown-notes.json');
 let CALENDAR_FILE = path.join(DATA_DIR, 'calendar.json');
+let TOP_JOURNALS_FILE = path.join(DATA_DIR, 'top-journals.json');
 
 export function configure({ dataDir }) {
   if (dataDir) {
@@ -42,6 +43,7 @@ export function configure({ dataDir }) {
     REVIEWS_FILE = path.join(DATA_DIR, 'reviews.json');
     MARKDOWN_NOTES_FILE = path.join(DATA_DIR, 'markdown-notes.json');
     CALENDAR_FILE = path.join(DATA_DIR, 'calendar.json');
+    TOP_JOURNALS_FILE = path.join(DATA_DIR, 'top-journals.json');
   }
 }
 
@@ -101,6 +103,7 @@ const ALL_DATA_FILES = [
   'calendar.json',      // 科研日历
   'worldlib.json',      // 世图下载助手历史
   'pdf-translations.json', // 全文翻译作业历史
+  'top-journals.json', // UTD 顶刊追踪：订阅、元数据、打卡与投递记录
 ];
 
 export function dataFileNames() {
@@ -108,7 +111,7 @@ export function dataFileNames() {
   const known = new Set(ALL_DATA_FILES);
   for (const f of [DATA_FILE, SETTINGS_FILE, COLLECTIONS_FILE, PROFILE_FILE, PROJECTS_FILE,
     TASKS_FILE, NOTES_FILE, CHAT_FILE, PAPERS_FILE, MAIL_FILE, IDEAS_FILE, REVIEWS_FILE, MARKDOWN_NOTES_FILE,
-    CALENDAR_FILE, CONVERSATIONS_FILE]) {
+    CALENDAR_FILE, TOP_JOURNALS_FILE, CONVERSATIONS_FILE]) {
     if (f) known.add(path.basename(f));
   }
   return [...known];
@@ -513,6 +516,24 @@ export function saveCalendar(value) {
   return next;
 }
 
+// ---------- UTD 顶刊追踪 ----------
+// 与其它个人数据一起存入当前数据目录，支持备份、迁移和离线查看已同步内容。
+export function getTopJournals() {
+  return loadFile(TOP_JOURNALS_FILE, {
+    version: 1,
+    selectedJournalIds: [],
+    articles: [],
+    checkins: {},
+    deliveries: {},
+    sync: {},
+    preferences: { fillWithRecentUnseen: true },
+  });
+}
+
+export function saveTopJournals(value) {
+  saveFile(TOP_JOURNALS_FILE, value && typeof value === 'object' ? value : getTopJournals());
+  return value;
+}
 // ---------- AI 助手多会话 ----------
 let CONVERSATIONS_FILE = path.join(DATA_DIR, 'conversations.json');
 
@@ -586,4 +607,3 @@ export function deleteMailAccount(id) {
   saveMailAccounts(next);
   return next.length !== list.length;
 }
-

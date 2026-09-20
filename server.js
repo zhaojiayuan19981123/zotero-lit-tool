@@ -19,6 +19,7 @@ import { registerPdfTranslateRoutes } from './src/pdfTranslate/routes.js';
 import { DEFAULT_PDF_TRANSLATE_OPTIONS } from './src/pdfTranslate/index.js';
 import { pruneConnections } from './src/mail.js';
 import * as catalog from './src/modelCatalog.js';
+import { UTD_JOURNALS, JOURNAL_PRESETS, createTopJournalState, syncJournals, checkInAndCreateDelivery, deliveryArticles, recentArticles, calendarSummary, markArticleOpened } from './src/topJournals.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_UPLOAD_DIR = path.join(__dirname, 'uploads');
@@ -756,6 +757,100 @@ export function createApp({
     }
   });
 
+  // ---------- UTD 顶刊追踪 ----------
+  // 采集的是公开书目信息、摘要、DOI 与出版社原文页；不下载或分发受版权保护的全文。
+  function topJournalPayload(state) {
+    const normalized = createTopJournalState(state);
+    return {
+      catalog: UTD_JOURNALS,
+      presets: JOURNAL_PRESETS,
+      selectedJournalIds: normalized.selectedJournalIds,
+      sync: normalized.sync,
+      preferences: normalized.preferences,
+      summary: calendarSummary(normalized),
+      articles: recentArticles(normalized, { limit: 180 }),
+    };
+  }
+
+  app.get('/api/top-journals', (_req, res) => res.json(topJournalPayload(store.getTopJournals())));
+
+  app.get('/api/top-journals/delivery', (req, res) => {
+    const date = String(req.query.date || '') || undefined;
+    const result = deliveryArticles(store.getTopJournals(), date);
+    res.json(result);
+  });
+
+  app.get('/api/top-journals/library', (_req, res) => {
+    const state = createTopJournalState(store.getTopJournals());
+    const ids = new Set(Object.values(state.deliveries).flatMap((batch) => (batch?.items || []).map((item) => item.articleId)));
+    const articles = state.articles
+      .filter((article) => ids.has(article.id))
+      .sort((a, b) => String(b.publishedAt || '').localeCompare(String(a.publishedAt || '')));
+    res.json({ articles, total: articles.length });
+  });
+
+  app.put('/api/top-journals/subscriptions', (req, res) => {
+    const selectedJournalIds = Array.isArray(req.body?.selectedJournalIds) ? req.body.selectedJournalIds : [];
+    const current = createTopJournalState(store.getTopJournals());
+    current.selectedJournalIds = [...new Set(selectedJournalIds.filter((id) => UTD_JOURNALS.some((journal) => journal.id === id)))];
+    store.saveTopJournals(current);
+    res.json(topJournalPayload(current));
+  });
+
+  app.post('/api/top-journals/sync', async (req, res) => {
+    const current = createTopJournalState(store.getTopJournals());
+    const requested = Array.isArray(req.body?.journalIds) ? req.body.journalIds : current.selectedJournalIds;
+    try {
+      const result = await syncJournals(current, requested);
+      store.saveTopJournals(result.state);
+      res.json({ ...topJournalPayload(result.state), synced: result.synced, failed: result.failed });
+    } catch (e) {
+      res.status(502).json({ error: `顶刊元数据同步失败：${e.message}` });
+    }
+  });
+
+  app.post('/api/top-journals/checkin', async (_req, res) => {
+    let current = createTopJournalState(store.getTopJournals());
+    try {
+      // 签到前刷新已订阅期刊，保证投递优先使用可获取的最新元数据；失败的刊物会在结果里明确显示。
+      const sync = await syncJournals(current, current.selectedJournalIds);
+      current = sync.state;
+      if (!current.articles.length) return res.status(502).json({ error: '暂未同步到可投递文章，请检查网络后点击「同步最新文章」重试' });
+      const result = checkInAndCreateDelivery(current);
+      store.saveTopJournals(result.state);
+      const delivered = deliveryArticles(result.state);
+      res.json({ ...delivered, alreadyCheckedIn: result.alreadyCheckedIn, synced: sync.synced, failed: sync.failed, summary: calendarSummary(result.state) });
+    } catch (e) {
+      res.status(400).json({ error: e.message || '签到失败' });
+    }
+  });
+
+  app.post('/api/top-journals/articles/:id/opened', (req, res) => {
+    const date = String(req.body?.date || '') || undefined;
+    const next = markArticleOpened(store.getTopJournals(), req.params.id, date);
+    store.saveTopJournals(next);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/top-journals/articles/:id/translate', async (req, res) => {
+    const state = createTopJournalState(store.getTopJournals());
+    const article = state.articles.find((item) => item.id === req.params.id);
+    if (!article) return res.status(404).json({ error: '文章不存在或已从本地缓存清理' });
+    const cached = article.translations?.zh;
+    if (cached?.title || cached?.abstract) return res.json({ translation: cached, cached: true });
+    try {
+      const opts = { target: 'zh' };
+      const [title, abstract] = await Promise.all([
+        article.title ? translate(article.title, store.getSettings(), opts) : Promise.resolve(''),
+        article.abstract ? translate(article.abstract.slice(0, 30000), store.getSettings(), opts) : Promise.resolve(''),
+      ]);
+      article.translations = { ...(article.translations || {}), zh: { title, abstract, translatedAt: new Date().toISOString() } };
+      store.saveTopJournals(state);
+      res.json({ translation: article.translations.zh, cached: false });
+    } catch (e) {
+      res.status(400).json({ error: `翻译失败：${e.message}` });
+    }
+  });
   // ---------- 划词翻译 ----------
   app.post('/api/translate', async (req, res) => {
     const text = req.body?.text;
@@ -2541,4 +2636,3 @@ if (isMain) {
     console.log('');
   });
 }
-

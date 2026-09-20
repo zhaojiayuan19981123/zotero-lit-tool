@@ -72,6 +72,12 @@
     }, 400);
   }
   // 工作台状态（首页 / 项目 / 任务 / 论文 / 研究记录 / AI 助手）
+  // UTD 顶刊追踪：本地缓存来自 /api/top-journals；投递记录由后端保证同一文章不重复。
+  let topJournalData = { catalog: [], presets: {}, selectedJournalIds: [], sync: {}, summary: {}, articles: [] };
+  let topJournalDelivery = null;
+  let topJournalLibrary = [];
+  let topJournalTab = 'today';
+  let topJournalLoaded = false;
   let view = 'home';
   let profile = {};
   let projects = [];
@@ -3994,10 +4000,203 @@
     ['dragleave', 'drop'].forEach((type) => view.addEventListener(type, (e) => { if (type === 'drop') { e.preventDefault(); e.stopPropagation(); uploadReviewFile(e.dataTransfer.files?.[0]); } view.classList.remove('review-view-dragging'); }));
   }
 
+  // ---------- UTD 顶刊追踪 ----------
+  function tjJournal(id) { return topJournalData.catalog.find((journal) => journal.id === id) || null; }
+  function tjExternalUrl(value) {
+    try {
+      const url = new URL(String(value || ''));
+      return /^https?:$/.test(url.protocol) ? url.href : '';
+    } catch (_) { return ''; }
+  }
+  function tjDate(value) {
+    if (!value) return '日期待补充';
+    const date = new Date(`${value}T12:00:00`);
+    return Number.isNaN(date.getTime()) ? esc(value) : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+  function tjArticleCard(article, { delivered = false } = {}) {
+    const journal = tjJournal(article.journalId);
+    const translated = article.translations?.zh || {};
+    const originalUrl = tjExternalUrl(article.originalUrl);
+    const publisherUrl = tjExternalUrl(journal?.publisherUrl);
+    const authors = Array.isArray(article.authors) && article.authors.length ? article.authors.join(' · ') : '作者信息暂缺';
+    const affiliations = Array.isArray(article.affiliations) && article.affiliations.length ? article.affiliations.join('；') : '单位信息暂未由数据源提供';
+    const sourceLine = [article.volume && `Vol. ${esc(article.volume)}`, article.issue && `No. ${esc(article.issue)}`, article.pages && `pp. ${esc(article.pages)}`].filter(Boolean).join(' · ');
+    return `<article class="tj-article-card" data-tj-card="${esc(article.id)}">
+      <div class="tj-article-top"><span class="tj-journal-pill">${esc(journal?.shortTitle || article.journal || 'UTD')}</span><span class="tj-pub-date">${tjDate(article.publishedAt)}</span></div>
+      <h3>${esc(article.title || '未命名文章')}</h3>
+      ${translated.title ? `<div class="tj-title-translation">${esc(translated.title)}</div>` : ''}
+      <dl class="tj-meta-grid">
+        <div><dt>作者</dt><dd>${esc(authors)}</dd></div>
+        <div><dt>单位</dt><dd>${esc(affiliations)}</dd></div>
+        <div><dt>期刊</dt><dd>${esc(article.journal || journal?.title || '')}${sourceLine ? ` · ${sourceLine}` : ''}</dd></div>
+        <div><dt>DOI</dt><dd>${article.doi ? `<a href="https://doi.org/${encodeURIComponent(article.doi)}" target="_blank" rel="noopener noreferrer">${esc(article.doi)}</a>` : '暂缺'}</dd></div>
+      </dl>
+      <div class="tj-abstract"><b>摘要</b><p>${esc(article.abstract || '该文章的公开元数据未包含摘要；可点击原文链接查看出版社页面。')}</p></div>
+      ${translated.abstract ? `<div class="tj-abstract tj-translation"><b>中文翻译</b><p>${esc(translated.abstract)}</p></div>` : ''}
+      <div class="tj-card-actions">
+        <button class="tb-btn" data-tj-translate="${esc(article.id)}">🈯 ${translated.title || translated.abstract ? '查看中文翻译' : '翻译题目与摘要'}</button>
+        ${originalUrl ? `<a class="tb-btn tj-link" href="${esc(originalUrl)}" target="_blank" rel="noopener noreferrer" data-tj-opened="${esc(article.id)}">↗ 原文链接</a>` : ''}
+        ${!originalUrl && publisherUrl ? `<a class="tb-btn tj-link" href="${esc(publisherUrl)}" target="_blank" rel="noopener noreferrer">↗ 期刊主页</a>` : ''}
+        ${delivered ? '<span class="tj-delivered-mark">今日已投递</span>' : ''}
+      </div>
+    </article>`;
+  }
+  function tjEmpty(icon, text, action = '') { return `<div class="tj-empty"><div>${icon}</div><b>${text}</b>${action ? `<p>${action}</p>` : ''}</div>`; }
+  function renderTopJournalStats() {
+    const summary = topJournalData.summary || {};
+    const selected = Number(summary.selectedCount || topJournalData.selectedJournalIds.length || 0);
+    const todayCount = topJournalDelivery?.articles?.length || 0;
+    $('topJournalStats').innerHTML = `
+      <div class="tj-stat"><span>已订阅期刊</span><b>${selected}<small> / 24</small></b></div>
+      <div class="tj-stat"><span>今日状态</span><b>${summary.todayCheckedIn ? `已领取 ${todayCount || ''}` : '待签到'}</b></div>
+      <div class="tj-stat"><span>连续签到</span><b>${Number(summary.streak || 0)}<small> 天</small></b></div>
+      <div class="tj-stat"><span>累计文章</span><b>${Number(summary.libraryCount || 0)}<small> 篇</small></b></div>`;
+    const badge = $('navTopJournalBadge');
+    if (badge) {
+      const show = selected > 0 && !summary.todayCheckedIn;
+      badge.classList.toggle('hidden', !show);
+      badge.textContent = show ? '待' : '';
+    }
+  }
+  async function loadTopJournals({ refresh = false } = {}) {
+    if (topJournalLoaded && !refresh) return topJournalData;
+    topJournalData = await api('/api/top-journals');
+    const delivery = await api('/api/top-journals/delivery').catch(() => ({ delivery: null, articles: [] }));
+    topJournalDelivery = delivery.delivery ? delivery : null;
+    topJournalLoaded = true;
+    return topJournalData;
+  }
+  async function loadTopJournalLibrary() {
+    const result = await api('/api/top-journals/library');
+    topJournalLibrary = result.articles || [];
+  }
+  function renderTopJournalToday() {
+    if (!topJournalData.selectedJournalIds.length) {
+      return tjEmpty('🏛️', '先选择要追踪的 UTD 期刊', '进入“期刊管理”勾选期刊或一键应用研究方向预设。');
+    }
+    if (!topJournalDelivery?.delivery) {
+      return `<div class="tj-checkin-card"><div><span class="tj-checkin-icon">✓</span><h3>今日文章尚未领取</h3><p>点击右上角“签到并领取今日文章”。系统将先刷新已订阅期刊，再为每本期刊分配最多 5 篇你从未收到过的文章。</p></div><button class="tb-btn accent" data-tj-checkin>签到并领取</button></div>`;
+    }
+    const { delivery, articles } = topJournalDelivery;
+    const shortage = (delivery.shortages || []).map((item) => `${esc(tjJournal(item.journalId)?.shortTitle || item.journalId)}：${item.available}/${item.requested}`).join('，');
+    return `<div class="tj-delivery-note"><b>✓ ${esc(delivery.date)} 已领取 ${articles.length} 篇文章</b>${shortage ? `<span>部分期刊可投递新文章不足 5 篇：${shortage}。系统不会重复凑数。</span>` : '<span>已按“最新一期 / Online First 优先、个人历史不重复”生成。</span>'}</div><div class="tj-article-list">${articles.length ? articles.map((article) => tjArticleCard(article, { delivered: true })).join('') : tjEmpty('📭', '当前没有可投递的未重复文章', '请稍后同步，或在“最新文章”中查看已采集内容。')}</div>`;
+  }
+  function renderTopJournalLatest() {
+    const articles = topJournalData.articles || [];
+    if (!articles.length) return tjEmpty('↻', '还没有同步文章', '请点击“同步最新文章”；同步只采集公开元数据、摘要、DOI 与出版社链接。');
+    return `<div class="tj-section-note">按公开发表日期排序。部分出版社会延迟向 Crossref 补充摘要、机构或正式卷期信息。</div><div class="tj-article-list">${articles.map((article) => tjArticleCard(article)).join('')}</div>`;
+  }
+  function renderTopJournalLibrary() {
+    if (!topJournalLibrary.length) return tjEmpty('📚', '个人顶刊文献库尚为空', '完成一次签到后，当天领取的文章会永久沉淀在这里。');
+    return `<div class="tj-section-note">累计 ${topJournalLibrary.length} 篇。这里保存的是你已经领取过的文章记录，不会因后续每日投递而覆盖。</div><div class="tj-article-list">${topJournalLibrary.map((article) => tjArticleCard(article)).join('')}</div>`;
+  }
+  function renderTopJournalCalendar() {
+    const now = new Date();
+    const year = now.getFullYear(); const month = now.getMonth();
+    const first = new Date(year, month, 1); const days = new Date(year, month + 1, 0).getDate();
+    const checked = new Set(topJournalData.summary?.checkinDays || []);
+    const pad = (n) => String(n).padStart(2, '0');
+    const blanks = Array.from({ length: first.getDay() }, () => '<span class="tj-cal-day blank"></span>').join('');
+    const cells = Array.from({ length: days }, (_v, index) => {
+      const day = index + 1; const key = `${year}-${pad(month + 1)}-${pad(day)}`;
+      const active = checked.has(key); const today = key === todayStr();
+      return `<span class="tj-cal-day${active ? ' checked' : ''}${today ? ' today' : ''}" title="${active ? '已签到' : '未签到'}"><b>${day}</b>${active ? '<i>✓</i>' : ''}</span>`;
+    }).join('');
+    return `<div class="tj-calendar-card"><div class="tj-calendar-summary"><div><b>${Number(topJournalData.summary?.streak || 0)} 天</b><span>当前连续签到</span></div><div><b>${checked.size} 天</b><span>本月已签到</span></div><div><b>${Number(topJournalData.summary?.libraryCount || 0)} 篇</b><span>累计文章</span></div></div><h3>${year} 年 ${month + 1} 月</h3><div class="tj-calendar-week"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div><div class="tj-calendar-grid">${blanks}${cells}</div><p>未签到不会消耗文章队列；下次签到时，系统仍会从你未收到过的文章中优先选择最新内容。</p></div>`;
+  }
+  function renderTopJournalManage() {
+    const selected = new Set(topJournalData.selectedJournalIds || []);
+    const groups = [...new Set(topJournalData.catalog.map((journal) => journal.category))];
+    const presets = Object.entries(topJournalData.presets || {}).map(([id, preset]) => `<button class="tj-preset" data-tj-preset="${esc(id)}">${esc(preset.label)}</button>`).join('');
+    return `<div class="tj-manage-card"><div class="tj-manage-head"><div><h3>选择追踪期刊</h3><p>已选择 ${selected.size} / 24 本。预设会替换当前选择；之后可继续手动多选。</p></div><div class="tj-preset-row"><span>研究方向预设</span>${presets}<button class="tj-preset secondary" data-tj-select-all>全选 24 本</button><button class="tj-preset secondary" data-tj-clear>清空</button></div></div>${groups.map((group) => {
+      const journals = topJournalData.catalog.filter((journal) => journal.category === group);
+      return `<section class="tj-journal-group"><div class="tj-group-head"><b>${esc(group)}</b><button class="as-link" data-tj-category="${esc(group)}">全选此类</button></div><div class="tj-journal-options">${journals.map((journal) => `<label><input type="checkbox" data-tj-journal="${esc(journal.id)}" ${selected.has(journal.id) ? 'checked' : ''}><span><b>${esc(journal.shortTitle)}</b><small>${esc(journal.title)}</small></span><a href="${esc(tjExternalUrl(journal.publisherUrl))}" target="_blank" rel="noopener noreferrer" title="打开期刊主页">↗</a></label>`).join('')}</div></section>`;
+    }).join('')}</div>`;
+  }
+  async function renderTopJournals() {
+    if (!topJournalLoaded) await loadTopJournals();
+    renderTopJournalStats();
+    document.querySelectorAll('[data-top-journal-tab]').forEach((button) => button.classList.toggle('active', button.dataset.topJournalTab === topJournalTab));
+    const content = $('topJournalContent');
+    if (topJournalTab === 'today') content.innerHTML = renderTopJournalToday();
+    else if (topJournalTab === 'latest') content.innerHTML = renderTopJournalLatest();
+    else if (topJournalTab === 'library') { if (!topJournalLibrary.length) await loadTopJournalLibrary(); content.innerHTML = renderTopJournalLibrary(); }
+    else if (topJournalTab === 'calendar') content.innerHTML = renderTopJournalCalendar();
+    else content.innerHTML = renderTopJournalManage();
+  }
+  async function saveTopJournalSubscriptions(ids) {
+    const result = await api('/api/top-journals/subscriptions', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selectedJournalIds: ids }) });
+    topJournalData = { ...topJournalData, ...result };
+    topJournalDelivery = null;
+    topJournalLibrary = [];
+    renderTopJournals();
+  }
+  async function topJournalSync() {
+    if (!topJournalData.selectedJournalIds.length) { topJournalTab = 'manage'; await renderTopJournals(); toast('请先选择至少一本期刊', 'error'); return; }
+    const button = $('btnTopJournalSync'); const original = button.textContent; button.disabled = true; button.textContent = '同步中…';
+    try {
+      const result = await api('/api/top-journals/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+      topJournalData = { ...topJournalData, ...result };
+      toast(`已同步 ${result.synced?.reduce((sum, item) => sum + item.count, 0) || 0} 篇元数据${result.failed?.length ? `；${result.failed.length} 本期刊失败` : ''}`, result.failed?.length ? 'error' : 'success');
+      await renderTopJournals();
+    } catch (error) { toast(error.message, 'error'); }
+    finally { button.disabled = false; button.textContent = original; }
+  }
+  async function topJournalCheckin() {
+    const button = $('btnTopJournalCheckin'); const original = button.textContent; button.disabled = true; button.textContent = '正在领取…';
+    try {
+      const result = await api('/api/top-journals/checkin', { method: 'POST' });
+      topJournalDelivery = { delivery: result.delivery, articles: result.articles || [] };
+      topJournalData.summary = result.summary || topJournalData.summary;
+      topJournalData.articles = [...(result.articles || []), ...(topJournalData.articles || [])].filter((article, index, list) => list.findIndex((item) => item.id === article.id) === index);
+      topJournalLibrary = [];
+      topJournalTab = 'today';
+      toast(result.alreadyCheckedIn ? '今天已经签到，已打开原投递文章' : `签到成功，已领取 ${result.articles?.length || 0} 篇文章`, 'success');
+      await renderTopJournals();
+    } catch (error) { toast(error.message, 'error'); }
+    finally { button.disabled = false; button.textContent = original; }
+  }
+  async function translateTopJournalArticle(id) {
+    const button = document.querySelector(`[data-tj-translate="${CSS.escape(id)}"]`);
+    if (button) { button.disabled = true; button.textContent = '翻译中…'; }
+    try {
+      const result = await api(`/api/top-journals/articles/${encodeURIComponent(id)}/translate`, { method: 'POST' });
+      const apply = (article) => article?.id === id ? { ...article, translations: { ...(article.translations || {}), zh: result.translation } } : article;
+      topJournalData.articles = (topJournalData.articles || []).map(apply);
+      if (topJournalDelivery) topJournalDelivery.articles = (topJournalDelivery.articles || []).map(apply);
+      topJournalLibrary = topJournalLibrary.map(apply);
+      await renderTopJournals();
+      toast(result.cached ? '已显示已缓存翻译' : '题目与摘要已翻译', 'success');
+    } catch (error) { toast(error.message, 'error'); if (button) { button.disabled = false; button.textContent = '🈯 翻译题目与摘要'; } }
+  }
+  function bindTopJournals() {
+    $('btnTopJournalSync').addEventListener('click', topJournalSync);
+    $('btnTopJournalCheckin').addEventListener('click', topJournalCheckin);
+    $('topJournalTabs').addEventListener('click', async (event) => { const button = event.target.closest('[data-top-journal-tab]'); if (!button) return; topJournalTab = button.dataset.topJournalTab; await renderTopJournals(); });
+    $('topJournalContent').addEventListener('click', async (event) => {
+      const checkin = event.target.closest('[data-tj-checkin]'); if (checkin) return topJournalCheckin();
+      const translateButton = event.target.closest('[data-tj-translate]'); if (translateButton) return translateTopJournalArticle(translateButton.dataset.tjTranslate);
+      const open = event.target.closest('[data-tj-opened]'); if (open) api(`/api/top-journals/articles/${encodeURIComponent(open.dataset.tjOpened)}/opened`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: todayStr() }) }).catch(() => {});
+      const preset = event.target.closest('[data-tj-preset]'); if (preset) return saveTopJournalSubscriptions(topJournalData.presets[preset.dataset.tjPreset]?.journalIds || []);
+      const all = event.target.closest('[data-tj-select-all]'); if (all) return saveTopJournalSubscriptions(topJournalData.catalog.map((journal) => journal.id));
+      const clear = event.target.closest('[data-tj-clear]'); if (clear) return saveTopJournalSubscriptions([]);
+      const category = event.target.closest('[data-tj-category]'); if (category) {
+        const ids = new Set(topJournalData.selectedJournalIds || []);
+        topJournalData.catalog.filter((journal) => journal.category === category.dataset.tjCategory).forEach((journal) => ids.add(journal.id));
+        return saveTopJournalSubscriptions([...ids]);
+      }
+    });
+    $('topJournalContent').addEventListener('change', (event) => {
+      const checkbox = event.target.closest('[data-tj-journal]'); if (!checkbox) return;
+      const ids = new Set(topJournalData.selectedJournalIds || []);
+      checkbox.checked ? ids.add(checkbox.dataset.tjJournal) : ids.delete(checkbox.dataset.tjJournal);
+      saveTopJournalSubscriptions([...ids]).catch((error) => toast(error.message, 'error'));
+    });
+  }
   async function switchView(v) {
     view = v;
     document.querySelectorAll('.nav-item[data-view]').forEach((n) => n.classList.toggle('active', n.dataset.view === v));
-    const map = { home: 'viewHome', library: 'viewLibrary', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', markdown: 'viewMarkdown', ideas: 'viewIdeas', reviewer: 'viewReviewer', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
+    const map = { home: 'viewHome', library: 'viewLibrary', topjournals: 'viewTopJournals', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', markdown: 'viewMarkdown', ideas: 'viewIdeas', reviewer: 'viewReviewer', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
     for (const [key, id] of Object.entries(map)) $(id).classList.toggle('hidden', key !== v);
     const isLib = v === 'library';
     // 文献中心：主区固定不滚动，表格容器内滚动（横向滚动条贴可视区底部）
@@ -4017,6 +4216,7 @@
     if (v === 'tasks') renderTasks();
     if (v === 'papers') { renderPaperTab(); }
     if (v === 'worldlib') renderWlList();
+    if (v === 'topjournals') await renderTopJournals();
     if (v === 'notes') renderNotes();
     if (v === 'markdown') { if (!markdownNotesLoaded) await loadMarkdownNotes(); else renderMarkdownNotes(); }
     if (v === 'ideas') { if (!ideasLoaded) await loadIdeas(); else renderIdeas(); }
@@ -6908,6 +7108,7 @@ a { color: #176b87; }
     bindEvents();
     bindUpdater();
     bindWorkbench();
+    bindTopJournals();
     bindPdfReader();
     // 全文翻译面板的事件绑定。原先漏了这一句，导致「预估 / 开始全文翻译」点了没反应——
     // 按钮存在、请求却一个都不发，排查时很容易误判成后端问题。
