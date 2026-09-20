@@ -1,7 +1,7 @@
 {
   "name": "zotero-lit-tool",
-  "version": "1.10.0",
-  "description": "一站式科研终端 —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
+  "version": "1.10.1",
+  "description": "一站式科研终端（经管版） —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -48,7 +48,7 @@
   },
   "build": {
     "appId": "com.research.sciterminal",
-    "productName": "一站式科研终端",
+    "productName": "一站式科研终端（经管版）",
     "asar": false,
     "npmRebuild": false,
     "directories": {
@@ -81,7 +81,7 @@
       "artifactName": "zotero-lit-tool-${version}-macos-${arch}.dmg"
     },
     "dmg": {
-      "title": "一站式科研终端",
+      "title": "一站式科研终端（经管版）",
       "icon": "build/icon.icns",
       "contents": [
         {
@@ -115,7 +115,7 @@
       "include": "build/installer.nsh",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "一站式科研终端",
+      "shortcutName": "一站式科研终端（经管版）",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",

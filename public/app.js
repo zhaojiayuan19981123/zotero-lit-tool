@@ -1651,6 +1651,7 @@
     $('mlStreamMode').value = ['auto', 'stream', 'nonstream'].includes(p?.streamMode) ? p.streamMode : 'auto';
     $('mlSystemPromptMode').value = ['auto', 'system', 'user'].includes(p?.systemPromptMode) ? p.systemPromptMode : 'auto';
     $('mlAuthMode').value = ['auto', 'bearer', 'none'].includes(p?.authMode) ? p.authMode : 'auto';
+    $('mlApiFormat').value = ['auto', 'chat', 'responses'].includes(p?.apiFormat) ? p.apiFormat : 'auto';
     $('mlTestResult').classList.add('hidden');
     renderModelChips();
     $('mlEditor').classList.remove('hidden');
@@ -1690,6 +1691,7 @@
       streamMode: $('mlStreamMode').value,
       systemPromptMode: $('mlSystemPromptMode').value,
       authMode: $('mlAuthMode').value,
+      apiFormat: $('mlApiFormat').value,
     };
   }
 
@@ -1709,6 +1711,7 @@
       editing.streamMode = f.streamMode;
       editing.systemPromptMode = f.systemPromptMode;
       editing.authMode = f.authMode;
+      editing.apiFormat = f.apiFormat;
       if (f.apiKey) editing.apiKey = f.apiKey; // 留空 = 保持原密钥
     } else {
       const p = { id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), ...f, createdAt: new Date().toISOString() };
@@ -1795,7 +1798,7 @@
     try {
       const r = await api('/api/models/test', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: f.provider, baseURL: f.baseURL, apiKey, model: f.model, streamMode: f.streamMode, systemPromptMode: f.systemPromptMode, authMode: f.authMode }),
+        body: JSON.stringify({ provider: f.provider, baseURL: f.baseURL, apiKey, model: f.model, streamMode: f.streamMode, systemPromptMode: f.systemPromptMode, authMode: f.authMode, apiFormat: f.apiFormat }),
       });
       box.className = 'ml-test-result ' + (r.ok ? 'ok' : 'err');
       if (r.ok) {
@@ -4242,6 +4245,7 @@
       toast(`已从历史记录删除 ${result.deletedCount || 0} 篇文章；投递去重记录仍会保留`, 'success');
     } catch (error) { toast(error.message, 'error'); }
   }
+  let currentTopJournalAnalysisId = '';
   async function topJournalAnalyze() {
     const articleIds = [...topJournalSelection];
     if (!articleIds.length) return toast('请先选择要分析的文章', 'error');
@@ -4249,7 +4253,8 @@
     if (trigger) { trigger.disabled = true; trigger.textContent = 'AI 分析中…'; }
     try {
       const result = await api('/api/top-journals/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ articleIds }) });
-      $('topJournalAnalysisBody').innerHTML = `<p class="tj-analysis-note">基于本次选中的 ${result.articleCount} 篇文章及本地笔记/研究记录/灵感/论文生成。结论仅代表所选样本，不代表全部 UTD24 期刊。</p><div class="md">${renderMarkdown(result.analysis)}</div>`;
+      currentTopJournalAnalysisId = result.analysisId || '';
+      $('topJournalAnalysisBody').innerHTML = `<p class="tj-analysis-note">基于本次选中的 ${result.articleCount} 篇文章及本地资料生成。${result.compressed ? '本地上下文已先压缩。' : ''}结论仅代表所选样本，不代表全部 UTD24 期刊。</p><div class="md">${renderMarkdown(result.analysis)}</div>`;
       $('topJournalAnalysisModal').classList.remove('hidden');
     } catch (error) { toast(error.message, 'error'); }
     finally { if (trigger) { trigger.disabled = false; trigger.textContent = original; } }
@@ -4270,6 +4275,18 @@
     $('btnTopJournalCheckin').addEventListener('click', topJournalCheckin);
     $('btnTopJournalAnalysisClose').addEventListener('click', () => $('topJournalAnalysisModal').classList.add('hidden'));
     $('btnTopJournalAnalysisDone').addEventListener('click', () => $('topJournalAnalysisModal').classList.add('hidden'));
+    $('btnTopJournalAnalysisSave').addEventListener('click', async () => { if (!currentTopJournalAnalysisId) return toast('当前分析没有保存记录', 'error'); try { await api('/api/top-journals/analyses/' + currentTopJournalAnalysisId + '/save-markdown', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('已保存至 Markdown 笔记', 'success'); } catch (e) { toast(e.message, 'error'); } });
+    $('btnTopJournalAnalysisHistory').addEventListener('click', async () => {
+      try {
+        const list = await api('/api/top-journals/analyses');
+        $('topJournalAnalysisBody').innerHTML = '<h4>历史分析记录</h4>' + (list.map((x) => '<button class="btn btn-ghost tj-analysis-history-item" data-tj-analysis-id="' + esc(x.id) + '"><b>' + esc(x.title) + '</b> · ' + new Date(x.createdAt).toLocaleString() + ' · ' + x.articleCount + ' 篇</button>').join('') || '<p>暂无历史分析。</p>');
+        $('topJournalAnalysisBody').querySelectorAll('[data-tj-analysis-id]').forEach((button) => button.addEventListener('click', () => {
+          const item = list.find((x) => x.id === button.dataset.tjAnalysisId);
+          if (!item) return; currentTopJournalAnalysisId = item.id;
+          $('topJournalAnalysisBody').innerHTML = '<p class="tj-analysis-note">历史分析 · ' + esc(new Date(item.createdAt).toLocaleString()) + (item.compressed ? ' · 本地上下文已压缩' : '') + '</p><div class="md">' + renderMarkdown(item.analysis) + '</div>';
+        }));
+      } catch (e) { toast(e.message, 'error'); }
+    });
     $('topJournalTabs').addEventListener('click', async (event) => {
       const button = event.target.closest('[data-top-journal-tab]'); if (!button) return;
       if (topJournalTab !== button.dataset.topJournalTab) topJournalSelection.clear();
@@ -5485,12 +5502,6 @@
   async function sendChat(text, { retry = false } = {}) {
     text = String(text || '').trim();
     if (!text || chatBusy) return;
-    if (!String(settings.apiKey || '').trim() && settings.aiProvider !== 'none') {
-      // 未配置 key：直接提示去设置
-      toast('请先在「AI 设置」中填写 API 密钥（硅基流动 DeepSeek）', 'error');
-      openSettingsModal();
-      return;
-    }
     // 没有活动会话时自动创建一个
     if (!activeConvId) {
       const id = await newConversation(true);
@@ -5507,7 +5518,7 @@
     let errMsg = '';
     let compressed = false;
     let lastPaint = 0;
-    const result = await streamSSE('/api/chat', { conversationId: activeConvId, content: text, retry }, {
+    const result = await streamSSE('/api/chat', { conversationId: activeConvId, content: text, retry, attachments: chatAttachments, selectedKnowledge: chatKnowledge }, {
       onEvent(event) {
         if (event.error) errMsg = event.error;
         if (event.compressed) compressed = true;
@@ -5959,6 +5970,26 @@ a { color: #176b87; }
     }
   }
 
+  async function markAllMailSeen() {
+    if (!mailCur.accountId) return toast('请先选择邮箱账户', 'error');
+    const scope = mailCur.search ? `当前文件夹（搜索结果不会影响批量范围）` : (mailCur.folderName || mailCur.folder);
+    if (!confirm(`确认将「${scope}」中的全部未读邮件标记为已读？`)) return;
+    const button = $('btnMailMarkAllRead');
+    if (button) button.disabled = true;
+    try {
+      const result = await api(`/api/mail/accounts/${mailCur.accountId}/messages/seen-all`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder: mailCur.folder }),
+      });
+      mailMessages.forEach((item) => { item.seen = true; });
+      renderMailMessages();
+      toast(result.markedCount ? `已将 ${result.markedCount} 封邮件标记为已读` : '当前文件夹没有未读邮件', 'success');
+      // 同步侧边栏未读角标，避免批量操作后仍显示旧数字。
+      checkNewMail().catch(() => {});
+    } catch (e) { toast('批量标记失败：' + e.message, 'error'); }
+    finally { if (button) button.disabled = false; }
+  }
+
   async function markMailUnread() {
     if (!mailDetail) return;
     const uid = mailDetail.uid;
@@ -6197,6 +6228,7 @@ a { color: #176b87; }
       await loadMailMessages();
       toast('已刷新', 'success');
     });
+    $('btnMailMarkAllRead').addEventListener('click', markAllMailSeen);
 
     $('mailSearch').addEventListener('keydown', (e) => {
       if (e.key !== 'Enter') return;
@@ -6344,7 +6376,7 @@ a { color: #176b87; }
       idle: ['↻', '准备检查更新', '点击下方按钮，从 GitHub Releases 检查可安装的新版本。'],
       unsupported: ['—', '当前环境不支持自动更新', status.error || '请在安装后的 Windows 桌面版中使用此功能。'],
       checking: ['↻', '正在检查新版本', '正在读取 GitHub Releases 的稳定版本信息…'],
-      available: ['↓', `发现新版本 ${available}`, '版本已通过更新清单验证，可以开始下载。'],
+      available: ['↓', `发现新版本 ${available}`, '版本已通过更新清单验证。下方会显示本次更新了哪些功能。'],
       downloading: ['↓', `正在下载 ${available}`, '可以关闭此窗口继续使用，下载会在后台进行。'],
       downloaded: ['✓', `${available} 已准备好`, '保存当前工作后，退出应用并启动安装程序。'],
       'not-available': ['✓', '当前已是最新版本', `当前使用的是 ${current}，暂未发现更高版本。`],
@@ -6364,12 +6396,21 @@ a { color: #176b87; }
       : `${percent.toFixed(1)}%`;
     $('updateSpeedText').textContent = status.bytesPerSecond ? `${formatUpdateBytes(status.bytesPerSecond)}/s` : '';
 
-    const hasNotes = Boolean(status.releaseName || status.releaseNotes);
+    // 优先显示 GitHub Release 正文；若上游未提供正文，至少列出本版本已落地的变更。
+    const knownChanges = status.availableVersion === '1.10.1' ? [
+      '应用名称更新为《一站式科研终端（经管版）》；',
+      'AI 模型兼容层支持 Chat Completions 与 Responses API 自动切换，改善测试连通但对话/翻译无返回的问题；',
+      '顶刊追踪支持 AI 分析记录持久化、历史查看、一键保存 Markdown，并在分析前压缩本地知识库上下文；',
+      'AI 助手支持上传并读取 PDF，以及选择 Markdown 笔记、研究记录、灵感孵化和收藏顶刊文章作为上下文；',
+      '邮箱支持当前文件夹一键将全部未读邮件标记为已读。',
+    ].join('\n') : '';
+    const releaseNotes = String(status.releaseNotes || '').trim() || knownChanges;
+    const hasNotes = Boolean(status.releaseName || releaseNotes);
     $('updateReleaseWrap').classList.toggle('hidden', !hasNotes);
-    $('updateReleaseName').textContent = status.releaseName || `版本 ${available}`;
-    $('updateReleaseNotes').innerHTML = status.releaseNotes
-      ? renderMarkdown(status.releaseNotes)
-      : '<p>此版本未提供发布说明。</p>';
+    $('updateReleaseName').textContent = status.releaseName || `本次更新内容（${available}）`;
+    $('updateReleaseNotes').innerHTML = releaseNotes
+      ? renderMarkdown(releaseNotes)
+      : '<p>请打开发布页查看详细变更。</p>';
 
     const actions = {
       idle: ['检查更新', 'check'], checking: ['正在检查…', ''], available: ['下载更新', 'download'],
@@ -6728,6 +6769,11 @@ a { color: #176b87; }
       } catch (err) { toast(err.message, 'error'); }
     });
 
+    $('btnChatAttach').addEventListener('click', () => $('chatPdfInput').click());
+    $('chatPdfInput').addEventListener('change', (e) => { const file = e.target.files?.[0]; if (file) uploadChatPdf(file); e.target.value = ''; });
+    $('btnChatKnowledge').addEventListener('click', openChatKnowledgePicker);
+    $('btnChatKnowledgeClose').addEventListener('click', () => $('chatKnowledgeModal').classList.add('hidden'));
+    $('btnChatKnowledgeDone').addEventListener('click', () => { $('chatKnowledgeModal').classList.add('hidden'); toast('已选择 ' + chatKnowledge.length + ' 项本地资料', 'success'); });
     // AI 助手：多会话
     document.querySelectorAll('[data-quick]').forEach((b) => b.addEventListener('click', () => sendChat(QUICK_PROMPTS[b.dataset.quick])));
     $('btnNewChat').addEventListener('click', () => newConversation());

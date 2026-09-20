@@ -24,6 +24,7 @@ let REVIEWS_FILE = path.join(DATA_DIR, 'reviews.json');
 let MARKDOWN_NOTES_FILE = path.join(DATA_DIR, 'markdown-notes.json');
 let CALENDAR_FILE = path.join(DATA_DIR, 'calendar.json');
 let TOP_JOURNALS_FILE = path.join(DATA_DIR, 'top-journals.json');
+let TOP_JOURNAL_ANALYSES_FILE = path.join(DATA_DIR, 'top-journal-analyses.json');
 
 export function configure({ dataDir }) {
   if (dataDir) {
@@ -44,6 +45,7 @@ export function configure({ dataDir }) {
     MARKDOWN_NOTES_FILE = path.join(DATA_DIR, 'markdown-notes.json');
     CALENDAR_FILE = path.join(DATA_DIR, 'calendar.json');
     TOP_JOURNALS_FILE = path.join(DATA_DIR, 'top-journals.json');
+    TOP_JOURNAL_ANALYSES_FILE = path.join(DATA_DIR, 'top-journal-analyses.json');
   }
 }
 
@@ -103,7 +105,8 @@ const ALL_DATA_FILES = [
   'calendar.json',      // 科研日历
   'worldlib.json',      // 世图下载助手历史
   'pdf-translations.json', // 全文翻译作业历史
-  'top-journals.json', // UTD 顶刊追踪：订阅、元数据、打卡与投递记录
+  'top-journals.json', // UTD
+  'top-journal-analyses.json', // 顶刊 AI 分析记录 顶刊追踪：订阅、元数据、打卡与投递记录
 ];
 
 export function dataFileNames() {
@@ -111,7 +114,7 @@ export function dataFileNames() {
   const known = new Set(ALL_DATA_FILES);
   for (const f of [DATA_FILE, SETTINGS_FILE, COLLECTIONS_FILE, PROFILE_FILE, PROJECTS_FILE,
     TASKS_FILE, NOTES_FILE, CHAT_FILE, PAPERS_FILE, MAIL_FILE, IDEAS_FILE, REVIEWS_FILE, MARKDOWN_NOTES_FILE,
-    CALENDAR_FILE, TOP_JOURNALS_FILE, CONVERSATIONS_FILE]) {
+    CALENDAR_FILE, TOP_JOURNALS_FILE, TOP_JOURNAL_ANALYSES_FILE, CONVERSATIONS_FILE]) {
     if (f) known.add(path.basename(f));
   }
   return [...known];
@@ -535,6 +538,18 @@ export function getTopJournals() {
 export function saveTopJournals(value) {
   saveFile(TOP_JOURNALS_FILE, value && typeof value === 'object' ? value : getTopJournals());
   return value;
+}
+// ---------- 顶刊 AI 分析记录 ----------
+export function listTopJournalAnalyses() { return loadFile(TOP_JOURNAL_ANALYSES_FILE, []); }
+export function getTopJournalAnalysis(id) { return listTopJournalAnalyses().find((item) => item.id === id) || null; }
+export function upsertTopJournalAnalysis(record) {
+  const list = listTopJournalAnalyses(); const index = list.findIndex((item) => item.id === record.id);
+  if (index >= 0) list[index] = { ...list[index], ...record }; else list.unshift(record);
+  saveFile(TOP_JOURNAL_ANALYSES_FILE, list.slice(0, 200)); return index >= 0 ? list[index] : record;
+}
+export function deleteTopJournalAnalysis(id) {
+  const list = listTopJournalAnalyses(); const next = list.filter((item) => item.id !== id);
+  if (next.length === list.length) return false; saveFile(TOP_JOURNAL_ANALYSES_FILE, next); return true;
 }
 // ---------- AI 助手多会话 ----------
 let CONVERSATIONS_FILE = path.join(DATA_DIR, 'conversations.json');
