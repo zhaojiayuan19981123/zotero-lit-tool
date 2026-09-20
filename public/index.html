@@ -274,7 +274,8 @@
         <nav class="top-journal-tabs" id="topJournalTabs">
           <button class="active" data-top-journal-tab="today">今日推送</button>
           <button data-top-journal-tab="latest">最新文章</button>
-          <button data-top-journal-tab="library">我的累积</button>
+          <button data-top-journal-tab="favorites">收藏</button>
+          <button data-top-journal-tab="library">历史记录</button>
           <button data-top-journal-tab="calendar">打卡日历</button>
           <button data-top-journal-tab="manage">期刊管理</button>
         </nav>
@@ -951,8 +952,8 @@
           <label class="field"><span>接口地址 Base URL *</span>
             <input id="mlBaseURL" class="tb-input" placeholder="https://api.siliconflow.cn/v1" />
           </label>
-          <label class="field"><span>API 密钥 *</span>
-            <input id="mlApiKey" class="tb-input" type="password" placeholder="sk-..." autocomplete="new-password" />
+          <label class="field"><span>API 密钥（自定义本地服务可留空）</span>
+            <input id="mlApiKey" class="tb-input" type="password" placeholder="sk-...；Ollama / 部分本地服务可留空" autocomplete="new-password" />
           </label>
           <label class="field"><span>模型名称 *</span>
             <div class="ml-model-row">
@@ -961,14 +962,39 @@
               <button type="button" id="btnMlFetch" class="tb-btn" title="填入供应商的推荐模型">常用</button>
             </div>
           </label>
-          <label class="field"><span>图片能力</span>
-            <select id="mlVisionOverride" class="tb-select">
-              <option value="auto">自动判断（按内置模型目录）</option>
-              <option value="yes">支持图片（强制按视觉模型处理）</option>
-              <option value="no">不支持图片（强制走视觉模型转述）</option>
-            </select>
-            <small class="ml-field-hint">你可以覆盖内置判断；尤其适合供应商新增模型、模型名称变更或兼容接口。</small>
-          </label>
+          <div class="prof-grid">
+            <label class="field"><span>图片能力</span>
+              <select id="mlVisionOverride" class="tb-select">
+                <option value="auto">自动判断（按内置模型目录）</option>
+                <option value="yes">支持图片（强制按视觉模型处理）</option>
+                <option value="no">不支持图片（强制走视觉模型转述）</option>
+              </select>
+            </label>
+            <label class="field"><span>响应模式</span>
+              <select id="mlStreamMode" class="tb-select">
+                <option value="auto">自动兼容（推荐）</option>
+                <option value="stream">仅流式 SSE</option>
+                <option value="nonstream">仅非流式 JSON</option>
+              </select>
+            </label>
+          </div>
+          <div class="prof-grid">
+            <label class="field"><span>系统提示兼容</span>
+              <select id="mlSystemPromptMode" class="tb-select">
+                <option value="auto">自动兼容（推荐）</option>
+                <option value="system">仅标准 system role</option>
+                <option value="user">把系统提示并入用户消息</option>
+              </select>
+            </label>
+            <label class="field"><span>鉴权方式</span>
+              <select id="mlAuthMode" class="tb-select">
+                <option value="auto">自动（有密钥才发 Bearer）</option>
+                <option value="bearer">始终 Bearer</option>
+                <option value="none">不发送 Authorization</option>
+              </select>
+            </label>
+          </div>
+          <small class="ml-field-hint">测试会验证 system role、普通 JSON 和流式响应。若本地网关不支持 SSE，请保存为“仅非流式 JSON”。</small>
           <div id="mlModelChips" class="ml-chips"></div>
           <div id="mlTestResult" class="ml-test-result hidden"></div>
           <div class="ml-editor-foot">
@@ -1134,6 +1160,19 @@
         <button id="btnEditSave" class="btn btn-primary">保存</button>
         <button id="btnEditCancel" class="btn">取消</button>
       </div>
+    </div>
+  </div>
+
+  <!-- 顶刊批量分析结果 -->
+  <div id="topJournalAnalysisModal" class="modal hidden">
+    <div class="modal-mask"></div>
+    <div class="modal-dialog modal-wide tj-analysis-modal">
+      <div class="modal-head">
+        <h3>✨ 顶刊样本分析</h3>
+        <button class="modal-close" id="btnTopJournalAnalysisClose">✕</button>
+      </div>
+      <div class="modal-body" id="topJournalAnalysisBody"></div>
+      <div class="modal-foot"><button id="btnTopJournalAnalysisDone" class="btn btn-primary">完成</button></div>
     </div>
   </div>
 

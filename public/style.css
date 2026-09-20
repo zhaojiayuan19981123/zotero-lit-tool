@@ -2121,5 +2121,25 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .tj-cal-day.today { outline:1.5px solid var(--primary); }
 .tj-cal-day i { position:absolute; right:4px; bottom:2px; font-style:normal; font-size:10px; font-weight:900; }
 .tj-calendar-card > p { margin:16px 0 0; color:var(--muted); font-size:12px; line-height:1.65; }
+
+/* 顶刊收藏、历史记录与批量分析 */
+.tj-article-card.selectable { position: relative; }
+.tj-select-label { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; cursor: pointer; }
+.tj-select-label input, .tj-bulk-toolbar input { accent-color: var(--primary); }
+.tj-article-top .tj-select-label + .tj-journal-pill { margin-left: 3px; }
+.tj-bulk-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--muted); font-size: 12px; box-shadow: var(--shadow); }
+.tj-bulk-toolbar label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.tj-bulk-toolbar span { margin-right: auto; }
+.tj-bulk-toolbar b { color: var(--primary); }
+.tj-bulk-toolbar .danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+.tj-analysis-modal { max-width: 980px; }
+.tj-analysis-note { margin: 0 0 14px; padding: 10px 12px; border: 1px solid #e9d8a8; border-radius: 8px; background: #fff9e8; color: #715b1e; font-size: 12px; line-height: 1.65; }
+#topJournalAnalysisBody { max-height: min(68vh, 720px); overflow: auto; }
+#topJournalAnalysisBody .md { color: var(--text-2); font-size: 13px; line-height: 1.75; }
+#topJournalAnalysisBody .md h1, #topJournalAnalysisBody .md h2, #topJournalAnalysisBody .md h3 { color: var(--text); margin-top: 18px; }
+#topJournalAnalysisBody .md table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#topJournalAnalysisBody .md th, #topJournalAnalysisBody .md td { border: 1px solid var(--border); padding: 7px; vertical-align: top; }
+@media (max-width: 560px) { .tj-bulk-toolbar span { width: 100%; margin-right: 0; } .tj-bulk-toolbar .tb-btn { flex: 1; } }
+
 @media (max-width:900px) { .top-journal-head { flex-direction:column; } .top-journal-stats { grid-template-columns:repeat(2,1fr); } .tj-manage-head { flex-direction:column; } .tj-preset-row { justify-content:flex-start; } .tj-journal-options { grid-template-columns:1fr; } }
 @media (max-width:560px) { .top-journal-head-actions { width:100%; } .top-journal-head-actions button { flex:1; } .tj-checkin-card { align-items:flex-start; flex-direction:column; } .tj-meta-grid { grid-template-columns:1fr; } .tj-stat { min-height:65px; } }

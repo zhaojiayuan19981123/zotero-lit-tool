@@ -73,9 +73,11 @@
   }
   // 工作台状态（首页 / 项目 / 任务 / 论文 / 研究记录 / AI 助手）
   // UTD 顶刊追踪：本地缓存来自 /api/top-journals；投递记录由后端保证同一文章不重复。
-  let topJournalData = { catalog: [], presets: {}, selectedJournalIds: [], sync: {}, summary: {}, articles: [] };
+  let topJournalData = { catalog: [], presets: {}, selectedJournalIds: [], sync: {}, summary: {}, articles: [], favoriteArticleIds: [] };
   let topJournalDelivery = null;
   let topJournalLibrary = [];
+  let topJournalFavorites = [];
+  const topJournalSelection = new Set();
   let topJournalTab = 'today';
   let topJournalLoaded = false;
   let view = 'home';
@@ -1646,6 +1648,9 @@
     $('mlBaseURL').value = p?.baseURL || providerById($('mlProvider').value)?.baseURL || '';
     $('mlModel').value = p?.model || '';
     $('mlVisionOverride').value = normalizeVisionOverride(p?.visionOverride);
+    $('mlStreamMode').value = ['auto', 'stream', 'nonstream'].includes(p?.streamMode) ? p.streamMode : 'auto';
+    $('mlSystemPromptMode').value = ['auto', 'system', 'user'].includes(p?.systemPromptMode) ? p.systemPromptMode : 'auto';
+    $('mlAuthMode').value = ['auto', 'bearer', 'none'].includes(p?.authMode) ? p.authMode : 'auto';
     $('mlTestResult').classList.add('hidden');
     renderModelChips();
     $('mlEditor').classList.remove('hidden');
@@ -1682,6 +1687,9 @@
       apiKey: $('mlApiKey').value.trim(),
       model: $('mlModel').value.trim(),
       visionOverride: normalizeVisionOverride($('mlVisionOverride').value),
+      streamMode: $('mlStreamMode').value,
+      systemPromptMode: $('mlSystemPromptMode').value,
+      authMode: $('mlAuthMode').value,
     };
   }
 
@@ -1690,7 +1698,7 @@
     if (!f.baseURL) { toast('请填写接口地址 Base URL', 'error'); return; }
     if (!f.model) { toast('请填写模型名称', 'error'); return; }
     const editing = editingProfileId ? profiles.find((p) => p.id === editingProfileId) : null;
-    if (!editing && !f.apiKey) { toast('请填写 API 密钥', 'error'); return; }
+    if (!editing && !f.apiKey && f.provider !== 'custom') { toast('请填写 API 密钥；只有“自定义 / 本地部署”可以留空', 'error'); return; }
 
     if (editing) {
       editing.provider = f.provider;
@@ -1698,6 +1706,9 @@
       editing.baseURL = f.baseURL;
       editing.model = f.model;
       editing.visionOverride = f.visionOverride;
+      editing.streamMode = f.streamMode;
+      editing.systemPromptMode = f.systemPromptMode;
+      editing.authMode = f.authMode;
       if (f.apiKey) editing.apiKey = f.apiKey; // 留空 = 保持原密钥
     } else {
       const p = { id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), ...f, createdAt: new Date().toISOString() };
@@ -1776,7 +1787,7 @@
     const f = currentMlForm();
     const editing = editingProfileId ? profiles.find((p) => p.id === editingProfileId) : null;
     const apiKey = f.apiKey || editing?.apiKey || '';
-    if (!apiKey) { toast('请先填写 API 密钥（或先保存该配置）', 'error'); return; }
+    if (!apiKey && f.provider !== 'custom') { toast('请先填写 API 密钥（自定义本地服务可留空）', 'error'); return; }
     box.className = 'ml-test-result';
     box.textContent = '正在测试连接…';
     const btn = $('btnMlTest');
@@ -1784,12 +1795,16 @@
     try {
       const r = await api('/api/models/test', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: f.provider, baseURL: f.baseURL, apiKey, model: f.model }),
+        body: JSON.stringify({ provider: f.provider, baseURL: f.baseURL, apiKey, model: f.model, streamMode: f.streamMode, systemPromptMode: f.systemPromptMode, authMode: f.authMode }),
       });
       box.className = 'ml-test-result ' + (r.ok ? 'ok' : 'err');
+      if (r.ok) {
+        if (r.normalizedBaseURL) $('mlBaseURL').value = r.normalizedBaseURL;
+        if (r.mode === 'stream' || r.mode === 'nonstream') $('mlStreamMode').value = r.mode;
+      }
       box.textContent = r.ok
-        ? `✅ 连接成功（${r.cost} ms）模型回复：${r.reply}`
-        : `❌ 连接失败（${r.cost} ms）：${r.error}`;
+        ? `✅ 已验证（${r.cost} ms，${r.mode === 'stream' ? '流式可用' : '非流式兼容'}）：${r.message || '模型回复：' + r.reply}`
+        : `❌ 测试失败（${r.cost} ms）：${r.error}`;
     } catch (e) {
       box.className = 'ml-test-result err';
       box.textContent = '❌ ' + e.message;
@@ -4013,7 +4028,8 @@
     const date = new Date(`${value}T12:00:00`);
     return Number.isNaN(date.getTime()) ? esc(value) : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   }
-  function tjArticleCard(article, { delivered = false } = {}) {
+  function tjFavoriteIds() { return new Set(topJournalData.favoriteArticleIds || []); }
+  function tjArticleCard(article, { delivered = false, selectable = false } = {}) {
     const journal = tjJournal(article.journalId);
     const translated = article.translations?.zh || {};
     const originalUrl = tjExternalUrl(article.originalUrl);
@@ -4021,19 +4037,22 @@
     const authors = Array.isArray(article.authors) && article.authors.length ? article.authors.join(' · ') : '作者信息暂缺';
     const affiliations = Array.isArray(article.affiliations) && article.affiliations.length ? article.affiliations.join('；') : '单位信息暂未由数据源提供';
     const sourceLine = [article.volume && `Vol. ${esc(article.volume)}`, article.issue && `No. ${esc(article.issue)}`, article.pages && `pp. ${esc(article.pages)}`].filter(Boolean).join(' · ');
-    return `<article class="tj-article-card" data-tj-card="${esc(article.id)}">
-      <div class="tj-article-top"><span class="tj-journal-pill">${esc(journal?.shortTitle || article.journal || 'UTD')}</span><span class="tj-pub-date">${tjDate(article.publishedAt)}</span></div>
+    const favorite = article.favorite || tjFavoriteIds().has(article.id);
+    return `<article class="tj-article-card${selectable ? ' selectable' : ''}" data-tj-card="${esc(article.id)}">
+      <div class="tj-article-top">${selectable ? `<label class="tj-select-label"><input type="checkbox" data-tj-select="${esc(article.id)}" ${topJournalSelection.has(article.id) ? 'checked' : ''}><span>选择</span></label>` : ''}<span class="tj-journal-pill">${esc(journal?.shortTitle || article.journal || 'UTD')}</span><span class="tj-pub-date">${tjDate(article.publishedAt)}</span></div>
       <h3>${esc(article.title || '未命名文章')}</h3>
       ${translated.title ? `<div class="tj-title-translation">${esc(translated.title)}</div>` : ''}
       <dl class="tj-meta-grid">
         <div><dt>作者</dt><dd>${esc(authors)}</dd></div>
         <div><dt>单位</dt><dd>${esc(affiliations)}</dd></div>
         <div><dt>期刊</dt><dd>${esc(article.journal || journal?.title || '')}${sourceLine ? ` · ${sourceLine}` : ''}</dd></div>
+        <div><dt>发表日期</dt><dd>${tjDate(article.publishedAt)}</dd></div>
         <div><dt>DOI</dt><dd>${article.doi ? `<a href="https://doi.org/${encodeURIComponent(article.doi)}" target="_blank" rel="noopener noreferrer">${esc(article.doi)}</a>` : '暂缺'}</dd></div>
       </dl>
       <div class="tj-abstract"><b>摘要</b><p>${esc(article.abstract || '该文章的公开元数据未包含摘要；可点击原文链接查看出版社页面。')}</p></div>
       ${translated.abstract ? `<div class="tj-abstract tj-translation"><b>中文翻译</b><p>${esc(translated.abstract)}</p></div>` : ''}
       <div class="tj-card-actions">
+        <button class="tb-btn" data-tj-favorite="${esc(article.id)}" data-tj-favorite-value="${favorite ? 'false' : 'true'}">${favorite ? '★ 已收藏' : '☆ 收藏'}</button>
         <button class="tb-btn" data-tj-translate="${esc(article.id)}">🈯 ${translated.title || translated.abstract ? '查看中文翻译' : '翻译题目与摘要'}</button>
         ${originalUrl ? `<a class="tb-btn tj-link" href="${esc(originalUrl)}" target="_blank" rel="noopener noreferrer" data-tj-opened="${esc(article.id)}">↗ 原文链接</a>` : ''}
         ${!originalUrl && publisherUrl ? `<a class="tb-btn tj-link" href="${esc(publisherUrl)}" target="_blank" rel="noopener noreferrer">↗ 期刊主页</a>` : ''}
@@ -4050,7 +4069,7 @@
       <div class="tj-stat"><span>已订阅期刊</span><b>${selected}<small> / 24</small></b></div>
       <div class="tj-stat"><span>今日状态</span><b>${summary.todayCheckedIn ? `已领取 ${todayCount || ''}` : '待签到'}</b></div>
       <div class="tj-stat"><span>连续签到</span><b>${Number(summary.streak || 0)}<small> 天</small></b></div>
-      <div class="tj-stat"><span>累计文章</span><b>${Number(summary.libraryCount || 0)}<small> 篇</small></b></div>`;
+      <div class="tj-stat"><span>历史记录</span><b>${Number(summary.libraryCount || 0)}<small> 篇</small></b></div>`;
     const badge = $('navTopJournalBadge');
     if (badge) {
       const show = selected > 0 && !summary.todayCheckedIn;
@@ -4070,6 +4089,10 @@
     const result = await api('/api/top-journals/library');
     topJournalLibrary = result.articles || [];
   }
+  async function loadTopJournalFavorites() {
+    const result = await api('/api/top-journals/favorites');
+    topJournalFavorites = result.articles || [];
+  }
   function renderTopJournalToday() {
     if (!topJournalData.selectedJournalIds.length) {
       return tjEmpty('🏛️', '先选择要追踪的 UTD 期刊', '进入“期刊管理”勾选期刊或一键应用研究方向预设。');
@@ -4086,9 +4109,20 @@
     if (!articles.length) return tjEmpty('↻', '还没有同步文章', '请点击“同步最新文章”；同步只采集公开元数据、摘要、DOI 与出版社链接。');
     return `<div class="tj-section-note">按公开发表日期排序。部分出版社会延迟向 Crossref 补充摘要、机构或正式卷期信息。</div><div class="tj-article-list">${articles.map((article) => tjArticleCard(article)).join('')}</div>`;
   }
+  function tjBulkToolbar(kind, articles) {
+    const count = topJournalSelection.size;
+    const action = kind === 'favorites'
+      ? `<button class="tb-btn" data-tj-remove-favorites ${count ? '' : 'disabled'}>取消收藏</button>`
+      : `<button class="tb-btn danger" data-tj-delete-history ${count ? '' : 'disabled'}>从历史记录删除</button>`;
+    return `<div class="tj-bulk-toolbar"><label><input type="checkbox" data-tj-select-visible ${articles.length && articles.every((article) => topJournalSelection.has(article.id)) ? 'checked' : ''}> 全选当前列表</label><span>已选 <b>${count}</b> 篇</span><button class="tb-btn accent" data-tj-analyze ${count ? '' : 'disabled'}>✨ AI 分析已选</button>${action}</div>`;
+  }
+  function renderTopJournalFavorites() {
+    if (!topJournalFavorites.length) return tjEmpty('☆', '还没有收藏文章', '在今日推送、最新文章或历史记录中点击“收藏”，它将进入 AI 助手的本地知识库。');
+    return `${tjBulkToolbar('favorites', topJournalFavorites)}<div class="tj-section-note">收藏文章会作为摘要级证据纳入 AI 助手回答；它不等同于已读取全文。</div><div class="tj-article-list">${topJournalFavorites.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
+  }
   function renderTopJournalLibrary() {
-    if (!topJournalLibrary.length) return tjEmpty('📚', '个人顶刊文献库尚为空', '完成一次签到后，当天领取的文章会永久沉淀在这里。');
-    return `<div class="tj-section-note">累计 ${topJournalLibrary.length} 篇。这里保存的是你已经领取过的文章记录，不会因后续每日投递而覆盖。</div><div class="tj-article-list">${topJournalLibrary.map((article) => tjArticleCard(article)).join('')}</div>`;
+    if (!topJournalLibrary.length) return tjEmpty('🕘', '历史记录尚为空', '完成一次签到后，已领取的文章会保存在这里；删除只会从该视图隐藏，仍会保留去重记录。');
+    return `${tjBulkToolbar('history', topJournalLibrary)}<div class="tj-section-note">共 ${topJournalLibrary.length} 篇历史记录。批量删除不会让文章再次被推送；若已收藏，仍可在“收藏”中保留和供 AI 助手引用。</div><div class="tj-article-list">${topJournalLibrary.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
   }
   function renderTopJournalCalendar() {
     const now = new Date();
@@ -4102,7 +4136,7 @@
       const active = checked.has(key); const today = key === todayStr();
       return `<span class="tj-cal-day${active ? ' checked' : ''}${today ? ' today' : ''}" title="${active ? '已签到' : '未签到'}"><b>${day}</b>${active ? '<i>✓</i>' : ''}</span>`;
     }).join('');
-    return `<div class="tj-calendar-card"><div class="tj-calendar-summary"><div><b>${Number(topJournalData.summary?.streak || 0)} 天</b><span>当前连续签到</span></div><div><b>${checked.size} 天</b><span>本月已签到</span></div><div><b>${Number(topJournalData.summary?.libraryCount || 0)} 篇</b><span>累计文章</span></div></div><h3>${year} 年 ${month + 1} 月</h3><div class="tj-calendar-week"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div><div class="tj-calendar-grid">${blanks}${cells}</div><p>未签到不会消耗文章队列；下次签到时，系统仍会从你未收到过的文章中优先选择最新内容。</p></div>`;
+    return `<div class="tj-calendar-card"><div class="tj-calendar-summary"><div><b>${Number(topJournalData.summary?.streak || 0)} 天</b><span>当前连续签到</span></div><div><b>${checked.size} 天</b><span>本月已签到</span></div><div><b>${Number(topJournalData.summary?.libraryCount || 0)} 篇</b><span>历史记录</span></div></div><h3>${year} 年 ${month + 1} 月</h3><div class="tj-calendar-week"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div><div class="tj-calendar-grid">${blanks}${cells}</div><p>未签到不会消耗文章队列；下次签到时，系统仍会从你未收到过的文章中优先选择最新内容。</p></div>`;
   }
   function renderTopJournalManage() {
     const selected = new Set(topJournalData.selectedJournalIds || []);
@@ -4120,7 +4154,8 @@
     const content = $('topJournalContent');
     if (topJournalTab === 'today') content.innerHTML = renderTopJournalToday();
     else if (topJournalTab === 'latest') content.innerHTML = renderTopJournalLatest();
-    else if (topJournalTab === 'library') { if (!topJournalLibrary.length) await loadTopJournalLibrary(); content.innerHTML = renderTopJournalLibrary(); }
+    else if (topJournalTab === 'favorites') { await loadTopJournalFavorites(); content.innerHTML = renderTopJournalFavorites(); }
+    else if (topJournalTab === 'library') { await loadTopJournalLibrary(); content.innerHTML = renderTopJournalLibrary(); }
     else if (topJournalTab === 'calendar') content.innerHTML = renderTopJournalCalendar();
     else content.innerHTML = renderTopJournalManage();
   }
@@ -4129,6 +4164,7 @@
     topJournalData = { ...topJournalData, ...result };
     topJournalDelivery = null;
     topJournalLibrary = [];
+    topJournalSelection.clear();
     renderTopJournals();
   }
   async function topJournalSync() {
@@ -4150,21 +4186,81 @@
       topJournalData.summary = result.summary || topJournalData.summary;
       topJournalData.articles = [...(result.articles || []), ...(topJournalData.articles || [])].filter((article, index, list) => list.findIndex((item) => item.id === article.id) === index);
       topJournalLibrary = [];
+      topJournalSelection.clear();
       topJournalTab = 'today';
-      toast(result.alreadyCheckedIn ? '今天已经签到，已打开原投递文章' : `签到成功，已领取 ${result.articles?.length || 0} 篇文章`, 'success');
+      const added = Number(result.addedCount || 0);
+      toast(result.alreadyCheckedIn ? (added ? `今天已签到，已为新增订阅补充 ${added} 篇不重复文章` : '今天已经签到，当前订阅没有可补充的新文章') : `签到成功，已领取 ${result.articles?.length || 0} 篇文章`, 'success');
       await renderTopJournals();
     } catch (error) { toast(error.message, 'error'); }
     finally { button.disabled = false; button.textContent = original; }
+  }
+  function tjReplaceArticle(article) {
+    const replace = (item) => item?.id === article.id ? { ...item, ...article } : item;
+    topJournalData.articles = (topJournalData.articles || []).map(replace);
+    if (topJournalDelivery) topJournalDelivery.articles = (topJournalDelivery.articles || []).map(replace);
+    topJournalLibrary = topJournalLibrary.map(replace);
+    topJournalFavorites = topJournalFavorites.map(replace);
+  }
+  async function topJournalFavorite(id, favorite) {
+    try {
+      const result = await api(`/api/top-journals/articles/${encodeURIComponent(id)}/favorite`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ favorite }) });
+      topJournalData.favoriteArticleIds = result.favoriteArticleIds || [];
+      topJournalData.summary = result.summary || topJournalData.summary;
+      tjReplaceArticle(result.article);
+      if (favorite) topJournalFavorites = [result.article, ...topJournalFavorites.filter((article) => article.id !== id)];
+      else topJournalFavorites = topJournalFavorites.filter((article) => article.id !== id);
+      await renderTopJournals();
+      toast(favorite ? '已收藏，并已纳入 AI 助手的顶刊知识库' : '已取消收藏', 'success');
+    } catch (error) { toast(error.message, 'error'); }
+  }
+  async function topJournalRemoveFavorites() {
+    const articleIds = [...topJournalSelection];
+    if (!articleIds.length || !confirm(`确定取消收藏所选 ${articleIds.length} 篇文章吗？`)) return;
+    try {
+      const result = await api('/api/top-journals/favorites', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ articleIds }) });
+      topJournalData.favoriteArticleIds = result.favoriteArticleIds || [];
+      topJournalData.summary = result.summary || topJournalData.summary;
+      topJournalFavorites = topJournalFavorites.filter((article) => !topJournalSelection.has(article.id));
+      const favoriteIds = new Set(topJournalData.favoriteArticleIds);
+      const mark = (article) => ({ ...article, favorite: favoriteIds.has(article.id) });
+      topJournalData.articles = (topJournalData.articles || []).map(mark);
+      topJournalLibrary = topJournalLibrary.map(mark);
+      topJournalSelection.clear();
+      await renderTopJournals();
+      toast(`已取消收藏 ${result.removedCount || 0} 篇文章`, 'success');
+    } catch (error) { toast(error.message, 'error'); }
+  }
+  async function topJournalDeleteHistory() {
+    const articleIds = [...topJournalSelection];
+    if (!articleIds.length || !confirm(`确定从历史记录删除所选 ${articleIds.length} 篇文章吗？这不会使文章再次被推送。`)) return;
+    try {
+      const result = await api('/api/top-journals/history', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ articleIds }) });
+      topJournalData.summary = result.summary || topJournalData.summary;
+      topJournalLibrary = topJournalLibrary.filter((article) => !topJournalSelection.has(article.id));
+      topJournalSelection.clear();
+      await renderTopJournals();
+      toast(`已从历史记录删除 ${result.deletedCount || 0} 篇文章；投递去重记录仍会保留`, 'success');
+    } catch (error) { toast(error.message, 'error'); }
+  }
+  async function topJournalAnalyze() {
+    const articleIds = [...topJournalSelection];
+    if (!articleIds.length) return toast('请先选择要分析的文章', 'error');
+    const trigger = document.querySelector('[data-tj-analyze]'); const original = trigger?.textContent;
+    if (trigger) { trigger.disabled = true; trigger.textContent = 'AI 分析中…'; }
+    try {
+      const result = await api('/api/top-journals/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ articleIds }) });
+      $('topJournalAnalysisBody').innerHTML = `<p class="tj-analysis-note">基于本次选中的 ${result.articleCount} 篇文章及本地笔记/研究记录/灵感/论文生成。结论仅代表所选样本，不代表全部 UTD24 期刊。</p><div class="md">${renderMarkdown(result.analysis)}</div>`;
+      $('topJournalAnalysisModal').classList.remove('hidden');
+    } catch (error) { toast(error.message, 'error'); }
+    finally { if (trigger) { trigger.disabled = false; trigger.textContent = original; } }
   }
   async function translateTopJournalArticle(id) {
     const button = document.querySelector(`[data-tj-translate="${CSS.escape(id)}"]`);
     if (button) { button.disabled = true; button.textContent = '翻译中…'; }
     try {
       const result = await api(`/api/top-journals/articles/${encodeURIComponent(id)}/translate`, { method: 'POST' });
-      const apply = (article) => article?.id === id ? { ...article, translations: { ...(article.translations || {}), zh: result.translation } } : article;
-      topJournalData.articles = (topJournalData.articles || []).map(apply);
-      if (topJournalDelivery) topJournalDelivery.articles = (topJournalDelivery.articles || []).map(apply);
-      topJournalLibrary = topJournalLibrary.map(apply);
+      const article = (topJournalData.articles || []).find((item) => item.id === id) || (topJournalLibrary || []).find((item) => item.id === id) || (topJournalFavorites || []).find((item) => item.id === id) || { id };
+      tjReplaceArticle({ ...article, translations: { ...(article.translations || {}), zh: result.translation } });
       await renderTopJournals();
       toast(result.cached ? '已显示已缓存翻译' : '题目与摘要已翻译', 'success');
     } catch (error) { toast(error.message, 'error'); if (button) { button.disabled = false; button.textContent = '🈯 翻译题目与摘要'; } }
@@ -4172,10 +4268,21 @@
   function bindTopJournals() {
     $('btnTopJournalSync').addEventListener('click', topJournalSync);
     $('btnTopJournalCheckin').addEventListener('click', topJournalCheckin);
-    $('topJournalTabs').addEventListener('click', async (event) => { const button = event.target.closest('[data-top-journal-tab]'); if (!button) return; topJournalTab = button.dataset.topJournalTab; await renderTopJournals(); });
+    $('btnTopJournalAnalysisClose').addEventListener('click', () => $('topJournalAnalysisModal').classList.add('hidden'));
+    $('btnTopJournalAnalysisDone').addEventListener('click', () => $('topJournalAnalysisModal').classList.add('hidden'));
+    $('topJournalTabs').addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-top-journal-tab]'); if (!button) return;
+      if (topJournalTab !== button.dataset.topJournalTab) topJournalSelection.clear();
+      topJournalTab = button.dataset.topJournalTab;
+      await renderTopJournals();
+    });
     $('topJournalContent').addEventListener('click', async (event) => {
       const checkin = event.target.closest('[data-tj-checkin]'); if (checkin) return topJournalCheckin();
       const translateButton = event.target.closest('[data-tj-translate]'); if (translateButton) return translateTopJournalArticle(translateButton.dataset.tjTranslate);
+      const favorite = event.target.closest('[data-tj-favorite]'); if (favorite) return topJournalFavorite(favorite.dataset.tjFavorite, favorite.dataset.tjFavoriteValue === 'true');
+      const removeFavorites = event.target.closest('[data-tj-remove-favorites]'); if (removeFavorites) return topJournalRemoveFavorites();
+      const deleteHistory = event.target.closest('[data-tj-delete-history]'); if (deleteHistory) return topJournalDeleteHistory();
+      const analyze = event.target.closest('[data-tj-analyze]'); if (analyze) return topJournalAnalyze();
       const open = event.target.closest('[data-tj-opened]'); if (open) api(`/api/top-journals/articles/${encodeURIComponent(open.dataset.tjOpened)}/opened`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: todayStr() }) }).catch(() => {});
       const preset = event.target.closest('[data-tj-preset]'); if (preset) return saveTopJournalSubscriptions(topJournalData.presets[preset.dataset.tjPreset]?.journalIds || []);
       const all = event.target.closest('[data-tj-select-all]'); if (all) return saveTopJournalSubscriptions(topJournalData.catalog.map((journal) => journal.id));
@@ -4187,6 +4294,17 @@
       }
     });
     $('topJournalContent').addEventListener('change', (event) => {
+      const select = event.target.closest('[data-tj-select]');
+      if (select) {
+        select.checked ? topJournalSelection.add(select.dataset.tjSelect) : topJournalSelection.delete(select.dataset.tjSelect);
+        return renderTopJournals();
+      }
+      const selectVisible = event.target.closest('[data-tj-select-visible]');
+      if (selectVisible) {
+        const ids = [...$('topJournalContent').querySelectorAll('[data-tj-select]')].map((input) => input.dataset.tjSelect);
+        ids.forEach((id) => selectVisible.checked ? topJournalSelection.add(id) : topJournalSelection.delete(id));
+        return renderTopJournals();
+      }
       const checkbox = event.target.closest('[data-tj-journal]'); if (!checkbox) return;
       const ids = new Set(topJournalData.selectedJournalIds || []);
       checkbox.checked ? ids.add(checkbox.dataset.tjJournal) : ids.delete(checkbox.dataset.tjJournal);

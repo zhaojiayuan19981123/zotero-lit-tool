@@ -19,7 +19,7 @@ import { registerPdfTranslateRoutes } from './src/pdfTranslate/routes.js';
 import { DEFAULT_PDF_TRANSLATE_OPTIONS } from './src/pdfTranslate/index.js';
 import { pruneConnections } from './src/mail.js';
 import * as catalog from './src/modelCatalog.js';
-import { UTD_JOURNALS, JOURNAL_PRESETS, createTopJournalState, syncJournals, checkInAndCreateDelivery, deliveryArticles, recentArticles, calendarSummary, markArticleOpened } from './src/topJournals.js';
+import { UTD_JOURNALS, JOURNAL_PRESETS, createTopJournalState, syncJournals, checkInAndCreateDelivery, deliveryArticles, recentArticles, historyArticles, deliveredArticleIds, setArticleFavorite, removeFavorites, removeHistoryArticles, calendarSummary, markArticleOpened } from './src/topJournals.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_UPLOAD_DIR = path.join(__dirname, 'uploads');
@@ -150,44 +150,166 @@ function sseEnd(res) {
   try { res.write('data: [DONE]\n\n'); res.end(); } catch (_) { /* ignore */ }
 }
 
-// 把上游的 OpenAI 兼容流「逐块」转发给浏览器。
-// onDelta 可用于累积文本；onFinish 拿到完整结果。
-// 返回 { aborted, full }。aborted=true 表示对端（用户）主动中断。
-async function pipeLLMStream(up, res, { onDelta } = {}) {
-  const reader = up.body.getReader();
+// ---------- OpenAI 兼容模型调用 ----------
+// 兼容问题的核心不是“能否连上 TCP”，而是每个网关对 Base URL、鉴权、system role、SSE 的实现差异。
+// 统一在这里处理，避免“测试成功、实际对话/翻译无返回”的假阳性。
+const LLM_REQUEST_TIMEOUT_MS = 90000;
+
+function completionText(data) {
+  const content = data?.choices?.[0]?.delta?.content ?? data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) return content.map((part) => typeof part === 'string' ? part : (part?.text || '')).join('');
+  return '';
+}
+
+function isSystemRoleError(detail) {
+  return /system.*(?:role|message)|(?:role|message).*system|unsupported.*system|invalid.*system/i.test(String(detail || ''));
+}
+
+function flattenSystemMessages(messages) {
+  const system = (messages || []).filter((m) => m?.role === 'system').map((m) => typeof m.content === 'string' ? m.content : '').filter(Boolean).join('\n\n');
+  const rest = (messages || []).filter((m) => m?.role !== 'system').map((m) => ({ ...m }));
+  if (!system) return rest;
+  const prefix = `【任务要求】\n${system}\n\n`;
+  const firstUser = rest.find((m) => m.role === 'user');
+  if (!firstUser) return [{ role: 'user', content: prefix }, ...rest];
+  if (typeof firstUser.content === 'string') firstUser.content = prefix + firstUser.content;
+  else if (Array.isArray(firstUser.content)) firstUser.content = [{ type: 'text', text: prefix }, ...firstUser.content];
+  else firstUser.content = prefix + String(firstUser.content || '');
+  return rest;
+}
+
+function modelHeaders(profile) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (profile?.authMode !== 'none' && profile?.apiKey) headers.Authorization = `Bearer ${profile.apiKey}`;
+  return headers;
+}
+
+function modelEndpoint(profile) {
+  const base = catalog.normalizeBaseURL(profile?.baseURL || '');
+  if (!base) throw new Error('当前模型缺少 Base URL，请到 AI 设置中补全');
+  return base + '/chat/completions';
+}
+
+async function fetchModelCompletion(profile, payload, { stream = false, timeoutMs = LLM_REQUEST_TIMEOUT_MS } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let up;
+  try {
+    const messages = profile?.systemPromptMode === 'user' ? flattenSystemMessages(payload.messages) : payload.messages;
+    up = await fetch(modelEndpoint(profile), {
+      method: 'POST', headers: modelHeaders(profile), signal: controller.signal,
+      body: JSON.stringify({ ...payload, messages, stream }),
+    });
+    // 某些本地 OpenAI 兼容层不能处理 role=system。auto 下仅对这一类明确错误降级。
+    if (!up.ok && profile?.systemPromptMode === 'auto') {
+      const detail = await up.text().catch(() => '');
+      if (isSystemRoleError(detail)) {
+        up = await fetch(modelEndpoint(profile), {
+          method: 'POST', headers: modelHeaders(profile), signal: controller.signal,
+          body: JSON.stringify({ ...payload, messages: flattenSystemMessages(payload.messages), stream }),
+        });
+      } else {
+        up._litErrorText = detail;
+      }
+    }
+    return { up, cancel: () => clearTimeout(timer) };
+  } catch (e) {
+    clearTimeout(timer);
+    if (e?.name === 'AbortError') throw new Error(`AI 请求超时（${Math.round(timeoutMs / 1000)} 秒）。请确认本地模型服务已启动、模型已加载，或检查网关地址`);
+    throw e;
+  }
+}
+
+async function readLLMResponse(up, { onDelta } = {}) {
+  const contentType = String(up.headers?.get?.('content-type') || '').toLowerCase();
+  let full = '';
+  const emit = (delta) => {
+    if (!delta) return;
+    full += delta;
+    if (onDelta) onDelta(delta);
+  };
+  if (contentType.includes('application/json')) {
+    const raw = await up.text();
+    let data;
+    try { data = JSON.parse(raw); } catch (_) { throw new Error(`模型返回的不是有效 JSON：${raw.slice(0, 200) || '空响应'}`); }
+    if (data?.error) throw new Error(typeof data.error === 'string' ? data.error : (data.error.message || '模型返回错误'));
+    emit(completionText(data));
+    return { full, aborted: false, responseType: 'json' };
+  }
+  const reader = up.body?.getReader?.();
+  if (!reader) throw new Error('模型没有返回可读取的响应正文');
   const decoder = new TextDecoder();
   let buf = '';
-  let full = '';
   let aborted = false;
+  const consume = (line) => {
+    const trimmed = String(line || '').trim();
+    if (!trimmed.startsWith('data:')) return;
+    const payload = trimmed.slice(5).trim();
+    if (!payload || payload === '[DONE]') return;
+    try {
+      const data = JSON.parse(payload);
+      if (data?.error) throw new Error(typeof data.error === 'string' ? data.error : (data.error.message || '模型返回错误'));
+      emit(completionText(data));
+    } catch (e) {
+      // SSE 常会把 JSON 拆块；只有明确模型错误才抛出，其他坏行等后续块。
+      if (e?.message && /模型返回错误/.test(e.message)) throw e;
+    }
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
+      const lines = buf.split(/\r?\n/);
       buf = lines.pop() || '';
-      for (const line of lines) {
-        const s = line.trim();
-        if (!s.startsWith('data:')) continue;
-        const payload = s.slice(5).trim();
-        if (payload === '[DONE]') continue;
-        try {
-          const j = JSON.parse(payload);
-          const delta = j.choices?.[0]?.delta?.content || '';
-          if (delta) {
-            full += delta;
-            sseSend(res, { delta });
-            if (onDelta) onDelta(delta);
-          }
-        } catch (_) { /* 忽略不完整行 */ }
-      }
+      for (const line of lines) consume(line);
     }
+    buf += decoder.decode();
+    if (buf.trim()) consume(buf);
   } catch (e) {
-    // 用户点「停止」时 socket 会被关闭，这里按正常中断处理，不当成错误
     if (e?.name === 'AbortError' || /aborted|socket|premature/i.test(String(e?.message || ''))) aborted = true;
     else throw e;
   }
-  return { aborted, full };
+  return { full, aborted, responseType: 'sse' };
+}
+
+// 把上游的 OpenAI 兼容流逐块转发给浏览器，也接受“stream=true 却返回普通 JSON”的兼容网关。
+async function pipeLLMStream(up, res, { onDelta } = {}) {
+  return readLLMResponse(up, { onDelta: (delta) => { sseSend(res, { delta }); onDelta?.(delta); } });
+}
+
+async function streamModelResponse(profile, payload, res, { onDelta } = {}) {
+  const preferNonStream = profile?.streamMode === 'nonstream';
+  let request = await fetchModelCompletion(profile, payload, { stream: !preferNonStream });
+  try {
+    if (!request.up.ok) {
+      const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
+      // auto 模式：服务不支持 stream 时改为普通 JSON；强制流式模式则直接报告问题。
+      if (!preferNonStream && profile?.streamMode === 'auto') {
+        request.cancel();
+        request = await fetchModelCompletion(profile, payload, { stream: false });
+      } else {
+        throw new Error(`AI 接口返回 ${request.up.status}：${clip(detail, 300)}`);
+      }
+    }
+    if (!request.up.ok) {
+      const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
+      throw new Error(`AI 接口返回 ${request.up.status}：${clip(detail, 300)}`);
+    }
+    let result = await pipeLLMStream(request.up, res, { onDelta });
+    // 非标准网关常在 stream=true 下直接断开或没有 token；auto 退回普通 JSON，前端仍能收到内容。
+    if (!result.full.trim() && !result.aborted && !preferNonStream && profile?.streamMode === 'auto') {
+      request.cancel();
+      request = await fetchModelCompletion(profile, payload, { stream: false });
+      if (!request.up.ok) {
+        const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
+        throw new Error(`AI 流式响应为空，非流式兜底也失败（${request.up.status}）：${clip(detail, 300)}`);
+      }
+      result = await pipeLLMStream(request.up, res, { onDelta });
+    }
+    return result;
+  } finally { request.cancel?.(); }
 }
 
 // ---------- 当前生效的模型配置 ----------
@@ -283,29 +405,26 @@ async function describeImages(vm, messages) {
     },
   ];
   try {
-    // 加超时：视觉模型偶发无响应时不能把整轮对话挂死，60s 后放弃并明确告知
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 60000);
-    const up = await fetch(vm.baseURL + '/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${vm.apiKey}` },
-      body: JSON.stringify({ model: vm.model, messages: visionMessages, stream: false, temperature: 0.2, max_tokens: 2048 }),
-      signal: ctrl.signal,
-    }).finally(() => clearTimeout(timer));
-    if (!up.ok) {
-      const errText = await up.text().catch(() => '');
-      // 这里失败通常是「指定的模型其实不是视觉模型」或「Key 无效」，都要给出可操作的指引
-      const hint = /image|vision|multimodal|content/i.test(errText)
-        ? `（「${vm.model}」看起来不接受图片输入，请在「AI 设置 → 两段式看图」里换成真正的视觉模型，例如 zai-org/GLM-4.5V 或 Qwen/Qwen3.8-27B）`
-        : /401|403|invalid.*key|unauthorized/i.test(errText) ? '（视觉模型的 API 密钥可能无效，请到「AI 设置」里检查）' : '';
-      return { error: `视觉模型「${vm.model}」调用失败（${up.status}）：${clip(errText, 200)}${hint}` };
-    }
-    const data = await up.json().catch(() => ({}));
-    const text = String(data?.choices?.[0]?.message?.content || '').trim();
-    if (!text) return { error: `视觉模型「${vm.model}」没有返回图片描述，请稍后重试或更换模型` };
-    return { text: clip(text, 6000) };  } catch (e) {
-    const aborted = e?.name === 'AbortError' || /abort/i.test(String(e?.message || ''));
-    return { error: aborted
+    // 复用统一兼容层：本地模型可无鉴权、可拒绝 system role，且确保完整 Base URL 只拼接一次。
+    const request = await fetchModelCompletion(vm, {
+      model: vm.model, messages: visionMessages, temperature: 0.2, max_tokens: 2048,
+    }, { stream: false, timeoutMs: 60000 });
+    try {
+      if (!request.up.ok) {
+        const errText = request.up._litErrorText ?? await request.up.text().catch(() => '');
+        // 这里失败通常是「指定的模型其实不是视觉模型」或「Key 无效」，都要给出可操作的指引
+        const hint = /image|vision|multimodal|content/i.test(errText)
+          ? `（「${vm.model}」看起来不接受图片输入，请在「AI 设置 → 两段式看图」里换成真正的视觉模型，例如 zai-org/GLM-4.5V 或 Qwen/Qwen3.8-27B）`
+          : /401|403|invalid.*key|unauthorized/i.test(errText) ? '（视觉模型的 API 密钥可能无效，请到「AI 设置」里检查）' : '';
+        return { error: `视觉模型「${vm.model}」调用失败（${request.up.status}）：${clip(errText, 200)}${hint}` };
+      }
+      const result = await readLLMResponse(request.up);
+      const text = result.full.trim();
+      if (!text) return { error: `视觉模型「${vm.model}」没有返回图片描述，请稍后重试或更换模型` };
+      return { text: clip(text, 6000) };
+    } finally { request.cancel(); }
+  } catch (e) {
+    return { error: /超时|abort/i.test(String(e?.message || ''))
       ? `调用视觉模型「${vm.model}」超时（60 秒），请检查网络或更换一个视觉模型`
       : '调用视觉模型失败：' + e.message };
   }
@@ -759,6 +878,15 @@ export function createApp({
 
   // ---------- UTD 顶刊追踪 ----------
   // 采集的是公开书目信息、摘要、DOI 与出版社原文页；不下载或分发受版权保护的全文。
+  function topJournalArticlePayload(state, article) {
+    return {
+      ...article,
+      favorite: Boolean(state.favorites[article.id]),
+      favoriteSavedAt: state.favorites[article.id]?.savedAt || '',
+      historyDeleted: Boolean(state.deletedHistoryArticleIds[article.id]),
+    };
+  }
+
   function topJournalPayload(state) {
     const normalized = createTopJournalState(state);
     return {
@@ -767,26 +895,136 @@ export function createApp({
       selectedJournalIds: normalized.selectedJournalIds,
       sync: normalized.sync,
       preferences: normalized.preferences,
+      favoriteArticleIds: Object.keys(normalized.favorites),
       summary: calendarSummary(normalized),
-      articles: recentArticles(normalized, { limit: 180 }),
+      articles: recentArticles(normalized, { limit: 180 }).map((article) => topJournalArticlePayload(normalized, article)),
     };
+  }
+
+  function topJournalRequestIds(value, max = 100) {
+    return [...new Set((Array.isArray(value) ? value : [])
+      .filter((id) => typeof id === 'string' && id.length > 0 && id.length <= 800))].slice(0, max);
   }
 
   app.get('/api/top-journals', (_req, res) => res.json(topJournalPayload(store.getTopJournals())));
 
   app.get('/api/top-journals/delivery', (req, res) => {
     const date = String(req.query.date || '') || undefined;
-    const result = deliveryArticles(store.getTopJournals(), date);
-    res.json(result);
+    const state = createTopJournalState(store.getTopJournals());
+    const result = deliveryArticles(state, date);
+    res.json({ ...result, articles: result.articles.map((article) => topJournalArticlePayload(state, article)) });
   });
 
+  // “历史记录”是已领取文章的可见视图；删除仅隐藏，不抹掉投递指纹，以保证永不重复推送。
   app.get('/api/top-journals/library', (_req, res) => {
     const state = createTopJournalState(store.getTopJournals());
-    const ids = new Set(Object.values(state.deliveries).flatMap((batch) => (batch?.items || []).map((item) => item.articleId)));
-    const articles = state.articles
-      .filter((article) => ids.has(article.id))
-      .sort((a, b) => String(b.publishedAt || '').localeCompare(String(a.publishedAt || '')));
+    const articles = historyArticles(state).map((article) => topJournalArticlePayload(state, article));
     res.json({ articles, total: articles.length });
+  });
+
+  app.get('/api/top-journals/favorites', (_req, res) => {
+    const state = createTopJournalState(store.getTopJournals());
+    const articles = state.articles
+      .filter((article) => state.favorites[article.id])
+      .sort((a, b) => String(state.favorites[b.id]?.savedAt || '').localeCompare(String(state.favorites[a.id]?.savedAt || '')))
+      .map((article) => topJournalArticlePayload(state, article));
+    res.json({ articles, total: articles.length });
+  });
+
+  app.put('/api/top-journals/articles/:id/favorite', (req, res) => {
+    try {
+      const favorite = req.body?.favorite !== false;
+      const state = setArticleFavorite(store.getTopJournals(), req.params.id, favorite);
+      store.saveTopJournals(state);
+      const article = state.articles.find((item) => item.id === req.params.id);
+      res.json({ article: topJournalArticlePayload(state, article), summary: calendarSummary(state), favoriteArticleIds: Object.keys(state.favorites) });
+    } catch (e) {
+      res.status(404).json({ error: e.message || '收藏操作失败' });
+    }
+  });
+
+  app.delete('/api/top-journals/favorites', (req, res) => {
+    const articleIds = topJournalRequestIds(req.body?.articleIds, 300);
+    if (!articleIds.length) return res.status(400).json({ error: '请至少选择一篇收藏文章' });
+    const result = removeFavorites(store.getTopJournals(), articleIds);
+    store.saveTopJournals(result.state);
+    res.json({ ok: true, removedCount: result.removedCount, summary: calendarSummary(result.state), favoriteArticleIds: Object.keys(result.state.favorites) });
+  });
+
+  app.delete('/api/top-journals/history', (req, res) => {
+    const articleIds = topJournalRequestIds(req.body?.articleIds, 300);
+    if (!articleIds.length) return res.status(400).json({ error: '请至少选择一篇历史记录' });
+    const result = removeHistoryArticles(store.getTopJournals(), articleIds);
+    store.saveTopJournals(result.state);
+    res.json({ ok: true, deletedCount: result.deletedIds.length, deletedIds: result.deletedIds, summary: calendarSummary(result.state) });
+  });
+
+  app.post('/api/top-journals/analyze', async (req, res) => {
+    const articleIds = topJournalRequestIds(req.body?.articleIds, 20);
+    if (!articleIds.length) return res.status(400).json({ error: '请先批量选择 1–20 篇文章' });
+    const am = activeModel();
+    if (!am) return res.status(400).json({ error: noModelError() });
+
+    const state = createTopJournalState(store.getTopJournals());
+    const accessibleIds = deliveredArticleIds(state);
+    Object.keys(state.favorites).forEach((id) => accessibleIds.add(id));
+    const selected = articleIds.map((id) => state.articles.find((article) => article.id === id)).filter(Boolean);
+    if (selected.length !== articleIds.length || selected.some((article) => !accessibleIds.has(article.id))) {
+      return res.status(400).json({ error: '所选文章不存在，或不属于你的历史记录/收藏' });
+    }
+
+    const compact = (value, limit) => clipText(value, limit);
+    const nl = String.fromCharCode(10);
+    const sep = nl + nl;
+    const articleBlock = selected.map((article, index) => {
+      const zh = article.translations?.zh || {};
+      return [
+        `【文章${index + 1}】${compact(article.title, 240) || '（无标题）'}`,
+        `作者：${compact((article.authors || []).join('；'), 260) || '暂缺'}；单位：${compact((article.affiliations || []).join('；'), 300) || '暂缺'}`,
+        `期刊：${compact(article.journal, 120) || '暂缺'}；发表日期：${compact(article.publishedAt, 24) || '暂缺'}；DOI：${compact(article.doi, 160) || '暂缺'}`,
+        `摘要：${compact(article.abstract, 1500) || '公开元数据未提供摘要'}`,
+        zh.title || zh.abstract ? `已有中文翻译：${compact([zh.title, zh.abstract].filter(Boolean).join('；'), 1000)}` : '',
+      ].filter(Boolean).join(nl);
+    }).join(sep);
+    const markdownBlock = store.listMarkdownNotes().slice(0, 8).map((note, index) => `【Markdown笔记${index + 1}】${compact(note.title, 100) || '未命名'}${nl}${compact(note.content, 900)}`).join(sep) || '（暂无 Markdown 笔记）';
+    const recordBlock = store.listNotes().slice(0, 8).map((note, index) => `【研究记录${index + 1}】${compact(note.title, 100) || '未命名'}${nl}${compact(note.content, 900)}`).join(sep) || '（暂无研究记录）';
+    const ideaBlock = store.listIdeas().slice(0, 8).map((idea, index) => `【灵感${index + 1}】${compact(idea.title, 100) || '未命名'}（${compact(idea.status, 30) || 'seed'}）${nl}${compact([idea.content, idea.incubation].filter(Boolean).join(nl), 1100)}`).join(sep) || '（暂无灵感）';
+    const paperBlock = store.listPapers().slice(0, 10).map((paper, index) => `【论文${index + 1}】${compact(paper.title, 120) || '未命名'}；状态：${compact(paper.status || paper.stage, 40) || '暂缺'}；目标期刊：${compact(paper.journal, 100) || '暂缺'}${nl}${compact([paper.abstract, paper.description, paper.researchQuestion].filter(Boolean).join(nl), 900)}`).join(sep) || '（暂无正在构思或投稿论文记录）';
+    const projectBlock = store.listProjects().slice(0, 8).map((project, index) => `【项目${index + 1}】${compact(project.name, 100) || '未命名'}${nl}${compact(project.description, 700)}`).join(sep) || '（暂无项目记录）';
+    const systemPrompt = [
+      '你是严谨的顶刊文献分析助手。只可根据所给的文章元数据、摘要和本地记录分析，不能把摘要级信息夸大为阅读全文证据。',
+      '“顶刊动向”只能描述本次所选文章样本，绝不能声称代表 UTD24、某一领域或某期刊的完整总体趋势。',
+      '不得编造文章的样本、识别策略、系数、因果结论、理论贡献或未给出的实验结果；信息缺失请明确标“摘要未提供，需阅读全文/额外验证”。',
+      '输出简体中文 Markdown，固定包含：## 样本范围与边界；## 主题聚类与顶刊动向；## 文章亮点；## 可更新的本地想法；## 可执行的下一步；## 证据与不确定性。',
+      '在“主题聚类与顶刊动向”中，逐组给出关联文章编号、主题、研究问题/情境、可见的方法或理论线索以及亮点。',
+      '在“可更新的本地想法”中，逐条关联具体本地对象编号和文章编号，并清楚标注“文章直接支持 / 合理推断 / 需额外文献验证”。不要为了给建议而强行匹配。',
+    ].join(nl);
+    const userPrompt = [
+      `以下是待分析的顶刊文章（共 ${selected.length} 篇）：`, articleBlock,
+      '# 本地 Markdown 笔记', markdownBlock,
+      '# 本地研究记录', recordBlock,
+      '# 本地灵感孵化', ideaBlock,
+      '# 正在构思或投稿的论文', paperBlock,
+      '# 本地项目', projectBlock,
+    ].join(sep);
+    try {
+      const request = await fetchModelCompletion(am, {
+        model: am.model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+        temperature: 0.35, max_tokens: 3800,
+      }, { stream: false });
+      try {
+        if (!request.up.ok) {
+          const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
+          return res.status(502).json({ error: `AI 接口返回 ${request.up.status}：${compact(detail, 300)}` });
+        }
+        const result = await readLLMResponse(request.up);
+        const analysis = result.full.trim();
+        if (!analysis) return res.status(502).json({ error: '模型没有返回有效分析结果，请稍后重试' });
+        res.json({ analysis, articleCount: selected.length });
+      } finally { request.cancel(); }
+    } catch (e) {
+      res.status(502).json({ error: /超时|abort/i.test(String(e?.message || '')) ? '顶刊分析超时，请减少选中文章后重试' : `顶刊分析失败：${e.message}` });
+    }
   });
 
   app.put('/api/top-journals/subscriptions', (req, res) => {
@@ -819,7 +1057,7 @@ export function createApp({
       const result = checkInAndCreateDelivery(current);
       store.saveTopJournals(result.state);
       const delivered = deliveryArticles(result.state);
-      res.json({ ...delivered, alreadyCheckedIn: result.alreadyCheckedIn, synced: sync.synced, failed: sync.failed, summary: calendarSummary(result.state) });
+      res.json({ ...delivered, articles: delivered.articles.map((article) => topJournalArticlePayload(result.state, article)), alreadyCheckedIn: result.alreadyCheckedIn, addedCount: result.addedCount || 0, synced: sync.synced, failed: sync.failed, summary: calendarSummary(result.state) });
     } catch (e) {
       res.status(400).json({ error: e.message || '签到失败' });
     }
@@ -1135,22 +1373,12 @@ export function createApp({
     activeIdeaIncubations.add(idea.id);
     sseStart(res);
     try {
-      const up = await fetch(am.baseURL + '/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${am.apiKey}` },
-        body: JSON.stringify({
-          model: am.model,
-          messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
-          stream: true, temperature: 0.45, max_tokens: 4096,
-        }),
-      });
-      if (!up.ok) {
-        const detail = await up.text().catch(() => '');
-        store.upsertIdea({ ...idea, status: beforeStatus, updatedAt: new Date().toISOString() });
-        sseSend(res, { error: `AI 接口返回 ${up.status}：${clip(detail, 300)}` });
-        return sseEnd(res);
-      }
-      const result = await pipeLLMStream(up, res);
+      const result = await streamModelResponse(am, {
+        model: am.model,
+        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
+        temperature: 0.45,
+        max_tokens: 4096,
+      }, res);
       if (result.aborted) {
         store.upsertIdea({ ...idea, status: beforeStatus, updatedAt: new Date().toISOString() });
       } else if (result.full.trim()) {
@@ -1313,17 +1541,12 @@ export function createApp({
     store.upsertReview({ ...review, status: 'reviewing', updatedAt: new Date().toISOString() });
     sseStart(res);
     try {
-      const up = await fetch(am.baseURL + '/chat/completions', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${am.apiKey}` },
-        body: JSON.stringify({ model: am.model, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }], stream: true, temperature: 0.3, max_tokens: 6144 }),
-      });
-      if (!up.ok) {
-        const detail = await up.text().catch(() => '');
-        store.upsertReview({ ...review, status: previousStatus, updatedAt: new Date().toISOString() });
-        sseSend(res, { error: `AI 接口返回 ${up.status}：${clip(detail, 300)}` });
-        return sseEnd(res);
-      }
-      const result = await pipeLLMStream(up, res);
+      const result = await streamModelResponse(am, {
+        model: am.model,
+        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
+        temperature: 0.3,
+        max_tokens: 6144,
+      }, res);
       if (result.aborted) store.upsertReview({ ...review, status: previousStatus, updatedAt: new Date().toISOString() });
       else if (result.full.trim()) {
         const now = new Date().toISOString();
@@ -1516,21 +1739,12 @@ export function createApp({
 
     sseStart(res);
     try {
-      const up = await fetch(am.baseURL + '/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${am.apiKey}` },
-        body: JSON.stringify({
-          model: am.model,
-          messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
-          stream: true, temperature: 0.25, max_tokens: 3072,
-        }),
-      });
-      if (!up.ok) {
-        const detail = await up.text().catch(() => '');
-        sseSend(res, { error: `AI 接口返回 ${up.status}：${clip(detail, 300)}` });
-        return sseEnd(res);
-      }
-      const result = await pipeLLMStream(up, res);
+      const result = await streamModelResponse(am, {
+        model: am.model,
+        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
+        temperature: 0.25,
+        max_tokens: 3072,
+      }, res);
       if (!result.aborted && !result.full.trim()) sseSend(res, { error: '模型没有返回有效内容，请稍后重试' });
       sseEnd(res);
     } catch (e) {
@@ -1871,6 +2085,19 @@ export function createApp({
         }).join('\n')
       : '（知识库暂无已解析完成的文献）';
 
+    // 收藏的顶刊文章是另一类“摘要级”本地知识：只注入用户主动收藏且与当前问题较相关的记录。
+    const topJournalState = createTopJournalState(store.getTopJournals());
+    const favoriteTopArticles = topJournalState.articles.filter((article) => topJournalState.favorites[article.id]);
+    const favoriteWords = String(kbQuery || '').toLowerCase().match(/[a-z0-9]{2,}|[\u4e00-\u9fff]+/g) || [];
+    const favoriteScore = (article) => favoriteWords.reduce((score, word) => score + [article.title, article.abstract, article.journal, ...(article.authors || []), ...(article.affiliations || [])].join(' ').toLowerCase().includes(word), 0);
+    const selectedFavorites = [...favoriteTopArticles]
+      .sort((a, b) => favoriteScore(b) - favoriteScore(a) || String(topJournalState.favorites[b.id]?.savedAt || '').localeCompare(String(topJournalState.favorites[a.id]?.savedAt || '')))
+      .filter((article, index, list) => !favoriteWords.length || favoriteScore(article) > 0 || index < 3)
+      .slice(0, 12);
+    const topFavoriteBlock = selectedFavorites.length
+      ? selectedFavorites.map((article, index) => `【顶刊收藏 ${index + 1}】${clipText(article.title, 120) || '（无标题）'} | ${(article.authors || []).map((author) => clipText(author, 40)).join('；') || '作者暂缺'} | ${clipText(article.journal, 80) || '期刊暂缺'} | 发表日期：${clipText(article.publishedAt, 20) || '暂缺'} | DOI：${clipText(article.doi, 120) || '暂缺'}` + (article.abstract ? `\n  摘要：${clipText(article.abstract, 420)}` : '')) .join('\n')
+      : '（暂无收藏的顶刊文章）';
+
     const projBlock = projects.length
       ? projects.map((p) => `- ${p.name}（${p.status}，进度 ${p.progress}%${p.advisor ? '，导师 ' + p.advisor : ''}${p.endDate ? '，截止 ' + p.endDate : ''}）${p.description ? '：' + clipText(p.description, 100) : ''}`).join('\n')
       : '（暂无项目）';
@@ -1916,10 +2143,11 @@ export function createApp({
       `\n## 小论文投稿状态\n${papersBlock}`,
       `\n## 大论文（学位论文）进度\n${thesisBlock}`,
       `\n## 知识库文献（与问题最相关的摘录，回答时可引用编号）\n${litBlock}`,
+      `\n## 收藏顶刊文章（公开元数据/摘要级证据，回答时可引用【顶刊收藏 N】）\n${topFavoriteBlock}`,
       recentNotes ? `\n## 最近研究记录摘录\n${recentNotes}` : '',
       `\n## 回答要求`,
       `- 用简体中文回答；科研问题要具体、可执行，避免空话。`,
-      `- 引用用户文献结论时注明编号（如【2】）；知识库没有的内容要说明「知识库中未涉及」。`,
+      `- 引用用户文献结论时注明编号（如【2】）；引用收藏顶刊文章时写【顶刊收藏 N】。收藏顶刊文章仅有公开元数据/摘要时，不得把它表述为全文证据或推断摘要未说明的结论。知识库没有的内容要说明「知识库中未涉及」。`,
       `- 用户让你构思论文创新点时：结合其文献库与研究缺口，给出 3-5 个候选创新点，并说明每个的可行性、与现有文献的差异、可验证方式。`,
       `- 用户问投稿策略时：结合其小论文当前状态、期刊等级与审稿周期给出主投/备选/转投建议；审稿周期和返修期限以期刊官网及编辑部通知为准，不编造固定时限。`,
       `- 使用规范 Markdown 输出。适合比较的信息可使用 Markdown 表格；代码使用带语言标识的围栏代码块；公式使用 $...$ 或 $$...$$。`,
@@ -1984,7 +2212,6 @@ export function createApp({
     const settings = store.getSettings();
     const am = activeModel(settings);
     if (!am) return res.status(400).json({ error: noModelError() });
-    const base = am.baseURL;
     const convList = store.listConversations();
     const conv = convList.find((c) => c.id === conversationId);
     if (!conv) return res.status(404).json({ error: '会话不存在，请先新建对话' });
@@ -2005,25 +2232,21 @@ export function createApp({
       const keep = conv.messages.slice(-KEEP_RECENT);
       const olds = conv.messages.slice(0, -KEEP_RECENT);
       try {
-        const sumRes = await fetch(base + '/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${am.apiKey}` },
-          body: JSON.stringify({
-            model: am.model,
-            messages: [
-              { role: 'system', content: '你是对话摘要助手。把用户与 AI 的科研对话压缩成要点摘要：保留已确认的结论、关键数字、论文/项目名称、待办承诺与用户偏好，按条列出，不超过 400 字，用简体中文。' },
-              { role: 'user', content: (conv.summary ? '已有早期摘要：\n' + conv.summary + '\n\n请合并以下更早的对话内容，输出更新后的完整摘要：\n' : '请摘要以下科研对话：\n') + olds.map((m) => (m.role === 'user' ? '用户' : 'AI') + '：' + clipText(m.content, 1500)).join('\n') },
-            ],
-            stream: false,
-            max_tokens: 600,
-            temperature: 0.2,
-          }),
-        });
-        if (sumRes.ok) {
-          const sumData = await sumRes.json().catch(() => ({}));
-          const sumText = sumData.choices?.[0]?.message?.content?.trim();
-          if (sumText) { conv.summary = clipText(sumText, 1500); conv.messages = keep; compressed = true; }
-        }
+        const request = await fetchModelCompletion(am, {
+          model: am.model,
+          messages: [
+            { role: 'system', content: '你是对话摘要助手。把用户与 AI 的科研对话压缩成要点摘要：保留已确认的结论、关键数字、论文/项目名称、待办承诺与用户偏好，按条列出，不超过 400 字，用简体中文。' },
+            { role: 'user', content: (conv.summary ? '已有早期摘要：\n' + conv.summary + '\n\n请合并以下更早的对话内容，输出更新后的完整摘要：\n' : '请摘要以下科研对话：\n') + olds.map((m) => (m.role === 'user' ? '用户' : 'AI') + '：' + clipText(m.content, 1500)).join('\n') },
+          ],
+          max_tokens: 600,
+          temperature: 0.2,
+        }, { stream: false });
+        try {
+          if (request.up.ok) {
+            const sumText = (await readLLMResponse(request.up)).full.trim();
+            if (sumText) { conv.summary = clipText(sumText, 1500); conv.messages = keep; compressed = true; }
+          }
+        } finally { request.cancel(); }
       } catch (_) { /* 压缩失败不影响本次对话 */ }
     }
 
@@ -2036,28 +2259,17 @@ export function createApp({
       const llmMsgs = [];
       if (conv.summary) llmMsgs.push({ role: 'system', content: '本会话早期对话的摘要（作为上下文参考，不要重复输出摘要本身）：\n' + conv.summary });
       llmMsgs.push(...conv.messages.slice(-20).map((m) => ({ role: m.role, content: m.content })));
-      const up = await fetch(base + '/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${am.apiKey}` },
-        body: JSON.stringify({
-          model: am.model,
-          messages: [{ role: 'system', content: buildSystemPrompt(content) }, ...llmMsgs],
-          stream: true,
-          temperature: 0.6,
-          max_tokens: 4096,
-        }),
-      });
-      if (!up.ok) {
-        const errText = await up.text().catch(() => '');
-        sseSend(res, { error: `AI 接口返回 ${up.status}：${clipText(errText, 300)}` });
-        sseEnd(res);
-      } else {
-        const r = await pipeLLMStream(up, res);
-        full = r.full;
-        replyComplete = !r.aborted && !!full.trim();
-        if (compressed) sseSend(res, { compressed: true });
-        sseEnd(res);
-      }
+      const r = await streamModelResponse(am, {
+        model: am.model,
+        messages: [{ role: 'system', content: buildSystemPrompt(content) }, ...llmMsgs],
+        temperature: 0.6,
+        max_tokens: 4096,
+      }, res);
+      full = r.full;
+      replyComplete = !r.aborted && !!full.trim();
+      if (!replyComplete && !r.aborted) sseSend(res, { error: 'AI 未返回有效内容。请到 AI 设置中重新测试此模型；本地服务可改为「仅非流式」模式。' });
+      if (compressed) sseSend(res, { compressed: true });
+      sseEnd(res);
     } catch (e) {
       sseSend(res, { error: e.message });
       sseEnd(res);
@@ -2074,38 +2286,26 @@ export function createApp({
     if (!text) return res.status(400).json({ error: '请先粘贴审稿意见原文' });
     const am = activeModel();
     if (!am) return res.status(400).json({ error: noModelError() });
-    const base = am.baseURL;
     sseStart(res);
     try {
-      const up = await fetch(base + '/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${am.apiKey}` },
-        body: JSON.stringify({
-          model: am.model,
-          messages: [
-            {
-              role: 'system',
-              content: '你是学术论文审稿意见翻译与整理助手。用户会提供一段（通常是英文的）审稿意见，请把它整理成一条一条的简体中文条目。硬性要求：\n' +
-                '1. 忠于原文：不得篡改、夸大、弱化、遗漏或自行补充任何内容；每条意见的完整含义、限定条件、语气（含批评的尖锐程度）必须原样保留；\n' +
-                '2. 逐条编号输出（1. 2. 3.…），一条独立意见编一个号；某条内部若有多个子要点，用「 - 」缩进列在其下；\n' +
-                '3. 意见中提到的术语、变量名、图表编号等保持准确，专业术语首次出现可括注英文原词；\n' +
-                '4. 如果原文明显分为多位审稿人（Reviewer #1 等），先输出「审稿人 X」小标题，再在其下逐条编号；\n' +
-                '5. 只输出整理后的中文条目，不要输出任何解释、总结、评价或与原文无关的内容。',
-            },
-            { role: 'user', content: '请整理以下审稿意见：\n\n' + text.slice(0, 12000) },
-          ],
-          stream: true,
-          temperature: 0.2,
-          max_tokens: 4096,
-        }),
-      });
-      if (!up.ok) {
-        const errText = await up.text().catch(() => '');
-        sseSend(res, { error: `AI 接口返回 ${up.status}：${clipText(errText, 200)}` });
-        return sseEnd(res);
-      }
-      const result = await pipeLLMStream(up, res);
-      if (!result.full.trim() && !result.aborted) sseSend(res, { error: 'AI 未返回有效内容，请稍后重试' });
+      const result = await streamModelResponse(am, {
+        model: am.model,
+        messages: [
+          {
+            role: 'system',
+            content: '你是学术论文审稿意见翻译与整理助手。用户会提供一段（通常是英文的）审稿意见，请把它整理成一条一条的简体中文条目。硬性要求：\n' +
+              '1. 忠于原文：不得篡改、夸大、弱化、遗漏或自行补充任何内容；每条意见的完整含义、限定条件、语气（含批评的尖锐程度）必须原样保留；\n' +
+              '2. 逐条编号输出（1. 2. 3.…），一条独立意见编一个号；某条内部若有多个子要点，用「 - 」缩进列在其下；\n' +
+              '3. 意见中提到的术语、变量名、图表编号等保持准确，专业术语首次出现可括注英文原词；\n' +
+              '4. 如果原文明显分为多位审稿人（Reviewer #1 等），先输出「审稿人 X」小标题，再在其下逐条编号；\n' +
+              '5. 只输出整理后的中文条目，不要输出任何解释、总结、评价或与原文无关的内容。',
+          },
+          { role: 'user', content: '请整理以下审稿意见：\n\n' + text.slice(0, 12000) },
+        ],
+        temperature: 0.2,
+        max_tokens: 4096,
+      }, res);
+      if (!result.full.trim() && !result.aborted) sseSend(res, { error: 'AI 未返回有效内容，请重新测试当前模型或启用非流式兼容模式' });
       sseEnd(res);
     } catch (e) {
       sseSend(res, { error: '翻译请求失败：' + e.message });
@@ -2214,28 +2414,13 @@ export function createApp({
         sseSend(res, { stage: 'answer', visionModel: { id: vm.id, label: vm.label, model: vm.model }, description: desc.text });
       }
 
-      const up = await fetch(am.baseURL + '/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${am.apiKey}` },
-        body: JSON.stringify({
-          model: am.model,
-          messages: finalMessages,
-          stream: true,
-          temperature: 0.3,
-          max_tokens: 4096,
-        }),
-      });
-      if (!up.ok) {
-        const errText = await up.text().catch(() => '');
-        // 模型不支持图片时，上游常返回 400；给出更易懂的指引
-        const hint = /image|vision|multimodal|content/i.test(errText)
-          ? `（「${am.model}」可能不支持图片输入，请在顶栏切换成支持视觉的模型，例如 GLM-4.5V 或 Qwen3.8-27B）`
-          : '';
-        sseSend(res, { error: `AI 接口返回 ${up.status}：${clipText(errText, 200)}${hint}` });
-        return sseEnd(res);
-      }
-      const r = await pipeLLMStream(up, res);
-      if (!r.full && !r.aborted) sseSend(res, { error: 'AI 未返回有效内容，请稍后重试' });
+      const r = await streamModelResponse(am, {
+        model: am.model,
+        messages: finalMessages,
+        temperature: 0.3,
+        max_tokens: 4096,
+      }, res);
+      if (!r.full && !r.aborted) sseSend(res, { error: 'AI 未返回有效内容。请到 AI 设置中重新测试此模型，或选择「仅非流式」兼容模式。' });
       sseEnd(res);
     } catch (e) {
       sseSend(res, { error: '请求失败：' + e.message });
@@ -2469,29 +2654,57 @@ export function createApp({
     res.json({ activeProfileId: saved.activeProfileId, active: active ? { id: active.id, label: active.label, provider: active.provider, providerName: active.providerName, model: active.model, vision: active.vision } : null });
   });
 
-  // 连通性测试：用「未保存的表单内容」直接打一次最小请求，避免用户先存错配置
+  // 连通性测试必须覆盖真实调用条件：system role + 非流式 + 流式。
+  // 过去只测试 ping/stream:false，导致“连通”却在对话 SSE 阶段没有任何输出。
   app.post('/api/models/test', async (req, res) => {
     const provider = String(req.body?.provider || 'custom');
-    const baseURL = String(req.body?.baseURL || catalog.getProvider(provider)?.baseURL || '').replace(/\/+$/, '');
+    const baseURL = catalog.normalizeBaseURL(req.body?.baseURL || catalog.getProvider(provider)?.baseURL || '');
     const apiKey = String(req.body?.apiKey || '').trim();
     const model = String(req.body?.model || '').trim();
+    const streamMode = catalog.normalizeStreamMode(req.body?.streamMode);
+    const systemPromptMode = catalog.normalizeSystemPromptMode(req.body?.systemPromptMode);
+    const authMode = catalog.normalizeAuthMode(req.body?.authMode);
     if (!baseURL) return res.status(400).json({ error: '请填写接口地址 Base URL' });
-    if (!apiKey) return res.status(400).json({ error: '请填写 API 密钥' });
+    if (!apiKey && provider !== 'custom') return res.status(400).json({ error: '请填写 API 密钥；只有“自定义 / 本地部署”可留空' });
     if (!model) return res.status(400).json({ error: '请填写模型名称' });
+    const profile = { provider, baseURL, apiKey, model, streamMode, systemPromptMode, authMode };
+    const payload = {
+      model,
+      messages: [
+        { role: 'system', content: '你是连通性测试助手。请严格按用户要求简短回答。' },
+        { role: 'user', content: '只回复：pong' },
+      ],
+      max_tokens: 12,
+      temperature: 0,
+    };
     const t0 = Date.now();
     try {
-      const up = await fetch(baseURL + '/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 4, stream: false }),
-      });
-      const cost = Date.now() - t0;
-      if (!up.ok) {
-        const errText = await up.text().catch(() => '');
-        return res.json({ ok: false, cost, error: `接口返回 ${up.status}：${clipText(errText, 200)}` });
+      let request = await fetchModelCompletion(profile, payload, { stream: false, timeoutMs: 30000 });
+      if (!request.up.ok) {
+        const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
+        request.cancel();
+        return res.json({ ok: false, cost: Date.now() - t0, error: `非流式调用返回 ${request.up.status}：${clip(detail, 300)}` });
       }
-      const data = await up.json().catch(() => ({}));
-      res.json({ ok: true, cost, reply: clipText(data?.choices?.[0]?.message?.content || '', 60) || '（模型已响应）' });
+      const normal = await readLLMResponse(request.up);
+      request.cancel();
+      if (!normal.full.trim()) return res.json({ ok: false, cost: Date.now() - t0, error: '非流式调用没有返回有效文本；该模型不能用于翻译或对话' });
+      if (streamMode === 'nonstream') {
+        return res.json({ ok: true, cost: Date.now() - t0, reply: clip(normal.full, 60), mode: 'nonstream', normalizedBaseURL: baseURL, message: '已验证普通 JSON 调用；软件将以非流式方式显示回复' });
+      }
+      request = await fetchModelCompletion(profile, payload, { stream: true, timeoutMs: 30000 });
+      let streamed = null;
+      let streamError = '';
+      if (request.up.ok) {
+        try { streamed = await readLLMResponse(request.up); } catch (e) { streamError = e.message; }
+      } else streamError = `流式调用返回 ${request.up.status}：${clip(request.up._litErrorText ?? await request.up.text().catch(() => ''), 220)}`;
+      request.cancel();
+      if (streamed?.full?.trim()) {
+        return res.json({ ok: true, cost: Date.now() - t0, reply: clip(streamed.full, 60), mode: 'stream', normalizedBaseURL: baseURL, message: streamed.responseType === 'json' ? '服务在流式请求下返回普通 JSON，软件已兼容' : '已验证标准流式和非流式调用' });
+      }
+      if (streamMode === 'stream') {
+        return res.json({ ok: false, cost: Date.now() - t0, error: `该服务未通过流式测试：${streamError || '没有返回 token'}。请改为“自动兼容”或“仅非流式”。` });
+      }
+      return res.json({ ok: true, cost: Date.now() - t0, reply: clip(normal.full, 60), mode: 'nonstream', normalizedBaseURL: baseURL, message: `非流式可用，流式不可用；软件会自动兼容为非流式。${streamError ? '原因：' + clip(streamError, 120) : ''}` });
     } catch (e) {
       res.json({ ok: false, cost: Date.now() - t0, error: '连接失败：' + e.message });
     }

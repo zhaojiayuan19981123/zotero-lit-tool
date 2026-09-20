@@ -520,12 +520,14 @@ export function saveCalendar(value) {
 // 与其它个人数据一起存入当前数据目录，支持备份、迁移和离线查看已同步内容。
 export function getTopJournals() {
   return loadFile(TOP_JOURNALS_FILE, {
-    version: 1,
+    version: 2,
     selectedJournalIds: [],
     articles: [],
     checkins: {},
     deliveries: {},
     sync: {},
+    favorites: {},
+    deletedHistoryArticleIds: {},
     preferences: { fillWithRecentUnseen: true },
   });
 }

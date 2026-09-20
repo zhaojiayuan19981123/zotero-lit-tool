@@ -187,3 +187,28 @@ test('服务清单元数据：9 项、标签可查、NON_LLM 不含 LLM', () => 
   }
 });
 
+
+
+test('大模型翻译使用当前激活 profile，并清理误填的完整 chat/completions 地址', async () => {
+  const oldFetch = global.fetch;
+  const seen = [];
+  global.fetch = async (url, opts) => {
+    seen.push({ url, opts });
+    return new Response(JSON.stringify({ choices: [{ message: { content: '激活模型译文' } }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const out = await translate('hello', {
+      translateProvider: 'siliconflow', aiProvider: 'custom', activeProfileId: 'local', modelProfiles: [
+        { id: 'old', provider: 'custom', baseURL: 'https://old.example/v1', apiKey: 'old-key', model: 'old-model' },
+        { id: 'local', provider: 'custom', baseURL: 'http://127.0.0.1:11434/v1/chat/completions', apiKey: '', model: 'qwen-local', authMode: 'none', systemPromptMode: 'user' },
+      ],
+    });
+    assert.equal(out, '激活模型译文');
+    assert.equal(seen[0].url, 'http://127.0.0.1:11434/v1/chat/completions');
+    assert.equal(seen[0].opts.headers.Authorization, undefined);
+    const body = JSON.parse(seen[0].opts.body);
+    assert.equal(body.model, 'qwen-local');
+    assert.equal(body.messages.length, 1);
+    assert.match(body.messages[0].content, /任务要求/);
+  } finally { global.fetch = oldFetch; }
+});

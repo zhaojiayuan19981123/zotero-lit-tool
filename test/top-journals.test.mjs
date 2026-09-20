@@ -10,6 +10,11 @@ import {
   checkInAndCreateDelivery,
   createTopJournalState,
   deliveryArticles,
+  deliveredArticleIds,
+  historyArticles,
+  setArticleFavorite,
+  removeFavorites,
+  removeHistoryArticles,
   mapCrossrefWork,
   syncJournals,
 } from '../src/topJournals.js';
@@ -92,6 +97,59 @@ test('顶刊前端包含追踪视图、签到、期刊多选、原文链接与�
     assert.match(html, new RegExp(`id="${id}"`));
   }
   for (const token of ['data-tj-journal', 'data-tj-translate', 'data-tj-opened', 'topJournalCheckin', 'saveTopJournalSubscriptions']) {
+    assert.match(app, new RegExp(token));
+  }
+});
+
+
+test('顶刊状态兼容旧版；收藏与历史批量删除不会破坏投递去重', () => {
+  const old = {
+    version: 1,
+    selectedJournalIds: ['jm'],
+    articles: [
+      { id: 'doi:a', journalId: 'jm', title: 'A', publishedAt: '2026-09-20' },
+      { id: 'doi:b', journalId: 'jm', title: 'B', publishedAt: '2026-09-19' },
+    ],
+    deliveries: { '2026-09-20': { date: '2026-09-20', items: [{ journalId: 'jm', articleId: 'doi:a', slot: 1 }] } },
+  };
+  let state = createTopJournalState(old);
+  assert.equal(state.version, 2);
+  assert.deepEqual(state.favorites, {});
+  state = setArticleFavorite(state, 'doi:a', true);
+  assert.ok(state.favorites['doi:a']);
+  ({ state } = removeFavorites(state, ['doi:a', 'missing']));
+  assert.equal(Object.keys(state.favorites).length, 0);
+  const removed = removeHistoryArticles(state, ['doi:a']);
+  assert.deepEqual(removed.deletedIds, ['doi:a']);
+  assert.equal(historyArticles(removed.state).length, 0);
+  assert.ok(deliveredArticleIds(removed.state).has('doi:a'), '软删除后仍必须保留去重记录');
+});
+
+test('同日新增订阅仅补推新期刊，旧期刊文章绝不重复', () => {
+  const articles = ['jm', 'jmr'].flatMap((journalId) => Array.from({ length: 6 }, (_v, i) => ({
+    id: `doi:${journalId}-${i + 1}`, journalId, title: `${journalId}-${i + 1}`,
+    publishedAt: `2026-09-${String(20 - i).padStart(2, '0')}`,
+  })));
+  let state = createTopJournalState({ selectedJournalIds: ['jm'], articles });
+  const first = checkInAndCreateDelivery(state, { date: '2026-09-20', perJournal: 5 });
+  state = first.state;
+  state.selectedJournalIds.push('jmr');
+  const second = checkInAndCreateDelivery(state, { date: '2026-09-20', perJournal: 5 });
+  assert.equal(second.alreadyCheckedIn, true);
+  assert.equal(second.addedCount, 5);
+  const delivery = second.delivery;
+  assert.equal(delivery.items.filter((x) => x.journalId === 'jm').length, 5);
+  assert.equal(delivery.items.filter((x) => x.journalId === 'jmr').length, 5);
+  assert.equal(new Set(delivery.items.map((x) => x.articleId)).size, 10);
+  const third = checkInAndCreateDelivery(second.state, { date: '2026-09-20', perJournal: 5 });
+  assert.equal(third.addedCount, 0);
+});
+
+test('顶刊前端包含收藏、历史记录、批量选择、AI 分析和发表日期', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
+  for (const token of ['收藏', '历史记录', 'topJournalAnalysisModal']) assert.match(html, new RegExp(token));
+  for (const token of ['data-tj-favorite', 'data-tj-select', 'topJournalAnalyze', 'topJournalDeleteHistory', '发表日期']) {
     assert.match(app, new RegExp(token));
   }
 });

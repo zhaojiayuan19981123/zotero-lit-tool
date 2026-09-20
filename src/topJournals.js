@@ -50,13 +50,19 @@ export function dayKey(value = new Date()) {
 }
 
 export function createTopJournalState(value = {}) {
+  // v2 新增收藏与历史软删除。保留投递记录，以便“删历史”后仍能保证文章永不重复投递。
+  const favoriteSource = value?.favorites && typeof value.favorites === 'object' ? value.favorites : {};
+  const deletedSource = value?.deletedHistoryArticleIds && typeof value.deletedHistoryArticleIds === 'object'
+    ? value.deletedHistoryArticleIds : {};
   return {
-    version: 1,
+    version: 2,
     selectedJournalIds: Array.isArray(value?.selectedJournalIds) ? [...new Set(value.selectedJournalIds.filter((id) => UTD_JOURNALS.some((j) => j.id === id)))] : [],
     articles: Array.isArray(value?.articles) ? value.articles : [],
     checkins: value?.checkins && typeof value.checkins === 'object' ? value.checkins : {},
     deliveries: value?.deliveries && typeof value.deliveries === 'object' ? value.deliveries : {},
     sync: value?.sync && typeof value.sync === 'object' ? value.sync : {},
+    favorites: Object.fromEntries(Object.entries(favoriteSource).filter(([id]) => typeof id === 'string' && id)),
+    deletedHistoryArticleIds: Object.fromEntries(Object.entries(deletedSource).filter(([id]) => typeof id === 'string' && id)),
     preferences: { fillWithRecentUnseen: true, ...(value?.preferences || {}) },
   };
 }
@@ -191,25 +197,37 @@ export function checkInAndCreateDelivery(stateInput, { date = dayKey(), perJourn
   if (!isValidDate(date)) throw new Error('签到日期格式无效');
   const state = createTopJournalState(stateInput);
   const existing = state.deliveries[date];
-  if (existing) return { state, delivery: existing, alreadyCheckedIn: true };
-  if (!state.selectedJournalIds.length) throw new Error('请先在「期刊管理」勾选至少一本 UTD 期刊');
+  if (!state.selectedJournalIds.length && !existing) throw new Error('请先在「期刊管理」勾选至少一本 UTD 期刊');
+
+  // 同一天再次签到不会重置旧投递；如果用户随后新增期刊（或旧期刊此前不足 5 篇），仅追加未投递文章。
   const now = new Date().toISOString();
   const limit = Math.max(1, Math.min(10, Number(perJournal) || 5));
-  const entries = [];
+  const delivery = existing
+    ? { ...existing, items: Array.isArray(existing.items) ? [...existing.items] : [] }
+    : { date, createdAt: now, items: [], shortages: [] };
+  const addedEntries = [];
   const shortages = [];
   for (const journalId of state.selectedJournalIds) {
+    const currentCount = delivery.items.filter((item) => item.journalId === journalId).length;
+    const missing = Math.max(0, limit - currentCount);
     const previouslyDelivered = deliveredIdsFor(state, journalId);
     const candidates = state.articles
       .filter((article) => article.journalId === journalId && !previouslyDelivered.has(article.id))
       .sort((a, b) => articleDateMillis(b) - articleDateMillis(a) || String(b.discoveredAt || '').localeCompare(String(a.discoveredAt || '')));
-    const chosen = candidates.slice(0, limit);
-    for (const article of chosen) entries.push({ journalId, articleId: article.id, slot: entries.filter((item) => item.journalId === journalId).length + 1, openedAt: '', savedAt: '' });
-    if (chosen.length < limit) shortages.push({ journalId, available: chosen.length, requested: limit });
+    const chosen = candidates.slice(0, missing);
+    for (const article of chosen) {
+      const entry = { journalId, articleId: article.id, slot: currentCount + addedEntries.filter((item) => item.journalId === journalId).length + 1, openedAt: '', savedAt: '' };
+      delivery.items.push(entry);
+      addedEntries.push(entry);
+    }
+    const totalForJournal = currentCount + chosen.length;
+    if (totalForJournal < limit) shortages.push({ journalId, available: totalForJournal, requested: limit });
   }
-  const delivery = { date, createdAt: now, items: entries, shortages };
-  state.checkins[date] = { checkedInAt: now, deliveredCount: entries.length };
+  delivery.shortages = shortages;
+  delivery.updatedAt = now;
+  state.checkins[date] = { ...(state.checkins[date] || {}), checkedInAt: state.checkins[date]?.checkedInAt || now, deliveredCount: delivery.items.length };
   state.deliveries[date] = delivery;
-  return { state, delivery, alreadyCheckedIn: false };
+  return { state, delivery, alreadyCheckedIn: Boolean(existing), addedCount: addedEntries.length };
 }
 
 export function deliveryArticles(stateInput, date = dayKey()) {
@@ -232,6 +250,48 @@ export function recentArticles(stateInput, { journalIds = [], limit = 120 } = {}
     .slice(0, Math.max(1, Math.min(500, Number(limit) || 120)));
 }
 
+export function deliveredArticleIds(stateInput) {
+  const state = createTopJournalState(stateInput);
+  return new Set(Object.values(state.deliveries).flatMap((batch) => (batch?.items || []).map((entry) => entry.articleId)));
+}
+
+export function historyArticles(stateInput, { includeDeleted = false } = {}) {
+  const state = createTopJournalState(stateInput);
+  const ids = deliveredArticleIds(state);
+  return state.articles
+    .filter((article) => ids.has(article.id) && (includeDeleted || !state.deletedHistoryArticleIds[article.id]))
+    .sort((a, b) => articleDateMillis(b) - articleDateMillis(a) || String(b.discoveredAt || '').localeCompare(String(a.discoveredAt || '')));
+}
+
+export function setArticleFavorite(stateInput, articleId, favorite = true) {
+  const state = createTopJournalState(stateInput);
+  if (!state.articles.some((article) => article.id === articleId)) throw new Error('文章不存在或已从本地缓存清理');
+  if (favorite) state.favorites[articleId] = { ...(state.favorites[articleId] || {}), savedAt: state.favorites[articleId]?.savedAt || new Date().toISOString() };
+  else delete state.favorites[articleId];
+  return state;
+}
+
+export function removeFavorites(stateInput, articleIds) {
+  const state = createTopJournalState(stateInput);
+  const ids = [...new Set((Array.isArray(articleIds) ? articleIds : []).filter((id) => typeof id === 'string' && id))];
+  let removedCount = 0;
+  for (const id of ids) if (state.favorites[id]) { delete state.favorites[id]; removedCount += 1; }
+  return { state, removedCount };
+}
+
+export function removeHistoryArticles(stateInput, articleIds) {
+  const state = createTopJournalState(stateInput);
+  const delivered = deliveredArticleIds(state);
+  const ids = [...new Set((Array.isArray(articleIds) ? articleIds : []).filter((id) => typeof id === 'string' && id))];
+  const deletedIds = [];
+  for (const id of ids) {
+    if (!delivered.has(id) || state.deletedHistoryArticleIds[id]) continue;
+    state.deletedHistoryArticleIds[id] = { deletedAt: new Date().toISOString() };
+    deletedIds.push(id);
+  }
+  return { state, deletedIds };
+}
+
 export function calendarSummary(stateInput, now = new Date()) {
   const state = createTopJournalState(stateInput);
   const today = dayKey(now);
@@ -241,8 +301,9 @@ export function calendarSummary(stateInput, now = new Date()) {
   let streak = 0;
   const walk = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   while (state.checkins[dayKey(walk)]) { streak += 1; walk.setDate(walk.getDate() - 1); }
-  const libraryIds = new Set(Object.values(state.deliveries).flatMap((batch) => (batch?.items || []).map((entry) => entry.articleId)));
-  return { today, todayCheckedIn: Boolean(state.checkins[today]), streak, checkinDays, libraryCount: libraryIds.size, selectedCount: state.selectedJournalIds.length };
+  const libraryIds = deliveredArticleIds(state);
+  const historyCount = [...libraryIds].filter((id) => !state.deletedHistoryArticleIds[id]).length;
+  return { today, todayCheckedIn: Boolean(state.checkins[today]), streak, checkinDays, libraryCount: historyCount, historyCount, favoriteCount: Object.keys(state.favorites).length, selectedCount: state.selectedJournalIds.length };
 }
 
 export function markArticleOpened(stateInput, articleId, date = dayKey()) {
@@ -257,7 +318,7 @@ export function markArticleOpened(stateInput, articleId, date = dayKey()) {
 export function pruneTopJournalState(stateInput, now = Date.now()) {
   const state = createTopJournalState(stateInput);
   // 文章元数据保留两年，已投递论文永不因清理而删除。
-  const protectedIds = new Set(Object.values(state.deliveries).flatMap((batch) => (batch?.items || []).map((entry) => entry.articleId)));
+  const protectedIds = new Set([...deliveredArticleIds(state), ...Object.keys(state.favorites)]);
   state.articles = state.articles.filter((article) => protectedIds.has(article.id) || !article.publishedAt || Date.parse(article.publishedAt) >= now - 730 * DAY);
   return state;
 }

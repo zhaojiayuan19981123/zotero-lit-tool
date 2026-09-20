@@ -159,6 +159,29 @@ export function newProfileId() {
   return 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
+// 用户常把完整的 /chat/completions 地址粘贴到 Base URL。内部统一保存成 API 根地址，
+// 后续调用只拼接一次 /chat/completions，避免测试可用、实际请求却变成双重路径。
+export function normalizeBaseURL(value) {
+  let base = String(value || '').trim().replace(/\s+/g, '').replace(/\/+$/, '');
+  base = base.replace(/\/chat\/completions$/i, '');
+  return base.replace(/\/+$/, '');
+}
+
+export function normalizeStreamMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  return ['auto', 'stream', 'nonstream'].includes(mode) ? mode : 'auto';
+}
+
+export function normalizeSystemPromptMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  return ['auto', 'system', 'user'].includes(mode) ? mode : 'auto';
+}
+
+export function normalizeAuthMode(value) {
+  const mode = String(value || '').trim().toLowerCase();
+  return ['auto', 'bearer', 'none'].includes(mode) ? mode : 'auto';
+}
+
 // ---------- 迁移：把老的单模型设置转成 profiles ----------
 // 老字段：aiProvider / baseURL / apiKey / model
 // 新字段：modelProfiles[] / activeProfileId
@@ -179,9 +202,12 @@ export function migrateSettings(settings) {
       id: newProfileId(),
       label: provider === 'siliconflow' ? 'DeepSeek（默认）' : providerName(provider),
       provider,
-      baseURL: (s.baseURL || '').trim() || getProvider(provider)?.baseURL || '',
+      baseURL: normalizeBaseURL(s.baseURL || getProvider(provider)?.baseURL || ''),
       apiKey: s.apiKey || '',
       model: (s.model || '').trim() || (provider === 'siliconflow' ? DEFAULT_MODEL : ''),
+      streamMode: 'auto',
+      systemPromptMode: 'auto',
+      authMode: 'auto',
       createdAt: new Date().toISOString(),
     });
     s.activeProfileId = s.modelProfiles[0].id;
@@ -197,6 +223,9 @@ export function migrateSettings(settings) {
       baseURL: DEFAULT_BASE_URL,
       apiKey: '',
       model: DEFAULT_MODEL,
+      streamMode: 'auto',
+      systemPromptMode: 'auto',
+      authMode: 'auto',
       createdAt: new Date().toISOString(),
     });
     s.activeProfileId = s.modelProfiles[0].id;
@@ -213,9 +242,15 @@ export function migrateSettings(settings) {
       id,
       label: String(p.label || '').trim() || modelDisplayName(provider, p.model) || providerName(provider),
       provider,
-      baseURL: String(p.baseURL || '').trim() || getProvider(provider)?.baseURL || '',
+      baseURL: normalizeBaseURL(p.baseURL || getProvider(provider)?.baseURL || ''),
       apiKey: String(p.apiKey || ''),
       model: String(p.model || '').trim(),
+      // auto：先尝试 SSE，失败时自动退回普通 JSON；本地/兼容网关可手动指定。
+      streamMode: normalizeStreamMode(p.streamMode),
+      // auto：优先标准 system role；少数本地服务拒绝时改为把系统指令并入用户消息。
+      systemPromptMode: normalizeSystemPromptMode(p.systemPromptMode),
+      // 自定义本地服务可能不需要认证；auto 有 Key 时发送 Bearer，无 Key 时不发送。
+      authMode: normalizeAuthMode(p.authMode),
       // 旧配置没有该字段，保留为 auto；用户可在编辑器里明确覆盖。
       visionOverride: normalizeVisionOverride(
         Object.prototype.hasOwnProperty.call(p, 'visionOverride') ? p.visionOverride
@@ -239,7 +274,7 @@ export function resolveActive(settings) {
   const s = migrateSettings(settings);
   if (s.aiProvider === 'none') return null;
   const p = s.modelProfiles.find((x) => x.id === s.activeProfileId) || s.modelProfiles[0];
-  if (!p || !String(p.apiKey || '').trim()) return null;
+  if (!p || (!String(p.apiKey || '').trim() && p.provider !== 'custom')) return null;
   return describeProfile(p);
 }
 
@@ -250,7 +285,7 @@ export function resolveProfile(profile) {
   if (!profile) return null;
   const s = migrateSettings({ modelProfiles: [profile], activeProfileId: profile.id, _modelMigrated: true });
   const p = s.modelProfiles.find((x) => x.id === profile.id) || s.modelProfiles[0];
-  if (!p || !String(p.apiKey || '').trim()) return null;
+  if (!p || (!String(p.apiKey || '').trim() && p.provider !== 'custom')) return null;
   return describeProfile(p);
 }
 
@@ -260,9 +295,12 @@ function describeProfile(p) {
     label: p.label,
     provider: p.provider,
     providerName: providerName(p.provider),
-    baseURL: (p.baseURL || getProvider(p.provider)?.baseURL || DEFAULT_BASE_URL).replace(/\/+$/, ''),
+    baseURL: normalizeBaseURL(p.baseURL || getProvider(p.provider)?.baseURL || DEFAULT_BASE_URL),
     apiKey: p.apiKey,
     model: p.model || DEFAULT_MODEL,
+    streamMode: normalizeStreamMode(p.streamMode),
+    systemPromptMode: normalizeSystemPromptMode(p.systemPromptMode),
+    authMode: normalizeAuthMode(p.authMode),
     vision: resolveVisionCapability(p),
     visionOverride: normalizeVisionOverride(p.visionOverride),
   };
@@ -275,7 +313,7 @@ export function syncLegacyFields(settings) {
   const p = s.modelProfiles.find((x) => x.id === s.activeProfileId) || s.modelProfiles[0];
   if (p) {
     s.aiProvider = p.provider;
-    s.baseURL = p.baseURL || getProvider(p.provider)?.baseURL || DEFAULT_BASE_URL;
+    s.baseURL = normalizeBaseURL(p.baseURL || getProvider(p.provider)?.baseURL || DEFAULT_BASE_URL);
     s.apiKey = p.apiKey || '';
     s.model = p.model || DEFAULT_MODEL;
   }
