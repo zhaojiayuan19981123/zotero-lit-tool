@@ -88,6 +88,22 @@ function safeStem(name, fallback = 'paper') {
   return stem || fallback;
 }
 
+/**
+ * 视觉识别的并发路数。
+ *
+ * 以前是 `Math.round(concurrency / 3)` 且硬顶 4 路。这个值偏保守：视觉请求是
+ * 「一张图 + 一页转录」，单次响应体量远小于一个翻译批次，且用的是视觉模型配额、
+ * 和翻译模型互不争抢。论文动辄 20~40 页时，4 路意味着要跑 5~10 个波次，
+ * 用户反馈的「太慢」很大一部分就出在这里。
+ *
+ * 现在按翻译并发的 1/2 起步、上限 6：既明显提速，又不会把视觉供应商打到限流
+ * （真被限流时 runAdaptivePool 会自己减半降速，是安全网）。
+ */
+export function visionConcurrency(translateConcurrency) {
+  const n = Number(translateConcurrency) || 8;
+  return Math.max(2, Math.min(6, Math.ceil(n / 2)));
+}
+
 /** 页面截图入参清洗：只留页号与 dataURL，最多 120 页，防呆不防饿 */
 const MAX_PAGE_IMAGES = 120;
 function sanitizePageImages(list) {
@@ -439,7 +455,10 @@ export class PdfTranslateService extends EventEmitter {
     this.setStage(job, 'analyze', 1, '正在解析 PDF 版面');
     const probe = await probePageCount(sourceBytes);
     const pageNumbers = parsePageRange(options.pageRange, probe);
-    if (pageNumbers) this.log(job, `页码范围：${pageNumbers.length} 页（共 ${probe} 页）`);
+    // 把「这份 PDF 到底有多少页、这次翻哪些页」写进日志。排查「怎么只翻了一页」
+    // 时这是第一手信息（常见原因：填了页码范围、或附件其实只有一页）。
+    this.log(job, `PDF 共 ${probe} 页，本次处理 ${pageNumbers ? pageNumbers.length : probe} 页`
+      + (pageNumbers ? `（页码范围：${options.pageRange}）` : '（未限定页码范围）'));
 
     let layout = null;
     try {
@@ -483,16 +502,22 @@ export class PdfTranslateService extends EventEmitter {
       }
     }
 
-    // 3) 视觉识别：逐页截图 → 视觉模型转录成结构化标记块
-    let visionPages = null;
-    if (useVision) {
-      visionPages = await this.runVisionStage(job, {
-        pageNumbers, totalPages: probe, signal, options,
-        progressStart: VISION_START, progressEnd: VISION_END,
-      });
-    }
-
-    // 4) 翻译（视觉路径的文本段与文本层的兜底段走同一条分段翻译管线）
+    // 3+4) 视觉识别 与 翻译 —— 流水线并行
+    //
+    // ★ 为什么要把这两步揉在一起（用户反馈「全文翻译有点太慢」）：
+    //   旧实现是「第 3 步：全部页识别完 → 第 4 步：才开始翻译」。这两步用的是两套
+    //   不同模型、不同配额，串行跑时总耗时 = 视觉耗时 + 翻译耗时，白白浪费一半墙钟。
+    //   更糟的是视觉识别本身并发只有 4 路，30 页论文光识别就得排 8 个波次，
+    //   翻译阶段则全程闲着。
+    //
+    //   现在改成生产者-消费者流水线：识别阶段每完成一页就把该页的文本段立刻投递给
+    //   翻译器，翻译器在后台按自己的并发节奏持续消费。两段同时在飞，
+    //   总耗时从 (V + T) 降到 max(V, T)（理想情况），页数越多收益越大。
+    //
+    //   正确性保证：翻译结果统一写进同一个 `map`（id 全局唯一：视觉段 v{页}:{序}、
+    //   文本层段 block.id），所以「边识别边翻译」和「全识别完再翻译」的产出完全一致，
+    //   只是时间轴上重叠了。文本层兜底页（识别失败/缺图）在识别阶段结束时一次性补投。
+    let visionPages = null; // 仅视觉路径下由 runVisionStage 填充
     const engine = createEngine({
       engine: options.engine,
       settings: this.deps.getSettings(),
@@ -508,15 +533,143 @@ export class PdfTranslateService extends EventEmitter {
     this.log(job, `翻译引擎：${engine.label}；目标语言：${targetLangInfo(options.targetLang).label}`);
     this.setStage(job, 'translate', TRANSLATE_START, '正在翻译');
 
+    // 流水线共用的累积容器：视觉段按页收、文本层兜底段最后收，最后一起结算
     const segments = [];
     let visionSegments = [];
+
+    // 翻译进度显示：总段数在识别过程中不断增长，所以用「已完成/当前已知」表示。
+    // 每次 feedTranslate 是一次独立的 translateSegments 调用，它的 onProgress 里
+    // done 从 0 重新计数，因此这里按「本批被投递的段数」单独跟踪，再累加进全局。
+    let transDone = 0;
+    let transTotal = 0;
+    const bumpTransProgress = () => {
+      const span = 84 - TRANSLATE_START;
+      const pct = transTotal ? Math.min(99, Math.round((transDone / transTotal) * 100)) : 0;
+      this.setStage(job, 'translate', TRANSLATE_START + Math.round(pct * span / 100),
+        transTotal ? `正在翻译 ${transDone}/${transTotal} 段` : '正在翻译');
+    };
+
+    // 结果累积（跨批次合并）：map 按 id 汇总，failures 追加，stats 累加。
+    // 必须声明在 feedTranslate 之前 —— feedTranslate 的 .then 里要用到它。
+    const mergedMap = new Map();
+    const mergedFailures = [];
+    const mergedStats = { requests: 0, retries: 0, cacheHits: 0, fallbacks: 0, chars: 0, failed: 0, throttled: 0, peakConcurrency: 0 };
+    const absorb = (out) => {
+      if (!out) return;
+      for (const [k, v] of out.map) mergedMap.set(k, v);
+      mergedFailures.push(...(out.failures || []));
+      for (const k of Object.keys(mergedStats)) {
+        if (typeof out.stats?.[k] === 'number') {
+          mergedStats[k] = (k === 'peakConcurrency')
+            ? Math.max(mergedStats[k], out.stats[k])
+            : mergedStats[k] + out.stats[k];
+        }
+      }
+      if (out.stats?.concurrencyStart != null) mergedStats.concurrencyStart = out.stats.concurrencyStart;
+      if (out.stats?.concurrencyRequested != null) mergedStats.concurrencyRequested = out.stats.concurrencyRequested;
+    };
+
+    /**
+     * 把一批新收集到的段送去翻译（流水线里的「投递」动作）。
+     *
+     * ★ 这里是并行的关键，容易写错：调用方（视觉识别的 worker）**不能 await 本函数**。
+     *   如果 await，视觉 worker 就会一直阻塞到这批翻译跑完才去认下一页 —— 等于两段
+     *   重新变回串行，只是把顺序换了一下。正确做法是「投递即返回」，把 Promise 收进
+     *   inFlight 列表，最后统一 await。这样视觉 worker 立刻去处理下一页，
+     *   翻译在后台按自己的并发节奏跑，两段真正同时在飞。
+     *
+     * ★ 另一个坑：translateSegments 内部的自适应池每次调用都从「上限的 1/4」起跑。
+     *   如果一页一页地投递（30 页 = 30 次调用），每次都要重新爬坡，反而比一次全量
+     *   更慢。所以这里做了「攒批」：把陆续投进来的段先攒着，攒够 COALESCE_CHARS /
+     *   COALESCE_ITEMS 或等待超过 COALESCE_MS 再真发一次 translateSegments。
+     *   这样既保留了流水线重叠，又让自适应并发能正常爬坡、请求次数也不会爆。
+     */
+    const COALESCE_CHARS = 1200;
+    const COALESCE_ITEMS = 8;
+    const COALESCE_MS = 400;
+    const inFlight = [];
+    let pendingSegs = [];
+    let pendingChars = 0;
+    let flushTimer = null;
+
+    const flushPending = () => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      if (!pendingSegs.length) return null;
+      const batchSegs = pendingSegs;
+      pendingSegs = [];
+      pendingChars = 0;
+      return dispatchTranslate(batchSegs);
+    };
+
+    const dispatchTranslate = (newSegments) => {
+      const base = transTotal;
+      transTotal += newSegments.length;
+      bumpTransProgress();
+      const p = translateSegments({
+        segments: newSegments,
+        engine,
+        cache: this.cache,
+        glossary: options.glossary,
+        concurrency: options.concurrency,
+        targetLang: options.targetLang,
+        sourceLang: options.sourceLang,
+        signal,
+        onLog: (m) => this.log(job, m),
+        // 单批内部的 done 是「本批已完成段数」（从 0 起算），换成全局计数即可
+        onProgress: (pr) => {
+          transDone = Math.max(transDone, base + Math.max(0, Number(pr.done) || 0));
+          bumpTransProgress();
+        },
+      }).then((out) => {        absorb(out);
+        transDone = Math.max(transDone, base + newSegments.length);
+        bumpTransProgress();
+        return out;
+      });
+      // 投递出去的批次失败不应该炸掉整条流水线：真实错误已由 translateSegments
+      // 内部记进 failures（失败的段会回退成原文），这里只做记录，不再向上抛。
+      if (typeof p.catch === 'function') p.catch((e) => this.log(job, `一批翻译未完成：${e.message}`));
+      inFlight.push(p);
+      return p;
+    };
+
+    /** 投递入口：攒批后择机真发；返回 null 表示「已收下，稍后一起发」 */
+    const feedTranslate = (newSegments) => {
+      if (!newSegments.length) return null;
+      segments.push(...newSegments);
+      pendingSegs.push(...newSegments);
+      pendingChars += newSegments.reduce((n, s) => n + String(s.text || '').length, 0);
+      if (pendingChars >= COALESCE_CHARS || pendingSegs.length >= COALESCE_ITEMS) {
+        return flushPending();
+      }
+      // 还没攒够：挂个短定时器，别让最后几段干等下一批
+      if (!flushTimer) flushTimer = setTimeout(() => { try { flushPending(); } catch (_) { /* ignore */ } }, COALESCE_MS);
+      return null;
+    };
+    /** 等所有在飞的翻译批次结束（含尚未刷出的攒批） */
+    const drainTranslate = async () => {
+      flushPending();
+      while (inFlight.length) {
+        const batch = inFlight.splice(0, inFlight.length);
+        await Promise.all(batch);
+      }
+    };
+
+    let missingLayoutPages = [];
+
     if (useVision) {
-      visionSegments = collectVisionSegments(visionPages, { translateReferences: options.translateReferences });
-      segments.push(...visionSegments);
-    }
-    // 视觉识别失败/缺图的页：用文本层兜底（这些页的文本段也要翻译）
-    const missingLayoutPages = [];
-    if (useVision) {
+      // 逐页流水线：识别完一页立刻投递该页文本段（不 await，见 feedTranslate 注释）
+      visionPages = await this.runVisionStage(job, {
+        pageNumbers, totalPages: probe, signal, options,
+        progressStart: VISION_START, progressEnd: VISION_END,
+        onPageDone: (_pageNo, page) => {
+          if (page.missing) return; // 失败页留给文本层兜底，阶段末尾统一投递
+          const segs = collectVisionSegments([page], { translateReferences: options.translateReferences });
+          visionSegments.push(...segs);
+          feedTranslate(segs);
+        },
+      });
+
+      // 识别失败/缺图的页：用文本层兜底（这些页的文本段也要翻译）
       for (const pg of visionPages) {
         if (!pg.missing) continue;
         const lp = (layout?.pages || []).find((p) => (p.index || 0) + 1 === pg.page);
@@ -525,30 +678,38 @@ export class PdfTranslateService extends EventEmitter {
       if (missingLayoutPages.length) {
         this.log(job, `${missingLayoutPages.length} 页将由文本层兜底（视觉识别不可用或页面截图缺失）`);
       }
-    }
-    const textLayerPages = useVision ? missingLayoutPages : (layout?.pages || []);
-    for (const page of textLayerPages) {
-      for (const block of page.blocks) {
-        if (!block.translatable) continue;
-        segments.push({ id: block.id, text: block.text, block });
+      const tailSegs = [];
+      for (const page of missingLayoutPages) {
+        for (const block of page.blocks) {
+          if (!block.translatable) continue;
+          tailSegs.push({ id: block.id, text: block.text, block });
+        }
       }
+      feedTranslate(tailSegs);
+    } else {
+      // 纯文本层路径：没有识别阶段可重叠，一次性投递
+      const allSegs = [];
+      for (const page of (layout?.pages || [])) {
+        for (const block of page.blocks) {
+          if (!block.translatable) continue;
+          allSegs.push({ id: block.id, text: block.text, block });
+        }
+      }
+      feedTranslate(allSegs);
     }
+
+    // 流水线收尾：等所有在飞的翻译批次落地，再往下走渲染
+    await drainTranslate();
+
     if (!segments.length) {
       throw new Error('没有收集到可翻译的文本。若开启了视觉识别，请确认从阅读器内发起翻译（需要页面截图），或关闭视觉识别后重试');
     }
 
-    const { map, failures, stats } = await translateSegments({
-      segments,
-      engine,
-      cache: this.cache,
-      glossary: options.glossary,
-      concurrency: options.concurrency,
-      targetLang: options.targetLang,
-      sourceLang: options.sourceLang,
-      signal,
-      onLog: (m) => this.log(job, m),
-      onProgress: (p) => this.setStage(job, 'translate', TRANSLATE_START + Math.round(p.percent * (84 - TRANSLATE_START)), `正在翻译 ${p.done}/${p.total} 段`),
-    });
+    const map = mergedMap;
+    const failures = mergedFailures;
+    const stats = mergedStats;
+    // 同一段原文在多个批次中出现时，去重缓存同样生效（cache 是跨批共用的），
+    // 这里只把各批的 cacheHits 累加，可能略高于「全量去重」的理论值，属可接受的估算。
     job.stats = job.stats || {};
     job.stats.translate = stats;
     if (failures.length) {
@@ -556,6 +717,7 @@ export class PdfTranslateService extends EventEmitter {
     }
 
     let translated = 0;
+    const textLayerPages = useVision ? missingLayoutPages : (layout?.pages || []);
     for (const page of textLayerPages) {
       for (const block of page.blocks) {
         if (!block.translatable) continue;
@@ -687,8 +849,23 @@ export class PdfTranslateService extends EventEmitter {
   /**
    * 视觉识别阶段：逐页把前端截图交给视觉模型，转录成结构化标记块。
    * 单页失败不炸任务：该页标记 missing，稍后用文本层兜底。
+   *
+   * ★ 职责边界（用户明确要求）：视觉模型**只做「看图识字」**——把版面转录成文本，
+   *   一个字都不翻译。翻译统一交给下面第 4) 步的分段翻译管线（默认翻译模型 / 划词
+   *   设置里选的翻译服务），这样视觉模型换掉、或只换翻译引擎时，识别结果都能复用。
+   *
+   * ★ 并行（用户反馈「有点太慢」）：
+   *   以前是「全部页识别完 → 才开始翻译」，两个阶段严格串行，总耗时 ≈ 视觉 + 翻译。
+   *   但这两段用的是**两套不同的模型与配额**，串行跑等于白白浪费一半墙钟时间。
+   *   现在改成**流水线**（见 runPipelinedVisionTranslate）：识别一页就立刻把该页的
+   *   文本段塞进翻译队列，识别与翻译同时在飞，总耗时 ≈ max(视觉, 翻译) 而不是两者之和。
+   *   同时视觉并发也从「翻译并发的 1/3、上限 4」放宽到上限 6 —— 视觉请求是单张
+   *   图片、单页转录，比翻译批次更轻，原本的 4 路在论文页数多时明显是瓶颈。
+   *
+   * @param {(pageNo:number, page:object)=>void|Promise<void>} [onPageDone]
+   *   每页识别完成（或判定 missing）后回调，用于流水线里即时触发该页的翻译。
    */
-  async runVisionStage(job, { pageNumbers, totalPages, signal, options, progressStart, progressEnd }) {
+  async runVisionStage(job, { pageNumbers, totalPages, signal, options, progressStart, progressEnd, onPageDone }) {
     const targets = pageNumbers || Array.from({ length: totalPages || 0 }, (_, i) => i + 1);
     if (!targets.length) throw new Error('没有可识别的页面');
     const images = new Map((job.pageImages || []).map((p) => [p.page, p.image]));
@@ -697,18 +874,19 @@ export class PdfTranslateService extends EventEmitter {
       return targets.map((n) => ({ page: n, blocks: [], missing: true }));
     }
     const visionLabel = this.deps.visionInfo?.().model || '已配置的视觉模型';
-    this.log(job, `视觉识别：${targets.length} 页，视觉模型「${visionLabel}」，逐页转录版面`);
+    const concurrency = visionConcurrency(options.concurrency);
+    this.log(job, `视觉识别：${targets.length} 页，视觉模型「${visionLabel}」，逐页转录版面（${concurrency} 路并发）`);
     this.setStage(job, 'vision', progressStart, '视觉模型识别版面');
 
     const prompt = visionPaperPrompt({ translateReferences: options.translateReferences });
-    const concurrency = Math.max(1, Math.min(4, Math.round(options.concurrency / 3)));
     const results = new Map();
     let done = 0;
     await runAdaptivePool(targets, async (pageNo) => {
       if (signal.aborted) throw Object.assign(new Error('任务已取消'), { name: 'AbortError' });
       const image = images.get(pageNo);
+      let page;
       if (!image) {
-        results.set(pageNo, { page: pageNo, blocks: [], missing: true });
+        page = { page: pageNo, blocks: [], missing: true };
         this.log(job, `第 ${pageNo} 页缺少页面截图，该页将用文本层兜底`);
       } else {
         try {
@@ -719,14 +897,17 @@ export class PdfTranslateService extends EventEmitter {
           });
           const blocks = parseVisionBlocks(text);
           if (!blocks.length) throw new Error('视觉模型没有返回可用内容');
-          results.set(pageNo, { page: pageNo, blocks });
+          page = { page: pageNo, blocks };
         } catch (e) {
-          results.set(pageNo, { page: pageNo, blocks: [], missing: true });
+          page = { page: pageNo, blocks: [], missing: true };
           this.log(job, `第 ${pageNo} 页视觉识别失败：${e.message}，该页将用文本层兜底`);
         }
       }
+      results.set(pageNo, page);
       done++;
       this.setStage(job, 'vision', progressStart + Math.round((done / targets.length) * (progressEnd - progressStart)), `视觉识别 ${done}/${targets.length} 页`);
+      // 流水线关键点：识别完一页就立刻交给下游翻译，不等其余页
+      if (onPageDone) await onPageDone(pageNo, page);
     }, { concurrency, signal });
     const pages = targets.map((n) => results.get(n) || { page: n, blocks: [], missing: true });
     const ok = pages.filter((p) => !p.missing).length;

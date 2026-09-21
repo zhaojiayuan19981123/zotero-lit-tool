@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  DEFAULT_PDF_TRANSLATE_OPTIONS, MODES, OUTPUT_META, resolveModes,
+  DEFAULT_PDF_TRANSLATE_OPTIONS, MODES, OUTPUT_META, resolveModes, visionConcurrency,
 } from '../src/pdfTranslate/index.js';
 import {
   buildMarkdownFromLayout, elementsToMarkdown,
@@ -295,3 +295,94 @@ test('visionPaperPrompt：强调标题必须完整、图表必须跳过', () => 
   const p2 = visionPaperPrompt({ translateReferences: true });
   assert.ok(p2.includes('完整转录'), '开启后要求转录参考文献');
 });
+
+test('visionPaperPrompt：视觉模型只负责识字，翻译交给翻译模型（职责边界）', () => {
+  // 需求：视觉模型不能顺手出译文，否则 collectVisionSegments 收到的是中文，
+  // isAlreadyTarget() 会判定「已是目标语言」整段跳过翻译，术语表与缓存全部失效。
+  const p = visionPaperPrompt({});
+
+  // 1) 「不要翻译」必须是铁律级别（而不是埋在转录要求里容易被忽略）
+  assert.ok(/三条铁律/.test(p), '「不要翻译」应提到铁律级别');
+  assert.ok(/绝对不要翻译/.test(p), '必须显式禁止翻译');
+  assert.ok(/看图识字/.test(p), '应说明职责是识字而非翻译');
+
+  // 2) 要有清晰的正误示例：英文照抄正确、翻译成中文错误
+  assert.ok(/正确：\[P\] .*[A-Za-z]/.test(p), '应给出「原样照抄」的正确示例');
+  assert.ok(/错误：\[P\] .*[\u4e00-\u9fff]/.test(p), '应给出「翻译了」的错误示例');
+
+  // 3) 转录要求里也要保留「保持原文语言」
+  assert.ok(/保持原文语言/.test(p), '转录要求应保留「保持原文语言」');
+
+  // 4) 不能出现任何「用视觉模型翻译」的措辞
+  assert.ok(!/视觉模型.{0,6}翻译成/.test(p), '不应要求视觉模型直接产出译文');
+});
+
+test('visionConcurrency：比旧的「并发/3、上限 4」更宽，且始终在安全区间内', () => {
+  // 旧公式：Math.max(1, Math.min(4, Math.round(c / 3)))
+  const oldFormula = (c) => Math.max(1, Math.min(4, Math.round(c / 3)));
+
+  // 典型档位应明显更快（这就是用户抱怨「太慢」的那一段）
+  assert.ok(visionConcurrency(8) > oldFormula(8), '默认并发下视觉路数应增加');
+  assert.ok(visionConcurrency(16) > oldFormula(16), '高并发下视觉路数应增加');
+
+  // 边界与下限：不能为 0、不能超过上限 6
+  assert.equal(visionConcurrency(1), 2, '极小配置也有 2 路（不低于旧实现的 1）');
+  assert.ok(visionConcurrency(0) >= 1, '非法输入不能返回 0');
+  assert.ok(visionConcurrency(undefined) >= 1, '缺省输入必须有值');
+  assert.ok(visionConcurrency(999) <= 6, '再大也不超过 6 路（避免打爆视觉供应商）');
+
+  // 单调不减：翻译并发越大，视觉并发不该反而变小
+  let prev = 0;
+  for (const c of [1, 2, 4, 6, 8, 10, 12, 16]) {
+    const v = visionConcurrency(c);
+    assert.ok(v >= prev, `并发 ${c} 时视觉路数不应回落`);
+    prev = v;
+  }
+});
+
+test('流水线投递：逐页投递的翻译结果与一次性全量投递完全一致', async () => {
+  // 这是「边识别边翻译」的正确性保证：两段并行只是时间轴重叠，
+  // 汇进 map 的结果必须与「全识别完再翻译」一模一样。
+  const pages = [
+    { page: 1, blocks: [
+      { tag: 'TITLE', text: 'Deep Learning for Vision' },
+      { tag: 'H1', text: '1 Introduction' },
+      { tag: 'P', text: 'Neural networks learn representations.' },
+    ] },
+    { page: 2, blocks: [
+      { tag: 'P', text: 'We propose a novel architecture.' },
+      { tag: 'REF', text: '[1] LeCun, Y. (1998).' },
+      { tag: 'FORMULA', text: 'E = mc^2' },
+    ] },
+  ];
+  const opts = { translateReferences: true };
+
+  // 路径 A：一次性收集所有页
+  const allAtOnce = collectVisionSegments(pages, opts);
+
+  // 路径 B：逐页收集后拼接（模拟流水线一页一页投递）
+  const perPage = [];
+  for (const pg of pages) perPage.push(...collectVisionSegments([pg], opts));
+
+  assert.deepStrictEqual(
+    perPage.map((s) => s.id).sort(),
+    allAtOnce.map((s) => s.id).sort(),
+    '逐页投递与全量投递应产生完全相同的段 id 集合',
+  );
+  assert.deepStrictEqual(
+    perPage.map((s) => `${s.id}|${s.text}`).sort(),
+    allAtOnce.map((s) => `${s.id}|${s.text}`).sort(),
+    '逐页投递与全量投递应产生完全相同的段内容',
+  );
+
+  // 回填到同一份页面数据后，两种路径结果必须一致（TITLE/H1/P 有译文，FORMULA 透传）
+  const tMap = new Map(allAtOnce.map((s) => [s.id, `T-${s.id}`]));
+  const a = JSON.parse(JSON.stringify(pages));
+  const b = JSON.parse(JSON.stringify(pages));
+  applyVisionTranslations(a, allAtOnce, tMap);
+  applyVisionTranslations(b, perPage, tMap);
+  assert.deepStrictEqual(a, b, '两种投递路径的回填结果必须一致');
+  assert.equal(a[0].blocks[0].t, 'T-v1:0');
+  assert.equal(a[1].blocks[2].t, undefined, 'FORMULA 不参与翻译，不应被回填');
+});
+

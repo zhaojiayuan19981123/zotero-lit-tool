@@ -2148,6 +2148,9 @@
     chatBusy: false,
     chatAbort: null,     // 流式生成中用于「停止」的 AbortController
     chatLoadedFor: null, // 已从服务端载入对话的文献 id（防止重复拉取 / 串台）
+    fullTextCache: null, // {forId, text} 解析全文缓存，供 AI 对话作为上下文
+    fullTextLoading: false,
+    meta: null,          // 打开阅读器时缓存的文献记录快照（列表过期时兜底）
   };
   const prChatImages = []; // 待发送图片 [{name, dataUrl}]（按论文重置）
 
@@ -3187,9 +3190,24 @@
         data: pnPaperNoteData(data),
         layout: 'logicalStructure',
         theme: 'default',
+        // 节点文本宽度自适应：库把它当作「达到该宽度就换行」的阈值，
+        // 默认 500px 会让短文字留一大片空白、长文字又被挤到固定宽度里显示不全。
+        // 这里按「全图最长的那一行文字」估算一个刚好够用的宽度（96~320px 之间），
+        // 短文字因此收紧、长文字自动换行并把节点框撑高。
+        textAutoWrapWidth: pnFitWrapWidth(data),
         // 与 XMind 一致的核心交互：Tab 子主题 / Enter 同级 / F2 改文字 / Delete 删除
         enableFreeDrag: false,
-        mousewheelAction: 'zoom',
+        // 滚轮行为：默认上下平移，只有按住 Ctrl（或 ⌘）才缩放。
+        //
+        // 库里的判定顺序是 `mousewheelAction === 'zoom' || e.ctrlKey || e.metaKey`，
+        // 也就是说：
+        //   · mousewheelAction='zoom' → 滚轮无论有没有按 Ctrl 都缩放（旧行为，用户在
+        //     长导图里想上下翻看时会误缩放，很难受）；
+        //   · mousewheelAction='move' → 不按修饰键时走 else 分支做画布平移，
+        //     按住 Ctrl 时命中 `e.ctrlKey` 照样缩放。
+        // 所以 'move' 恰好就是「Ctrl 缩放、否则平移」，与 XMind 浏览习惯一致。
+        mousewheelAction: 'move',
+        mousewheelMoveStep: 100,
         mousewheelZoomActionReverse: false,
         enableAutoFocus: true,
         readonly: false,
@@ -3200,12 +3218,41 @@
       pn.mm.on('data_change', () => {
         capturePnMindmap();
         markPnDirty();
+        // 文字变长/变短后重算换行宽度，让框始终贴合内容
+        applyPnWrapWidth();
       });
       setTimeout(() => { try { pn.mm.view.fit(); } catch (_) { /* ignore */ } }, 60);
     } catch (e) {
       pn.mm = null;
       host.innerHTML = `<div class="pn-md-empty">思维导图初始化失败：${esc(e.message)}</div>`;
     }
+  }
+
+  /**
+   * 按当前导图内容算一个合适的换行宽度。
+   * 右栏宽度也要参与参考：太窄的话统一上限，避免节点横向撑爆画布。
+   */
+  function pnFitWrapWidth(root) {
+    const host = pnEl('pnMindHost');
+    // 右栏可用宽度的一半~八成之间夹一层，保证长标题换行后不会比画布还宽
+    const hostW = host?.clientWidth || 600;
+    const hardMax = Math.max(160, Math.min(320, Math.round(hostW * 0.8)));
+    return paperNoteUtils.fitMindmapWrapWidth(root || pn.mindmap, {
+      fontSize: 16,
+      minWidth: 96,
+      maxWidth: hardMax,
+    });
+  }
+
+  /** 把重算后的换行宽度应用到实例（值没变就跳过，避免不必要的重排） */
+  function applyPnWrapWidth() {
+    if (!pn.mm) return;
+    const wrap = pnFitWrapWidth(pn.mindmap);
+    try {
+      if (pn.mm.opt.textAutoWrapWidth === wrap) return;
+      pn.mm.opt.textAutoWrapWidth = wrap;
+      pn.mm.render();
+    } catch (_) { /* 渲染中的竞态忽略 */ }
   }
 
   /** 统一导图数据结构：确保有 data.text 与 children 数组，避免库内部报错 */
@@ -3670,9 +3717,11 @@
     renderPrAttach();
   }
 
-  // 组装论文上下文：解析字段 + 当前页附近文字，让 AI 的回答贴合这篇论文
+  // 组装论文上下文：结构化字段 + 解析出的全文正文，让 AI 的回答贴合这篇论文
   function buildPaperContext() {
-    const it = items.find((x) => x.id === pr.recordId);
+    // items 是阅读器打开时列表页的快照；若此刻列表还没加载/已过期，
+    // 退回到打开阅读器时缓存下来的记录，避免上下文整段丢失（只剩一句「没有解析结果」）。
+    const it = items.find((x) => x.id === pr.recordId) || pr.meta || null;
     if (!it) return '';
     const order = TYPE_ORDER[it.docType || 'empirical'] || [];
     const cols = order.map((k) => CONTENT_COLS[k]).filter(Boolean);
@@ -3684,7 +3733,68 @@
       if (v) lines.push(`${c.label}：${v.length > 900 ? v.slice(0, 900) + '…' : v}`);
     }
     if (String(it.thoughts || '').trim()) lines.push(`我的思考：${String(it.thoughts).slice(0, 400)}`);
+
+    // 正文：优先用已加载/已缓存的解析全文（译文 Markdown 里就是带结构的论文正文）。
+    // 只给标题摘要的话，AI 会因为「看不到正文」而答得空泛或说「没提到」。
+    const body = pr.fullTextCache?.forId === pr.recordId ? pr.fullTextCache.text : '';
+    if (body) {
+      lines.push('', '【论文正文（解析全文）】', body);
+    } else if (pr.fullTextLoading) {
+      lines.push('', '（论文正文仍在解析中，本次回答可能不够完整）');
+    }
     return lines.join('\n');
+  }
+
+  /** 取一篇文献的记录：优先用最新列表，其次用打开阅读器时缓存的快照 */
+  function paperRecord(litId) {
+    return items.find((x) => x.id === litId) || (pr.recordId === litId ? pr.meta : null) || null;
+  }
+
+  /**
+   * 把本篇文献的解析全文取进内存，供 AI 对话使用。
+   * 来源是「全文翻译」产出的 Markdown 译文（其中含完整正文结构），
+   * 按文献缓存，避免每轮对话都重新下载。
+   */
+  async function ensurePrFullText(litId) {
+    if (!litId) return '';
+    if (pr.fullTextCache?.forId === litId) return pr.fullTextCache.text;
+    pr.fullTextLoading = true;
+    try {
+      const list = await api('/api/pdf-translate/jobs');
+      const mine = (Array.isArray(list) ? list : [])
+        .filter((j) => j.literatureId === litId && j.status === 'done')
+        .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      // 优先取 Markdown 译文（保留标题层级与段落），退而求其次取任意文本产物
+      let pick = null;
+      for (const j of mine) {
+        pick = (j.outputs || []).find((o) => o.kind === 'md') || null;
+        if (pick) break;
+      }
+      if (!pick) {
+        for (const j of mine) { pick = (j.outputs || [])[0] || null; if (pick) break; }
+      }
+      if (!pick?.url) { pr.fullTextCache = { forId: litId, text: '' }; return ''; }
+      const res = await fetch(pick.url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      let raw = await res.text();
+      // 去掉 crop: 图片占位（对模型没意义，白占 token）与多余空行
+      raw = raw.replace(/!\[[^\]]*\]\(crop:[^)]*\)/g, '')
+        .replace(/\]\(crop:[^)]*\)/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      // 上下文有上限：大概按字符裁到 ~6 万字，超长时保留开头（摘要/引言/方法）与结尾（结论/参考文献）
+      const LIMIT = 60000;
+      const text = raw.length > LIMIT
+        ? raw.slice(0, LIMIT * 0.75) + '\n\n……（中间内容略）……\n\n' + raw.slice(-LIMIT * 0.25)
+        : raw;
+      pr.fullTextCache = { forId: litId, text };
+      return text;
+    } catch (_) {
+      pr.fullTextCache = { forId: litId, text: '' };
+      return '';
+    } finally {
+      pr.fullTextLoading = false;
+    }
   }
 
   // 取当前页及相邻页的纯文字（用于「附上当前页文字」）
@@ -3703,12 +3813,16 @@
     const input = $('prChatInput');
     const text = String(retryPayload?.text ?? input?.value ?? '').trim();
     if (!text && !prChatImages.length && !retryPayload?.imgs?.length) { toast('请输入问题或上传图片', 'error'); return; }
-    const it = items.find((x) => x.id === pr.recordId);
+    const it = paperRecord(pr.recordId);
     if (!it) { toast('未找到对应的文献记录', 'error'); return; }
 
     const imgs = retryPayload?.imgs ? [...retryPayload.imgs] : prChatImages.map((x) => x.dataUrl);
     const userMessage = retryPayload?.userMessage || { role: 'user', content: text, images: imgs };
     if (!retryPayload) pr.chat.push(userMessage);
+    // 首轮先把解析全文取进来（含缓存），否则模型只看得到标题摘要，答得空泛
+    if (!pr.fullTextCache || pr.fullTextCache.forId !== pr.recordId) {
+      await ensurePrFullText(pr.recordId);
+    }
     const holder = { role: 'assistant', content: '', pending: true, streaming: true, retryPayload: { text, imgs, userMessage } };
     pr.chat.push(holder);
     prChatImages.length = 0;
@@ -3721,8 +3835,7 @@
     const ctx = buildPaperContext();
     const sys = '你是一位严谨的科研助理。用户正在精读一篇文献，请只围绕这篇论文回答，'
       + '回答要具体、可核查，必要时指明依据来自论文的哪一部分。如果论文上下文里没有相关信息，'
-      + '请明确说「论文解析结果中没有提到」，不要编造。用简体中文和规范 Markdown 回答；适合比较的信息可用 Markdown 表格，代码使用带语言标识的围栏代码块，公式使用 $...$ 或 $$...$$。\n\n【当前论文解析结果】\n' + (ctx || '（这篇文献还没有解析结果）');
-    // 组织为多模态 content：文本 + 图片
+      + '请明确说「论文解析结果中没有提到」，不要编造。用简体中文和规范 Markdown 回答；适合比较的信息可用 Markdown 表格，代码使用带语言标识的围栏代码块，公式使用 $...$ 或 $$...$$。\n\n【当前论文解析结果】\n' + (ctx || '（这篇文献还没有解析结果）');    // 组织为多模态 content：文本 + 图片
     const userContent = imgs.length
       ? [{ type: 'text', text: text || '请分析这些图片，并结合这篇论文回答我的问题。' },
          ...imgs.map((u) => ({ type: 'image_url', image_url: { url: u } }))]
@@ -3915,6 +4028,8 @@
     if (!it?.filename) { toast('该文献还没有 PDF 附件', 'error'); return; }
     pr.recordId = id;
     pr.open = true;
+    // 缓存记录快照：AI 上下文用它兜底，列表刷新前也不会丢论文信息
+    pr.meta = it;
     // 切换文献时终止上一篇的流式生成，并重置待发图片（对话是「按论文」的）
     stopPrChat();
     pr.chatBusy = false;
@@ -3923,6 +4038,9 @@
     pr.chat = [];
     pr.chatLoadedFor = null;
     prChatImages.length = 0;
+    // 解析全文缓存按文献隔离，切文献必须清掉，否则会把上一篇正文喂给这一篇
+    pr.fullTextCache = null;
+    pr.fullTextLoading = false;
     $('pdfReader').classList.remove('hidden');
     $('prFilename').textContent = it.originalName || '';
     resetSelectionTranslation({ preserveMode: false, clearBrowserSelection: false });
@@ -4563,9 +4681,13 @@
     // 划词 → 工具条 + 自动翻译
     document.addEventListener('mouseup', () => {
       if (!pr.open) return;
-      // 笔记模式里在右栏编辑 / 中栏输入，不应触发 PDF 划词
-      if (pn.on && !findPageWrap(document.activeElement)) return;
       setTimeout(() => {
+        // captureSelection 只在选区确实落在 PDF 页面（.pr-page-wrap）里时才返回结果，
+        // 所以在右栏编辑器 / 中栏输入框里选字天然不会误触发。
+        //
+        // 这里原本还有一道 `findPageWrap(document.activeElement)` 的守卫，是错的：
+        // 选中 PDF 文字时焦点常常仍停在 <body>（或先前聚焦过的输入框）上，
+        // 于是守卫直接把事件吞掉 —— 表现为「进笔记模式后划词不翻译」。
         const sel = captureSelection();
         if (sel) {
           pr.currentSelection = sel;

@@ -232,3 +232,76 @@ test('isNoteEmpty：两种视图都空才算空', () => {
     false
   );
 });
+
+// ---------- 节点宽度自适应 ----------
+
+test('charWidth：中文按整字宽，ASCII 明显更窄', () => {
+  const fs16 = U.charWidth('中', 16);
+  const ascii = U.charWidth('a', 16);
+  assert.equal(fs16, 16);
+  assert.ok(ascii < fs16, 'ASCII 应比中文窄');
+  assert.ok(ascii > 0);
+  // 全角标点按整字宽
+  assert.equal(U.charWidth('，', 16), 16);
+});
+
+test('estimateTextWidth 与字号成正比', () => {
+  const w16 = U.estimateTextWidth('中文标题', 16);
+  const w32 = U.estimateTextWidth('中文标题', 32);
+  assert.ok(Math.abs(w32 - w16 * 2) < 0.001);
+});
+
+test('idealNodeTextWidth：短文字收紧、长文字触顶、永不为 0', () => {
+  const opts = { fontSize: 16, minWidth: 96, maxWidth: 320 };
+  // 极短：被下限托住，不会塌成一条线
+  assert.equal(U.idealNodeTextWidth('结论', opts), 96);
+  // 中等：按实际宽度走（2 字 * 16 + 2 = 34 → 仍被下限托住；4 字 → 66 也被托住）
+  const mid = U.idealNodeTextWidth('这是一个十二字的标题内容', opts);
+  assert.ok(mid > 96 && mid <= 320, `mid=${mid} 应落在 (96, 320]`);
+  // 超长：被上限夹住，不会无限宽
+  const long = U.idealNodeTextWidth('超'.repeat(200), opts);
+  assert.equal(long, 320);
+  // 空文本回落到下限
+  assert.equal(U.idealNodeTextWidth('', opts), 96);
+});
+
+test('idealNodeTextWidth：多行取最长的一行', () => {
+  const opts = { fontSize: 16, minWidth: 96, maxWidth: 320 };
+  const short = U.idealNodeTextWidth('短\n也很短', opts);
+  const wide = U.idealNodeTextWidth('这是一行明显更长的文字内容用来对比', opts);
+  assert.ok(wide > short, '含长行的节点应算出更大宽度');
+});
+
+test('fitMindmapWrapWidth：取全图最宽的一行', () => {
+  const tree = {
+    data: { text: '根' },
+    children: [
+      { data: { text: '短' }, children: [] },
+      { data: { text: '这是一个很长的子节点标题用来撑宽换行阈值' }, children: [
+        { data: { text: '更深的节点' }, children: [] },
+      ] },
+    ],
+  };
+  const w = U.fitMindmapWrapWidth(tree, { fontSize: 16, minWidth: 96, maxWidth: 320 });
+  assert.equal(w, 320, '最长行超过上限时应取上限');
+  // 只含短文字时回落到下限，而不是硬撑着 320
+  const narrow = U.fitMindmapWrapWidth({ data: { text: '短' }, children: [] }, { fontSize: 16, minWidth: 96, maxWidth: 320 });
+  assert.equal(narrow, 96);
+});
+
+test('fitMindmapWrapWidth：空树/空文本返回下限，不返回 NaN', () => {
+  for (const t of [null, undefined, {}, { data: { text: '' }, children: [] }]) {
+    const w = U.fitMindmapWrapWidth(t, { fontSize: 16, minWidth: 96, maxWidth: 320 });
+    assert.equal(typeof w, 'number');
+    assert.ok(Number.isFinite(w) && w >= 96, `w=${w}`);
+  }
+});
+
+test('节点文字里的 HTML 会被 nodeText 剥掉（不会把标签当正文渲染）', () => {
+  assert.equal(U.nodeText({ data: { text: '<p>中心主题</p>' } }), '中心主题');
+  assert.equal(U.nodeText({ data: { text: '<p>第一行</p><p>第二行</p>' } }), '第一行\n第二行');
+  // 标签剥掉后算宽度，不能把 <p> 的长度也算进去
+  const withTag = U.idealNodeTextWidth(U.nodeText({ data: { text: '<p>中心主题</p>' } }), { fontSize: 16, minWidth: 96, maxWidth: 320 });
+  const plain = U.idealNodeTextWidth('中心主题', { fontSize: 16, minWidth: 96, maxWidth: 320 });
+  assert.equal(withTag, plain);
+});

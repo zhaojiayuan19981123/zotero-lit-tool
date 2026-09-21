@@ -216,3 +216,73 @@ test('笔记与对话文件已纳入备份与导出清单', async () => {
   assert.match(source, /'paper-notes\.json'/);
   assert.match(source, /'paper-chats\.json'/);
 });
+
+// ---------------------------------------------------------------------------
+// 附件上传 / 删除：只清解析字段，不能抹掉用户填的 title
+// （title 被抹掉会让导图根节点退化成文件名、AI 上下文丢标题）
+// ---------------------------------------------------------------------------
+
+/** 造一份最小合法 PDF */
+function tinyPdf() {
+  const content = 'BT /F1 12 Tf 40 700 Td (Hello) Tj ET';
+  const objs = {
+    1: '<< /Type /Catalog /Pages 2 0 R >>',
+    2: '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    3: '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    4: `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    5: '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  };
+  let out = '%PDF-1.4\n';
+  const off = [];
+  for (let i = 1; i <= 5; i++) { off[i] = out.length; out += `${i} 0 obj\n${objs[i]}\nendobj\n`; }
+  const xref = out.length;
+  out += 'xref\n0 6\n0000000000 65535 f \n';
+  for (let i = 1; i <= 5; i++) out += String(off[i]).padStart(10, '0') + ' 00000 n \n';
+  out += `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, 'latin1');
+}
+
+test('重新上传附件不会抹掉已填写的 title', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'sciterminal-attach-'));
+  const dataDir = path.join(root, 'data');
+  let server;
+  try {
+    store.configure({ dataDir });
+    ({ app: server } = { app: createServer(createApp({ dataDir }).app) });
+    const base = await listen(server);
+
+    // 建记录并手填标题（模拟用户输入 / 从别处导入）
+    const created = await (await fetch(`${base}/api/literature`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    })).json();
+    const id = created.id;
+    const TITLE = 'AI辅助经管类学术文献精读系统研究';
+    await fetch(`${base}/api/literature/${id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: TITLE, authors: '张三' }),
+    });
+    assert.equal((await (await fetch(`${base}/api/literature/${id}`)).json()).title, TITLE);
+
+    // 上传附件：解析字段该清空，但 title 必须留下
+    const form = new FormData();
+    form.append('file', new Blob([tinyPdf()], { type: 'application/pdf' }), 'paper.pdf');
+    const up = await (await fetch(`${base}/api/literature/${id}/attachment`, { method: 'POST', body: form })).json();
+    assert.equal(up.title, TITLE, '上传附件后标题应保留');
+    assert.ok(up.filename, '附件应已挂上');
+    assert.equal(up.abstract, '', '解析字段应被清空');
+
+    // 再上传一次（换附件）也要保留
+    const form2 = new FormData();
+    form2.append('file', new Blob([tinyPdf()], { type: 'application/pdf' }), 'paper2.pdf');
+    const up2 = await (await fetch(`${base}/api/literature/${id}/attachment`, { method: 'POST', body: form2 })).json();
+    assert.equal(up2.title, TITLE, '换附件后标题仍应保留');
+
+    // 删除附件同样保留 title
+    const del = await (await fetch(`${base}/api/literature/${id}/attachment`, { method: 'DELETE' })).json();
+    assert.equal(del.title, TITLE, '删除附件后标题仍应保留');
+    assert.equal(del.filename, '', '文件名应已清空');
+  } finally {
+    if (server) await close(server);
+    await rm(root, { recursive: true, force: true });
+  }
+});

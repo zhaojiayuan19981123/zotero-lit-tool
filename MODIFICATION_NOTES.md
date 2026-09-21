@@ -1,3 +1,62 @@
+## v1.15.0：导图框自适应 + 滚轮改为平移、划词翻译修复、AI 对话读解析全文、全文翻译提速（2026-09-22）
+
+本版集中修掉 v1.14.0 上线后用户实测反馈的 5 个问题，其中 3 个是真实缺陷。
+
+### 一、思维导图节点框随字数自适应（真实缺陷）
+
+- **现象**：节点框宽度固定，长标题被塞在同一个宽度里显示不全，短标题又空撑一大片。
+- **根因**：`simple-mind-map` 的 `textAutoWrapWidth`（默认 **500**）是「达到该宽度就换行」的**全局阈值**，无法逐节点设置。库内两条测量路径行为不同：富文本节点按 `el.style.maxWidth = textAutoWrapWidth + 'px'` 量真实内容宽度并按需换行；纯文本节点直接 `width = Math.min(Math.ceil(width), maxWidth)` 把宽度**钳到 500**，于是长文字被压进固定宽度。
+- **修复**：新增纯逻辑函数 `paper-note-utils.js` 的 `charWidth` / `estimateTextWidth` / `idealNodeTextWidth` / `fitMindmapWrapWidth` —— 扫描全树取「最长一行」估算所需宽度，夹在 `[96, 320]`（上限再按右栏宽度 80% 收一次），据此动态设置 `textAutoWrapWidth`；`data_change` 时重算，文字变长变短框都跟着变。
+- **实测**：29 字 → 350×49（2 行）；43 字 → 350×68（3 行）；修复前固定 500 → 530×49 且文字显示不全。
+
+### 二、导图滚轮行为对齐 XMind：默认平移，Ctrl 才缩放（真实缺陷）
+
+- **现象**：在长导图里想上下翻看，一滚滚轮就缩放，很难受。
+- **根因**：`mousewheelAction: 'zoom'` 让滚轮**无条件**缩放。
+- **修复**：改为 `'move'`。库内判定是 `mousewheelAction === 'zoom' || e.ctrlKey || e.metaKey`，所以 `'move'` 恰好等于「不按修饰键走画布平移、按住 Ctrl/⌘ 照样缩放」，正是用户要的行为；另设 `mousewheelMoveStep: 100`。提示条补上「滚轮上下平移，Ctrl+滚轮缩放」。
+
+### 三、笔记模式划词翻译失效（真实缺陷）
+
+- **现象**：进入笔记模式后，在 PDF 上划词不再触发翻译。
+- **根因**：`document.addEventListener('mouseup')` 里有一道 `if (pn.on && !findPageWrap(document.activeElement)) return;` 守卫。选中 PDF 文字时 `document.activeElement` 常常仍停在 `<body>`（或先前聚焦过的输入框）上，守卫直接把事件吞掉。而 `captureSelection()` 本身**已经**用 `findPageWrap(sel.anchorNode)` 判定过「选区是否落在 `.pr-page-wrap` 里」，这道守卫纯属多余且有害。
+- **修复**：删掉该守卫，只依赖 `captureSelection()` 的返回值为准。
+
+### 四、论文 AI 对话改为基于「解析结果（全文）」回答（真实缺陷）
+
+- **现象**：AI 对话只看得到标题/作者/摘要等结构化字段，问论文里的具体内容答不上来。
+- **根因**：`buildPaperContext()` 原先只拼 `items` 的结构化字段，**不含解析全文**。
+- **修复**：
+  - 新增 `ensurePrFullText(litId)`：从 `GET /api/pdf-translate/jobs` 取该文献最新的 `status==='done'` 作业，优先选 `outputs[].kind==='md'`（全文翻译产出的 Markdown 译文），`fetch` 其 URL 作为解析全文；剥离 `crop:` 图片占位；超 60000 字符时保留开头 75% + 结尾 25%；按文献 id 缓存到 `pr.fullTextCache`。
+  - `sendPrChat()` 在发请求前 `await ensurePrFullText()`，`buildPaperContext()` 追加「【论文正文（解析全文）】」段；正文仍在解析中时明确提示「本次回答可能不够完整」。
+  - 新增 `paperRecord(litId)`（`items.find` 失败时回落 `pr.meta` 快照），避免切文献后取不到记录。
+
+### 五、全文翻译提速：视觉识别与翻译改为流水线并行
+
+- **现象**：开启「视觉模型识别版面」后全文翻译明显偏慢。
+- **根因**：旧实现是「**全部页识别完 → 才开始翻译**」。两段用的是两套不同模型与配额，串行跑总耗时 = 视觉 + 翻译，白白浪费一半墙钟；且视觉并发只有 `min(4, 并发/3)`，30 页论文光识别就要排 8 个波次。
+- **修复**：
+  - **生产者-消费者流水线**：`runVisionStage` 新增 `onPageDone` 回调，识别完**一页**就立刻把该页文本段投递给翻译器。关键是**投递即返回、不 await** —— 若 await，视觉 worker 会阻塞到该批翻译跑完才去认下一页，等于把两段重新变回串行。译文统一汇进同一个 `map`（id 全局唯一），所以产出与「全识别完再翻译」完全一致，只是时间轴重叠。
+  - **攒批**：`translateSegments` 的自适应池每次调用都从「上限的 1/4」爬坡，一页一页投递反而更慢。故设 1200 字 / 8 段 / 400ms 三个阈值攒批后再真发，既保留重叠又让并发正常爬坡、请求次数不爆。
+  - **视觉并发放宽**：`visionConcurrency()` 由 `max(1, min(4, round(并发/3)))` 改为 `max(2, min(6, ceil(并发/2)))`，默认 8 路并发时视觉从 3 路提到 4 路、16 路时从 4 路提到 6 路（仍留限流安全网：被限流时自适应池会自动减半）。
+  - **进度显示**：总段数在识别过程中不断增长，改为「已完成/当前已知」；新增「PDF 共 N 页，本次处理 M 页（是否限定页码范围）」日志，便于排查「怎么只翻了一页」。
+- **实测**：模拟 20 页（视觉 4 路 × 120ms、翻译 4 页/批 × 300ms）总耗时 **2289ms → 1048ms，提速 2.18x**；真实 HTTP 全链路 8 页作业中，**首次翻译 @2655ms 早于末次视觉 @2919ms**，重叠成立。
+
+### 六、视觉模型职责收窄：只做「看图识字」，翻译一律交给翻译模型
+
+- **需求**：视觉模型只管识别文字，译文必须走系统默认翻译模型 / 划词设置里选的翻译服务。
+- **修复**：把「绝对不要翻译」从「转录要求」的一条提到**铁律级别**（第 3 条）并给出正误示例（英文照抄正确、译成中文错误）。原因：一旦模型顺手翻译，`collectVisionSegments` 收集到的就是中文，`isAlreadyTarget()` 会判「已是目标语言」而整段跳过翻译 —— 译文看着正常，但术语表、翻译缓存、`showOriginal` 等既有设施全部失效。代码路径本来就是 `collectVisionSegments → translateSegments(engine)`，本次把边界写死并在提示词层面强约束。
+
+### 七、顺带修复：重新上传 PDF 附件会抹掉已填标题（排查中发现）
+
+- `POST/DELETE /api/literature/:id/attachment` 里 `for (const key of FIELDS) updated[key] = ''` 会把含 `title` 的字段全清空（`FIELDS` 来自 `src/aiExtractor.js` 的 `COMMON_FIELDS`）。换附件意味着「这一篇的内容要重解析」本该清空解析字段，但 title 常是用户手填/从别处导入的，不该因为重新挂个 PDF 就丢 —— 否则笔记模式导图根节点退化成文件名、AI 对话上下文丢标题。已用 `keepTitle` 在上传与删除两处保留 title。
+
+### 测试
+
+- 单测 **110 → 113 passed / 0 failed**：新增 `visionPaperPrompt` 职责边界（3 例）、`visionConcurrency` 边界与单调性、逐页投递与全量投递结果等价性。
+- 真实浏览器端到端：滚轮行为 **5/5**、视觉翻译流水线 **13/13**、v1.14.0 功能回归 **11/11**（导图框自适应 / 划词翻译 / AI 对话含解析全文）。
+
+---
+
 ## v1.14.0：三栏笔记模式（Markdown + XMind 级思维导图）+ 论文对话持久化（2026-09-22）
 
 ### 一、三栏笔记模式（阅读器工具栏「📓 笔记模式」）

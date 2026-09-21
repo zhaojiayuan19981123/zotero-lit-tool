@@ -263,6 +263,71 @@
     return true;
   }
 
+  // ---------- 导图节点框自适应 ----------
+  /**
+   * 估算一个字符的显示宽度（px @ fontSize）。
+   * 中日韩字符与全角标点按 1 个字宽算，ASCII 按约 0.55 算，其余按 0.8。
+   */
+  function charWidth(ch, fontSize) {
+    const code = ch.codePointAt(0);
+    const isFull =
+      (code >= 0x2e80 && code <= 0x9fff) ||   // CJK 部首 ~ 统一汉字
+      (code >= 0xf900 && code <= 0xfaff) ||   // 兼容汉字
+      (code >= 0xff00 && code <= 0xff60) ||   // 全角形式
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      (code >= 0x3000 && code <= 0x303f);     // CJK 标点
+    if (isFull) return fontSize;
+    if (code <= 0x7f) return fontSize * 0.55;
+    return fontSize * 0.8;
+  }
+
+  /** 单行文本的估算宽度 */
+  function estimateTextWidth(text, fontSize) {
+    let w = 0;
+    for (const ch of String(text || '')) w += charWidth(ch, fontSize);
+    return w;
+  }
+
+  /**
+   * 按最长一行算节点文本所需的理想宽度（含左右内边距）。
+   * 用于给库的 textAutoWrapWidth 定一个「够放下最长行、但不会太离谱」的值，
+   * 这样短文字的框会收紧、长文字会换行把框撑高，而不是把字挤出框外。
+   */
+  function idealNodeTextWidth(text, opts = {}) {
+    const fontSize = Number(opts.fontSize) || 16;
+    const min = Number(opts.minWidth) > 0 ? Number(opts.minWidth) : 96;
+    const max = Number(opts.maxWidth) > 0 ? Number(opts.maxWidth) : 320;
+    const lines = String(text || '').split(/\r?\n/);
+    let longest = 0;
+    for (const line of lines) {
+      longest = Math.max(longest, estimateTextWidth(line, fontSize));
+    }
+    if (!longest) return min;
+    // +2 规避 getBoundingClientRect 取整导致的最后一字换行
+    const want = Math.ceil(longest) + 2;
+    return Math.min(Math.max(want, min), max);
+  }
+
+  /**
+   * 扫描整棵导图，取所有节点里「最宽的一行」来决定统一换行宽度。
+   * 统一值是必要的：库的 textAutoWrapWidth 是全局配置，无法逐节点设置。
+   */
+  function fitMindmapWrapWidth(root, opts = {}) {
+    const max = Number(opts.maxWidth) > 0 ? Number(opts.maxWidth) : 320;
+    const min = Number(opts.minWidth) > 0 ? Number(opts.minWidth) : 96;
+    let longest = 0;
+    const walk = (n) => {
+      const t = nodeText(n);
+      for (const line of t.split(/\r?\n/)) {
+        longest = Math.max(longest, estimateTextWidth(line, Number(opts.fontSize) || 16));
+      }
+      (Array.isArray(n?.children) ? n.children : []).forEach(walk);
+    };
+    if (root) walk(root);
+    if (!longest) return min;
+    return Math.min(Math.max(Math.ceil(longest) + 2, min), max);
+  }
+
   window.PaperNoteUtils = {
     DEFAULT_PANES,
     MIN_PANE_RATIO,
@@ -279,5 +344,9 @@
     buildNoteSnippet,
     insertSnippet,
     isNoteEmpty,
+    charWidth,
+    estimateTextWidth,
+    idealNodeTextWidth,
+    fitMindmapWrapWidth,
   };
 })();

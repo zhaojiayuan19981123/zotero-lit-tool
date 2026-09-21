@@ -882,7 +882,12 @@ export function createApp({
       journalRank: '', journalRankDetail: [], journalRankError: '',
       annotations: [],
     };
+    // 换附件意味着「这一篇的内容要重解析」，所以清空各解析字段。
+    // 但 title 例外：它常常是用户手填/从别处导入的，不该因为重新挂个 PDF 就被抹掉，
+    // 否则笔记模式的导图根节点、AI 对话上下文都会退化成文件名。
+    const keepTitle = String(item.title || '').trim();
     for (const key of FIELDS) updated[key] = '';
+    if (keepTitle) updated.title = keepTitle;
     store.upsertLiterature(updated);
     res.json(updated);
   });
@@ -898,7 +903,10 @@ export function createApp({
       status: 'pending', error: null, source: null, numPages: 0, parsedAt: null,
       journalRank: '', journalRankDetail: [], journalRankError: '', annotations: [],
     };
+    // 同上传：删附件只清解析字段，保留用户填过的 title
+    const keepTitle = String(item.title || '').trim();
     for (const key of FIELDS) updated[key] = '';
+    if (keepTitle) updated.title = keepTitle;
     store.upsertLiterature(updated);
     res.json(updated);
   });
