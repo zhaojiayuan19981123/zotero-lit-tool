@@ -2065,7 +2065,7 @@
   if (!pdfReaderUtils) throw new Error('PDF 阅读器工具加载失败');
 
   const pr = {
-    open: false, doc: null, scale: 1.4, pageNum: 1, totalPages: 1,
+    open: false, doc: null, docUrl: null, scale: 1.4, pageNum: 1, totalPages: 1,
     recordId: null, highlightColor: 'yellow', currentSelection: null,
     pageSizes: [],   // [{w,h,rotation}] 每页默认旋转下 scale=1 尺寸
     pageRotations: new Map(), // page -> 相对 PDF 原始方向的显示旋转（仅当前阅读会话）
@@ -2073,6 +2073,7 @@
     rendered: new Set(), // 已渲染页码
     observer: null,
     tab: 'translate',    // 当前右侧面板页签
+    md: null,            // Markdown 译文查看器状态 {url,name,visible,loaded,text}
     chat: [],            // 本篇论文的 AI 对话消息 [{role,content,images:[dataURL]}]
     chatBusy: false,
     chatAbort: null,     // 流式生成中用于「停止」的 AbortController
@@ -2139,8 +2140,8 @@
   function ftEl(id) { return document.getElementById(id); }
 
   /** 成品类型 → 展示名。服务端会在 outputs[].label 里回传，这里只作为兜底 */
-  const FT_KIND_LABEL = { mono: '单语译文版', dual: '双语对照版', reflow: '重排版' };
-  const FT_KIND_SHORT = { mono: '单语', dual: '双语', reflow: '重排' };
+  const FT_KIND_LABEL = { md: 'Markdown 译文', mono: '单语译文版', dual: '双语对照版', reflow: '重排版' };
+  const FT_KIND_SHORT = { md: 'MD', mono: '单语', dual: '双语', reflow: '重排' };
 
   /** 读一个数字输入框：空/非法 → 用默认值；否则夹到 [min, max] */
   function ftNumber(id, min, max, def) {
@@ -2159,6 +2160,8 @@
       engine: ftEl('ftEngine').value,
       targetLang: ftEl('ftTarget').value,
       mode: ftEl('ftMode').value,
+      // 视觉识别：只作用于 Markdown 译文（逐页截图 → 视觉模型转录 → 翻译 → 组装）
+      vision: !!ftEl('ftVision')?.checked,
       pageRange: ftEl('ftPages').value.trim(),
       keepFormulas: ftEl('ftKeepFormulas').checked,
       keepTables: ftEl('ftKeepTables').checked,
@@ -2196,7 +2199,8 @@
     }
     if (tgt) tgt.value = o.targetLang || 'zh';
     ftEl('ftEngine').value = o.engine || 'auto';
-    ftEl('ftMode').value = o.mode || 'both';
+    ftEl('ftMode').value = o.mode || 'md';
+    if (ftEl('ftVision')) ftEl('ftVision').checked = o.vision === true;
     ftEl('ftPages').value = o.pageRange || '';
     ftEl('ftKeepFormulas').checked = o.keepFormulas !== false;
     ftEl('ftKeepTables').checked = o.keepTables !== false;
@@ -2216,10 +2220,13 @@
     // 引擎可用性提示
     const eng = meta.engine || {};
     const font = meta.font || {};
+    const vision = meta.vision || {};
     const parts = [];
     if (eng.llmReady) parts.push('大模型可用');
     else parts.push('大模型未配置');
     if (eng.deeplReady) parts.push('DeepL 可用');
+    if (vision.ready) parts.push(`视觉模型：${vision.model}`);
+    else parts.push('未配置视觉模型');
     parts.push(font.label ? `字体：${font.label}` : '字体待下载');
     ftEl('ftEngineState').textContent = parts.join(' · ');
     ftEl('ftEngineState').className = 'ft-badge' + (eng.llmReady || eng.deeplReady ? '' : ' ft-badge-warn');
@@ -2288,6 +2295,22 @@
       toast('还没有配置大模型，请到「设置 → AI 模型」添加一条可用配置', 'error');
       return;
     }
+    // 视觉识别：需要已配置视觉模型 + 逐页截图；不满足就静默降级为文本层提取
+    let pages = null;
+    if (options.mode === 'md' && options.vision) {
+      if (!ft.meta?.vision?.ready) {
+        toast('未配置视觉模型，本次按文本层提取版面。可在「AI 设置」配置后重试');
+        options.vision = false;
+      } else {
+        setFtBusy(true);
+        ftEl('ftStage').textContent = '正在逐页渲染页面截图…';
+        pages = await collectPageImages(it, options.pageRange);
+        if (!pages?.length) {
+          toast('页面截图生成失败，本次将回退文本层提取', 'error');
+          options.vision = false;
+        }
+      }
+    }
     setFtBusy(true);
     ftEl('ftLogWrap').hidden = false;
     ftEl('ftLogs').textContent = '';
@@ -2296,7 +2319,7 @@
       const job = await api('/api/pdf-translate/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ literatureId: it.id, options }),
+        body: JSON.stringify({ literatureId: it.id, options, pages: pages || undefined }),
       });
       ft.job = job;
       renderFtJob(job);
@@ -2304,6 +2327,62 @@
     } catch (e) {
       toast(e.message, 'error');
       setFtBusy(false);
+    }
+  }
+
+  /** 与服务端 parsePageRange 同一套语法的客户端简化版（决定要截哪些页） */
+  function parseClientPageRange(range, totalPages) {
+    const s = String(range || '').trim();
+    if (!s) return null;
+    const out = new Set();
+    for (const part of s.split(/[,，;；\s]+/)) {
+      if (!part) continue;
+      const m = part.match(/^(\d+)?\s*[-–~]\s*(\d+)?$/);
+      if (m) {
+        const from = m[1] ? Number(m[1]) : 1;
+        const to = m[2] ? Number(m[2]) : totalPages;
+        for (let i = Math.max(1, from); i <= Math.min(totalPages, to); i++) out.add(i);
+      } else if (/^\d+$/.test(part)) {
+        const n = Number(part);
+        if (n >= 1 && n <= totalPages) out.add(n);
+      }
+    }
+    const list = [...out].sort((a, b) => a - b);
+    return list.length ? list : null;
+  }
+
+  /**
+   * 视觉识别用：把原 PDF 逐页渲染成 JPEG 截图（目标宽约 1400px）。
+   * 始终从「原文 PDF」取图——左侧此刻预览的可能已经是译文 PDF，不能拿错。
+   */
+  async function collectPageImages(it, pageRange) {
+    try {
+      const lib = await loadPdfJs();
+      const url = '/uploads/' + encodeURIComponent(it.filename);
+      const doc = pr.docUrl === url && pr.doc ? pr.doc : await lib.getDocument({ url }).promise;
+      const targets = parseClientPageRange(pageRange, doc.numPages)
+        || Array.from({ length: doc.numPages }, (_, i) => i + 1);
+      const MAX_VISION_PAGES = 60;
+      if (targets.length > MAX_VISION_PAGES) {
+        toast(`该文献共 ${targets.length} 页，视觉识别只处理前 ${MAX_VISION_PAGES} 页（其余页用文本层兜底）`);
+      }
+      const out = [];
+      for (const n of targets.slice(0, MAX_VISION_PAGES)) {
+        const page = await doc.getPage(n);
+        const base = page.getViewport({ scale: 1 });
+        const scale = Math.min(2, 1400 / Math.max(base.width, 1));
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.floor(viewport.width));
+        canvas.height = Math.max(1, Math.floor(viewport.height));
+        const ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        out.push({ page: n, image: canvas.toDataURL('image/jpeg', 0.8) });
+      }
+      return out;
+    } catch (e) {
+      console.warn('collectPageImages failed:', e);
+      return null;
     }
   }
 
@@ -2345,8 +2424,8 @@
     if (!job) return;
     ft.job = job;
     const stageText = {
-      queued: '排队中', font: '准备字体', analyze: '解析版面', translate: '翻译中',
-      render: '生成 PDF', done: '已完成',
+      queued: '排队中', font: '准备字体', analyze: '解析版面', vision: '视觉识别中', translate: '翻译中',
+      render: '生成成品', done: '已完成',
     }[job.stage] || job.stage || '';
     ftEl('ftStage').textContent = job.message || stageText;
     ftEl('ftPercent').textContent = Math.round(job.percent || 0) + '%';
@@ -2368,19 +2447,25 @@
   function renderFtOutputs(job) {
     const box = ftEl('ftOutputs');
     const list = job?.outputs || [];
-    box.innerHTML = list.map((o) => `
+    box.innerHTML = list.map((o) => {
+      const metaBits = [fmtSize(o.size), `${o.pages} 页`, `${o.blocks} 段译文`];
+      if (o.kind === 'md') metaBits.push(o.vision ? '视觉识别版面' : '文本层重排');
+      else if (o.overflowBlocks) metaBits.push(`${o.overflowBlocks} 段已缩号`);
+      const openLabel = o.kind === 'md' ? '在应用内看' : '在应用内看';
+      return `
       <div class="ft-out">
         <div class="ft-out-main">
           <span class="ft-out-kind ft-kind-${esc(o.kind)}">${esc(o.label || FT_KIND_LABEL[o.kind] || o.kind)}</span>
           <span class="ft-out-name" title="${esc(o.fileName)}">${esc(o.fileName)}</span>
-          <span class="ft-out-meta">${fmtSize(o.size)} · ${o.pages} 页 · ${o.blocks} 段译文${o.overflowBlocks ? ` · ${o.overflowBlocks} 段已缩号` : ''}</span>
+          <span class="ft-out-meta">${esc(metaBits.join(' · '))}</span>
         </div>
         <div class="ft-out-actions">
-          <button class="btn btn-ghost btn-sm" data-ft-open="${esc(o.url)}" data-ft-name="${esc(o.fileName)}">在应用内看</button>
+          <button class="btn btn-ghost btn-sm" data-ft-open="${esc(o.url)}" data-ft-kind="${esc(o.kind)}" data-ft-name="${esc(o.fileName)}">${openLabel}</button>
           <button class="btn btn-ghost btn-sm" data-ft-tab="${esc(o.url)}">新窗口</button>
           <a class="btn btn-ghost btn-sm" href="${esc(o.url)}" download="${esc(o.fileName)}">下载</a>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   }
 
   /**
@@ -2392,6 +2477,131 @@
     $('prFilename').textContent = name + '（译文预览）';
     loadPdfDocument(url);
     toast('已在左侧打开译文 PDF');
+  }
+
+  // ==================== Markdown 译文查看器（覆盖在 PDF 页面上方） ====================
+  // 打开 Markdown 译文 → 覆盖层显示渲染后的 MD（公式 KaTeX / 表格 GFM / 插图从原 PDF
+  // 画布实时裁剪）；工具栏按钮与覆盖层关闭按钮随时切回原文 PDF，原文 / 译文双向对照。
+
+  /** 把 crop:pN:x0:y0:x1:y1 解析回页号与矩形（PDF 用户空间坐标） */
+  function parseCropRef(ref) {
+    const m = /^crop:p(\d+):(-?[\d.]+):(-?[\d.]+):(-?[\d.]+):(-?[\d.]+)$/.exec(String(ref || '').trim());
+    if (!m) return null;
+    return { page: Number(m[1]), rect: { x0: +m[2], y0: +m[3], x1: +m[4], y1: +m[5] } };
+  }
+
+  function openMdTranslation(url, name) {
+    pr.md = { url, name, visible: true, loaded: false, text: '' };
+    $('prToggleMd').classList.remove('hidden');
+    $('prMdTitle').textContent = (name || 'Markdown 译文') + '（可在左侧工具栏随时切回原文）';
+    showMdViewer();
+    loadMdContent();
+  }
+
+  function showMdViewer() {
+    if (!pr.md) return;
+    pr.md.visible = true;
+    $('prMdViewer').classList.remove('hidden');
+    $('prToggleMd').textContent = '📑 对照原文';
+  }
+
+  function hideMdViewer() {
+    if (!pr.md) return;
+    pr.md.visible = false;
+    $('prMdViewer').classList.add('hidden');
+    $('prToggleMd').textContent = '📄 查看译文';
+  }
+
+  function toggleMdViewer() {
+    if (!pr.md) return;
+    if (pr.md.visible) hideMdViewer();
+    else showMdViewer();
+  }
+
+  function closeMdTranslation() {
+    hideMdViewer();
+    $('prToggleMd').classList.add('hidden');
+    $('prMdContent').innerHTML = '';
+    pr.md = null;
+  }
+
+  async function loadMdContent() {
+    const url = pr.md?.url;
+    if (!url) return;
+    const box = $('prMdContent');
+    box.innerHTML = '<div class="pr-md-loading">译文加载中…</div>';
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const text = await res.text();
+      if (!pr.md || pr.md.url !== url) return; // 期间已切换到别的译文
+      pr.md.text = text;
+      // crop: 不是浏览器可识别的协议，DOMPurify 会剥掉；换成 #crop: 锚点形式先过渲染，
+      // 渲染完再把占位 img 替换成从原 PDF 裁剪出的图片
+      const source = text.replace(/\]\(crop:/g, '](#crop:');
+      box.innerHTML = renderMarkdown(source);
+      box.scrollTop = 0;
+      pr.md.loaded = true;
+      renderMdCrops(box);
+    } catch (e) {
+      if (pr.md && pr.md.url === url) box.innerHTML = `<div class="pr-md-error">译文加载失败：${esc(e.message)}</div>`;
+    }
+  }
+
+  /** 把 #crop: 占位图替换成真实截图（从当前加载的原 PDF 画布裁剪） */
+  async function renderMdCrops(container) {
+    const imgs = [...container.querySelectorAll('img[src^="#crop:"]')];
+    for (const img of imgs) {
+      img.dataset.crop = img.getAttribute('src').slice(1);
+      img.removeAttribute('src');
+      img.classList.add('pr-md-crop');
+    }
+    if (!imgs.length) return;
+    if (!pr.doc) {
+      imgs.forEach((img) => { img.alt = img.alt || '插图（原文 PDF 未加载，无法裁剪）'; });
+      return;
+    }
+    const pageCanvasCache = new Map(); // 同一页多张图只渲染一次整页
+    for (const img of imgs) {
+      const parsed = parseCropRef(img.dataset.crop);
+      if (!parsed) { img.alt = img.alt || '插图'; continue; }
+      try {
+        let pageEntry = pageCanvasCache.get(parsed.page);
+        if (!pageEntry) {
+          pageEntry = renderFullPageCanvas(parsed.page);
+          pageCanvasCache.set(parsed.page, pageEntry);
+        }
+        const { canvas, viewport } = await pageEntry;
+        const [ax, ay] = viewport.convertToViewportPoint(parsed.rect.x0, parsed.rect.y0);
+        const [bx, by] = viewport.convertToViewportPoint(parsed.rect.x1, parsed.rect.y1);
+        const sx = Math.max(0, Math.min(ax, bx));
+        const sy = Math.max(0, Math.min(ay, by));
+        const sw = Math.max(1, Math.abs(bx - ax));
+        const sh = Math.max(1, Math.abs(by - ay));
+        const out = document.createElement('canvas');
+        out.width = Math.round(sw);
+        out.height = Math.round(sh);
+        out.getContext('2d').drawImage(canvas, sx, sy, sw, sh, 0, 0, out.width, out.height);
+        if (pr.md?.visible) img.src = out.toDataURL('image/png');
+      } catch (e) {
+        console.warn('crop 渲染失败:', e);
+        img.alt = (img.alt || '插图') + '（裁剪失败）';
+      }
+    }
+  }
+
+  /** 整页渲染成画布（用于裁剪）；scale 取能让页宽 ≈1600px 的档位 */
+  async function renderFullPageCanvas(pageNo) {
+    const page = await pr.doc.getPage(pageNo);
+    const base = page.getViewport({ scale: 1 });
+    const scale = Math.min(2.5, Math.max(1.2, 1600 / Math.max(base.width, 1)));
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.floor(viewport.width));
+    canvas.height = Math.max(1, Math.floor(viewport.height));
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    return { canvas, viewport };
   }
 
   // ---------- 翻译记录（只看本篇，避免与其它文献串台） ----------
@@ -2420,7 +2630,7 @@
           ${(j.outputs || []).map((o) => `
             <div class="ft-hist-out">
               <span class="ft-out-kind ft-kind-${esc(o.kind)}">${esc(FT_KIND_SHORT[o.kind] || o.kind)}</span>
-              <button class="btn btn-ghost btn-sm" data-ft-open="${esc(o.url)}" data-ft-name="${esc(o.fileName)}">在应用内看</button>
+              <button class="btn btn-ghost btn-sm" data-ft-open="${esc(o.url)}" data-ft-kind="${esc(o.kind)}" data-ft-name="${esc(o.fileName)}">在应用内看</button>
               <a class="btn btn-ghost btn-sm" href="${esc(o.url)}" download="${esc(o.fileName)}">下载</a>
             </div>`).join('')}
         </div>`).join('');
@@ -2456,6 +2666,7 @@
             engine: o.engine,
             targetLang: o.targetLang,
             mode: o.mode,
+            vision: o.vision,
             keepFormulas: o.keepFormulas,
             keepTables: o.keepTables,
             translateReferences: o.translateReferences,
@@ -2480,7 +2691,12 @@
 
   function onFtOutputClick(e) {
     const open = e.target.closest('[data-ft-open]');
-    if (open) { previewTranslatedPdf(open.dataset.ftOpen, open.dataset.ftName); return; }
+    if (open) {
+      // Markdown 译文走阅读器内的覆盖层查看器（支持对照原文）；其余仍是译文 PDF
+      if (open.dataset.ftKind === 'md') openMdTranslation(open.dataset.ftOpen, open.dataset.ftName);
+      else previewTranslatedPdf(open.dataset.ftOpen, open.dataset.ftName);
+      return;
+    }
     const tab = e.target.closest('[data-ft-tab]');
     if (tab) { window.open(tab.dataset.ftTab, '_blank'); }
   }
@@ -2840,6 +3056,10 @@
     $('ftLogs').textContent = '';
     $('ftHistoryCount').textContent = '0';
     $('ftHistory').innerHTML = '<div class="ft-empty">本篇还没有翻译记录</div>';
+    // Markdown 译文是「按文献」的，切文献必须清掉，避免上一篇的译文盖在这一篇上
+    closeMdTranslation();
+    // 划词面板的「翻译源」下拉（跟随设置 / 指定大模型 / 指定免费接口）
+    loadTranslateSources();
     switchPrTab(pr.tab || 'translate');
     loadPdfDocument('/uploads/' + encodeURIComponent(it.filename));
   }
@@ -2851,6 +3071,7 @@
     pr.lastJoinedSelectionKey = '';
     pr.pageRotations.clear();
     pr.rendered.clear();
+    closeMdTranslation();
     if (pr.observer) { pr.observer.disconnect(); pr.observer = null; }
     // 关窗时终止仍在进行的流式回答，避免后台白白跑完
     stopPrChat();
@@ -2866,6 +3087,7 @@
       const lib2 = await loadPdfJs();
       const doc = await lib2.getDocument({ url }).promise;
       pr.doc = doc;
+      pr.docUrl = url;
       pr.totalPages = doc.numPages;
       pr.pageNum = 1;
       pr.pageRotations.clear();
@@ -3215,11 +3437,17 @@
     translateAbort = new AbortController();
     const { signal } = translateAbort;
     const target = $('prLangTo').value;
+    // 翻译源：auto = 跟随全局设置；llm:<profileId> = 指定某条大模型配置；其余为具体服务 id
+    let provider;
+    let profileId;
+    const src = $('prTranslateSource')?.value || 'auto';
+    if (src.startsWith('llm:')) { provider = 'siliconflow'; profileId = src.slice(4); }
+    else if (src !== 'auto') provider = src;
     box.innerHTML = '<div class="pr-loading">翻译中…</div>';
     try {
       const data = await api('/api/translate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, target }), signal,
+        body: JSON.stringify({ text, target, provider, profileId }), signal,
       });
       if (signal.aborted) return;
       box.innerHTML = `<div class="pr-trans-text">${esc(data.translation)}</div>`;
@@ -3227,6 +3455,27 @@
       if (isAbortError(e)) return;
       box.innerHTML = `<div class="pr-trans-error">⚠ ${esc(e.message)}</div>`;
     }
+  }
+
+  /**
+   * 划词面板的「翻译源」下拉：跟随设置 / 逐条大模型配置 / 各翻译服务。
+   * 只影响划词翻译；全文翻译的引擎在「全文翻译」页签里单独选。
+   * 选择存在 localStorage，下次打开阅读器自动恢复。
+   */
+  async function loadTranslateSources() {
+    const sel = $('prTranslateSource');
+    if (!sel) return;
+    try {
+      const data = await api('/api/translate/sources');
+      const saved = localStorage.getItem('prTranslateSource') || 'auto';
+      const opts = [{ value: 'auto', label: '翻译源：跟随全局设置' }];
+      for (const p of data.profiles || []) {
+        opts.push({ value: 'llm:' + p.id, label: `大模型 · ${p.label}${p.hasKey ? '' : '（未填 Key）'}` });
+      }
+      for (const p of data.providers || []) opts.push({ value: p.id, label: p.label });
+      sel.innerHTML = opts.map((o) => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
+      if ([...sel.options].some((o) => o.value === saved)) sel.value = saved;
+    } catch (_) { /* 拉取失败就保留默认项，不阻塞阅读器 */ }
   }
 
   function doHighlight() {
@@ -3307,6 +3556,14 @@
 
   function bindPdfReader() {
     $('prClose').addEventListener('click', closePdfReader);
+
+    // Markdown 译文 / 原文 PDF 双向切换
+    $('prToggleMd').addEventListener('click', toggleMdViewer);
+    $('prMdClose').addEventListener('click', hideMdViewer);
+    // 划词面板的翻译源下拉：记住用户的选择
+    $('prTranslateSource')?.addEventListener('change', () => {
+      localStorage.setItem('prTranslateSource', $('prTranslateSource').value);
+    });
 
     // 右侧页签：划词翻译 / 解析结果 / AI 对话
     document.querySelectorAll('.pr-tab').forEach((b) => b.addEventListener('click', () => switchPrTab(b.dataset.prtab)));

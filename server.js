@@ -14,6 +14,7 @@ import { extract, FIELDS } from './src/aiExtractor.js';
 import * as store from './src/store.js';
 import { queryPublicationRank, formatRank } from './src/easyscholar.js';
 import { translate } from './src/translate.js';
+import { TRANSLATE_PROVIDERS } from './src/translateProviders.js';
 import { registerMailRoutes } from './src/mailRoutes.js';
 import { registerPdfTranslateRoutes } from './src/pdfTranslate/routes.js';
 import { DEFAULT_PDF_TRANSLATE_OPTIONS } from './src/pdfTranslate/index.js';
@@ -1200,11 +1201,31 @@ export function createApp({
     const text = req.body?.text;
     if (!text || !String(text).trim()) return res.status(400).json({ error: '缺少待翻译文本' });
     try {
-      const translation = await translate(String(text), store.getSettings(), { target: req.body?.target });
+      // provider / profileId：阅读器划词面板的「翻译源」选择；不传则跟随全局设置
+      const translation = await translate(String(text), store.getSettings(), {
+        target: req.body?.target,
+        provider: req.body?.provider,
+        profileId: req.body?.profileId,
+      });
       res.json({ translation });
     } catch (e) {
       res.status(400).json({ error: e.message });
     }
+  });
+
+  // 翻译源清单：给划词面板的「翻译源」下拉用（大模型逐条配置 + 免费接口）
+  app.get('/api/translate/sources', (_req, res) => {
+    const s = store.getSettings();
+    res.json({
+      providers: TRANSLATE_PROVIDERS
+        .filter((p) => p.id !== 'siliconflow')
+        .map((p) => ({ id: p.id, label: p.label, needsKey: !!p.needsKey })),
+      profiles: (s.modelProfiles || []).map((p) => ({
+        id: p.id, label: p.label || p.model, model: p.model,
+        hasKey: !!String(p.apiKey || '').trim(),
+      })),
+      current: s.translateProvider || 'siliconflow',
+    });
   });
 
   // ---------- 查询 ----------
@@ -2710,16 +2731,51 @@ export function createApp({
   if (typeof mailPruneTimer.unref === 'function') mailPruneTimer.unref();
 
   // ---------- 文献全文翻译（PDF） ----------
-  // 版式解析 → 分段翻译 → 回写 PDF，产出「单语译文版」与「双语对照版」。
+  // 版式解析 → 分段翻译 → 回写 PDF，产出「Markdown 译文 / 单语译文版 / 双语对照版」。
   // 翻译引擎复用应用里已配置的模型配置（大模型）与 DeepL Key，用户不必重复填。
+  //
+  // 视觉识别（Markdown 译文的可选增强）：前端把每页渲染成 JPEG 上传，这里用「两段式
+  // 看图」同一套视觉模型设施逐页转录版面。fetchModelCompletion 等设施都在本文件里，
+  // 以闭包形式注入 pdfTranslate 服务，避免循环依赖。
+  const visionComplete = async ({ image, prompt, timeoutMs = 120000 }) => {
+    const vm = resolveVisionModel(store.getSettings());
+    if (!vm) {
+      throw new Error('没有可用的视觉模型：请在「AI 设置」里为某个已填 Key 的模型开启图片能力，或在「两段式看图」里指定一个视觉模型');
+    }
+    const request = await fetchModelCompletion(vm, {
+      model: vm.model,
+      messages: [
+        { role: 'system', content: prompt },
+        { role: 'user', content: [{ type: 'image_url', image_url: { url: image } }] },
+      ],
+      temperature: 0.1,
+      max_tokens: 8192,
+    }, { stream: false, timeoutMs });
+    try {
+      if (!request.up.ok) {
+        const errText = request.up._litErrorText ?? await request.up.text().catch(() => '');
+        throw new Error(`视觉模型「${vm.model}」返回 ${request.up.status}：${clip(errText, 200)}`);
+      }
+      const result = await readLLMResponse(request.up);
+      const text = String(result.full || '').trim();
+      if (!text) throw new Error(`视觉模型「${vm.model}」没有返回内容`);
+      return { text, model: vm.model };
+    } finally { request.cancel(); }
+  };
+  const visionInfo = () => {
+    const vm = resolveVisionModel(store.getSettings());
+    return vm ? { ready: true, model: vm.model } : { ready: false, model: '' };
+  };
   const pdfTranslateService = registerPdfTranslateRoutes(app, {
     store,
     getUploadDir: () => currentUploadDir,
     upload,
     fixFileName,
     // 把「完整默认参数」交给路由：设置接口要把它和用户存过的值合并后回给前端，
-    // 前端据此填充所有控件（含新增的字体族/字重/字号/重排开关）
+    // 前端据此填充所有控件（含新增的字体族/字重/字号/重排开关/视觉识别开关）
     defaultOptions: DEFAULT_PDF_TRANSLATE_OPTIONS,
+    visionComplete,
+    visionInfo,
   });
 
   // ---------- 设置 ----------

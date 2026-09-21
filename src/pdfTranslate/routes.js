@@ -1,9 +1,9 @@
 // routes.js —— 全文翻译的 HTTP 接口（挂到主 Express 应用上）
 //
 // 接口一览：
-//   GET    /api/pdf-translate/settings      当前默认参数 + 引擎可用性 + 字体状态
+//   GET    /api/pdf-translate/settings      当前默认参数 + 引擎/视觉模型可用性 + 字体状态
 //   POST   /api/pdf-translate/settings      保存默认参数
-//   POST   /api/pdf-translate               创建作业（文献 id 或上传文件路径）
+//   POST   /api/pdf-translate               创建作业（文献 id 或上传文件路径；vision 模式可带逐页截图 pages）
 //   POST   /api/pdf-translate/upload        直接上传一个 PDF 来翻译
 //   GET    /api/pdf-translate/jobs          历史 + 进行中的作业
 //   GET    /api/pdf-translate/jobs/:id      单个作业状态
@@ -13,7 +13,7 @@
 //   POST   /api/pdf-translate/estimate      只解析不翻译，给出字数/请求数预估
 //   POST   /api/pdf-translate/font/download 手动触发中文字体下载
 //   POST   /api/pdf-translate/glossary/parse 术语表文本 → 结构化
-//   GET    /translations/*                  成品 PDF 静态访问（供预览/下载）
+//   GET    /translations/*                  成品静态访问（PDF / Markdown，供预览与下载）
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -23,8 +23,9 @@ import { describeFont, downloadCjkFont, platformFontHint } from './fonts.js';
 
 /** 输出成品下拉项：value 可以是具体模式，也可以是 both / all 这类别名 */
 const MODE_CHOICES = [
-  { value: 'both', label: '单语译文版 + 双语对照版', hint: '默认：保留原版面，两种对照方式' },
-  { value: 'all', label: '重排版 + 单语译文版 + 双语对照版', hint: '三种全出，重排版最适合连续阅读' },
+  { value: 'md', label: 'Markdown 译文（推荐）', hint: '重排为 Markdown，公式 / 表格原样保留，可在阅读器内与原文 PDF 对照；可勾选视觉模型识别版面' },
+  { value: 'both', label: '单语译文版 + 双语对照版', hint: '保留原版面，两种对照方式' },
+  { value: 'all', label: 'Markdown + 重排版 + 单语译文版 + 双语对照版', hint: '四种全出，Markdown 最适合连续阅读' },
   { value: 'reflow', label: '只要重排版', hint: '丢弃原版面，按阅读顺序重排成 A4 单栏（公式/图表原样保留）' },
   { value: 'mono', label: '只要单语译文版', hint: '保留原版面，原位覆盖成中文' },
   { value: 'dual', label: '只要双语对照版', hint: '左原文右译文，逐段对照精读' },
@@ -47,23 +48,49 @@ export function registerPdfTranslateRoutes(app, deps) {
   const {
     store, getUploadDir, upload, fixFileName,
     defaultOptions = {},
+    // 视觉识别：server.js 注入的视觉模型调用闭包（依赖 fetchModelCompletion 等主进程设施，
+    // 在这里注入而不是 import，避免 pdfTranslate ↔ server 循环依赖）
+    visionComplete = null,
+    visionInfo = null,
   } = deps;
 
   const service = new PdfTranslateService({
     getSettings: () => store.getSettings(),
     getDataDir: () => store.getDataDir(),
     getUploadDir,
+    visionComplete,
+    visionInfo,
   });
   service.maxConcurrent = 1;
 
+  // 一次性迁移：v1.12 起 Markdown 译文成为默认成品。旧版本默认值 both（单语+双语）
+  // 大多属于「从未改过输出选项」的情况，替它切到 md；明确选过 reflow/mono/dual/all 的
+  // 用户保持原选择。迁移只发生一次（打标记），之后用户改回 both 也不会被再动。
+  try {
+    const s = store.getSettings();
+    const pt = { ...(s.pdfTranslate || {}) };
+    if (pt.mode === 'both' && pt.modeMigratedV112 !== true) {
+      pt.mode = 'md';
+      pt.modeMigratedV112 = true;
+      store.saveSettings({ ...s, pdfTranslate: pt });
+    }
+  } catch (_) { /* 迁移失败不影响启动 */ }
+
   // ---------- 成品文件静态访问 ----------
+  const MIME_BY_EXT = {
+    '.pdf': 'application/pdf',
+    '.md': 'text/markdown; charset=utf-8',
+    '.txt': 'text/plain; charset=utf-8',
+  };
   app.use('/translations', (req, res, next) => {
     const dir = service.translationsDir();
     if (!fs.existsSync(dir)) { res.status(404).end(); return; }
     express.static(dir, {
-      setHeaders: (res2) => {
-        res2.setHeader('Content-Type', 'application/pdf');
-        // 允许前端 iframe 内联预览
+      setHeaders: (res2, filePath) => {
+        const ext = path.extname(filePath || '').toLowerCase();
+        // 不能一刀切 application/pdf：Markdown 译文会以 .md 落盘，前端要按文本读
+        res2.setHeader('Content-Type', MIME_BY_EXT[ext] || 'application/octet-stream');
+        // 允许前端 iframe / fetch 内联访问
         res2.setHeader('Content-Disposition', 'inline');
       },
     })(req, res, next);
@@ -97,6 +124,8 @@ export function registerPdfTranslateRoutes(app, deps) {
         activeModel: settings.model || '',
         profiles: (settings.modelProfiles || []).map((p) => ({ id: p.id, label: p.label || p.model, model: p.model, hasKey: !!String(p.apiKey || '').trim() })),
       },
+      // 视觉模型可用性（Markdown 译文的「视觉识别版面」依赖它）
+      vision: visionInfo ? visionInfo() : { ready: !!deps.visionComplete, model: '' },
       font: { ...font, hint: platformFontHint() },
       cache: { entries: service.cache.size },
     };
@@ -165,6 +194,8 @@ export function registerPdfTranslateRoutes(app, deps) {
         fileName: resolved.name,
         literatureId: req.body?.literatureId || null,
         options: req.body?.options,
+        // 视觉识别用的逐页截图（Markdown 译文 + 视觉开关时由前端提供）
+        pageImages: req.body?.pages,
       });
       res.json(job);
     } catch (e) {

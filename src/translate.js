@@ -4,7 +4,7 @@
 // 这里只保留「大模型翻译」路径与对外分发。新增翻译服务请改 translateProviders.js。
 
 import { getSettings } from './store.js';
-import { resolveActive } from './modelCatalog.js';
+import { resolveActive, resolveProfile } from './modelCatalog.js';
 import { translateWithProvider, translateProviderLabel, __test__ as providerTest } from './translateProviders.js';
 
 /** 调用当前激活的大模型做翻译（OpenAI 兼容 chat completions）。 */
@@ -24,8 +24,16 @@ function compatibleMessages(system, user, profile) {
   if (profile?.systemPromptMode === 'user') return [{ role: 'user', content: '【任务要求】\n' + system + '\n\n【待翻译文本】\n' + user }];
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
-async function translateViaLLM(text, settings, target) {
-  const profile = resolveActive(settings);
+async function translateViaLLM(text, settings, target, profileId) {
+  // 划词面板可以指定用哪条模型配置当翻译源（llm:<profileId>）；不指定就用当前激活配置
+  let profile;
+  if (profileId) {
+    const raw = (settings.modelProfiles || []).find((p) => p.id === profileId);
+    if (!raw) throw new Error('所选翻译模型不存在或已被删除，请到划词翻译面板重新选择翻译源');
+    profile = resolveProfile(raw);
+  } else {
+    profile = resolveActive(settings);
+  }
   if (!profile) throw new Error('未配置可用 AI 模型：请在 AI 设置中选择模型；自定义本地服务可不填密钥，但必须填写 Base URL 和模型名');
   if (!profile.baseURL || !profile.model) throw new Error('当前 AI 模型缺少 Base URL 或模型名称，请在 AI 设置中补全');
   const targetName = target === 'en' ? '英文' : '简体中文';
@@ -55,16 +63,16 @@ async function translateViaLLM(text, settings, target) {
   } catch (e) { if (e?.name === 'AbortError') throw new Error('AI 翻译请求超时（90 秒）。请检查本地模型服务是否正在运行、模型是否已加载，或降低并发'); throw e; } finally { clearTimeout(timer); }
 }
 
-/** 划词翻译主入口 */
+/** 划词翻译主入口。opts.provider / opts.profileId 可临时覆盖全局设置的翻译源 */
 export async function translate(text, settings, opts = {}) {
   const s = settings || getSettings();
   const t = (text || '').trim();
   const target = opts.target === 'en' ? 'en' : 'zh';
   if (!t) return '';
-  const provider = s.translateProvider || 'siliconflow';
+  const provider = opts.provider || s.translateProvider || 'siliconflow';
   // 历史字段 siliconflow 实际表示“使用当前激活的 AI 模型”，不再只读旧的 baseURL/apiKey/model，
   // 从而避免切换多模型后翻译仍悄悄走旧配置。
-  if (provider === 'siliconflow') return translateViaLLM(t, s, target);
+  if (provider === 'siliconflow') return translateViaLLM(t, s, target, opts.profileId);
   if (provider === 'deepl' && !s.deeplKey && !s.deeplEndpoint) {
     throw new Error('未配置 DeepL API Key，请在设置中填写');
   }

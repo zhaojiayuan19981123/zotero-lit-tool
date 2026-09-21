@@ -51,13 +51,14 @@ test('短单元格且列位置稳定的块仍可识别为表格', () => {
 // ==================== 输出模式 ====================
 
 test('resolveModes：别名展开成具体成品列表', () => {
+  assert.deepEqual(resolveModes('md'), ['md']);
   assert.deepEqual(resolveModes('mono'), ['mono']);
   assert.deepEqual(resolveModes('dual'), ['dual']);
   assert.deepEqual(resolveModes('reflow'), ['reflow']);
   assert.deepEqual(resolveModes('both'), ['mono', 'dual']);
-  // 三种全出时重排排在最前——它是用户最终想看的那一份
-  assert.deepEqual(resolveModes('all'), ['reflow', 'mono', 'dual']);
-  // 未知值退回默认，绝不返回空数组（否则一个都不生成）
+  // 四种全出时 Markdown 排在最前——它是用户最终想看的那一份
+  assert.deepEqual(resolveModes('all'), ['md', 'reflow', 'mono', 'dual']);
+  // 未知值退回默认（v1.12 起默认 Markdown 译文），绝不返回空数组（否则一个都不生成）
   assert.deepEqual(resolveModes('???'), ['mono', 'dual']);
   assert.deepEqual(resolveModes(undefined), ['mono', 'dual']);
 });

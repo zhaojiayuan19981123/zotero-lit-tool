@@ -12,7 +12,11 @@ import { analyzePdf } from './analyze.js';
 import { renderTranslatedPdf } from './render.js';
 import { renderReflowPdf } from './reflow.js';
 import {
-  createEngine, translateSegments, TranslationCache, parseGlossary, TARGET_LANGS, targetLangInfo,
+  buildMarkdownFromLayout, parseVisionBlocks, visionPaperPrompt,
+  collectVisionSegments, applyVisionTranslations, assembleVisionMarkdown, visionPageFallbackMarkdown,
+} from './markdown.js';
+import {
+  createEngine, translateSegments, TranslationCache, parseGlossary, TARGET_LANGS, targetLangInfo, runAdaptivePool,
 } from './engines.js';
 import { resolveCjkFont, downloadCjkFont, describeFont, defaultBundledFontDir, platformFontHint } from './fonts.js';
 import { toUint8Array } from './util.js';
@@ -27,7 +31,8 @@ export const DEFAULT_PDF_TRANSLATE_OPTIONS = {
   profileId: '',           // 指定用哪条模型配置（空 = 当前激活）
   targetLang: 'zh',
   sourceLang: 'auto',
-  mode: 'both',            // mono | dual | reflow | both(单语+双语) | all(三种全出)
+  mode: 'md',              // md | mono | dual | reflow | both(单语+双语) | all(三种全出)
+  vision: false,           // Markdown 译文用视觉模型识别版面（版面还原更好，逐页截图送视觉模型）
   pageRange: '',           // 例如 "1-5,8,12-"；空 = 全部
   concurrency: 8,          // 并发上限（自适应池从这里的一半以下起步，顺利就逐步逼近这个值）
   requestTimeoutMs: 300000, // 单次接口请求超时（毫秒）。挂死的连接不能拖住整条并发波次
@@ -83,6 +88,21 @@ function safeStem(name, fallback = 'paper') {
   return stem || fallback;
 }
 
+/** 页面截图入参清洗：只留页号与 dataURL，最多 120 页，防呆不防饿 */
+const MAX_PAGE_IMAGES = 120;
+function sanitizePageImages(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  for (const it of list.slice(0, MAX_PAGE_IMAGES)) {
+    const page = Number(it?.page);
+    const image = String(it?.image || '');
+    if (Number.isFinite(page) && page >= 1 && image.startsWith('data:image/')) {
+      out.push({ page: Math.floor(page), image });
+    }
+  }
+  return out.length ? out : null;
+}
+
 function normalizeOptions(raw, settings) {
   const base = { ...DEFAULT_PDF_TRANSLATE_OPTIONS, ...(settings?.pdfTranslate || {}) };
   const merged = { ...base };
@@ -99,7 +119,8 @@ function normalizeOptions(raw, settings) {
   merged.widthFill = Math.max(0.8, Math.min(1.1, Number(merged.widthFill) || 0.985));
   merged.fontSize = Math.max(0, Math.min(24, Number(merged.fontSize) || 0));
   if (!Array.isArray(merged.glossary)) merged.glossary = parseGlossary(merged.glossary);
-  if (!MODES.includes(merged.mode)) merged.mode = 'both';
+  if (!MODES.includes(merged.mode)) merged.mode = 'md';
+  merged.vision = merged.vision === true;
   if (!['auto', 'llm', 'deepl'].includes(merged.engine)) merged.engine = 'auto';
   if (!['regular', 'medium', 'bold'].includes(merged.fontWeight)) merged.fontWeight = 'medium';
   if (!['auto', 'sans', 'serif'].includes(merged.fontFamily)) merged.fontFamily = 'auto';
@@ -108,12 +129,12 @@ function normalizeOptions(raw, settings) {
 }
 
 /** 输出模式 → 实际要渲染的成品列表（别名统一在这里展开，别处只认具体模式） */
-export const MODES = ['mono', 'dual', 'reflow', 'both', 'all'];
+export const MODES = ['md', 'mono', 'dual', 'reflow', 'both', 'all'];
 
 export function resolveModes(mode) {
   switch (mode) {
-    case 'mono': case 'dual': case 'reflow': return [mode];
-    case 'all': return ['reflow', 'mono', 'dual'];
+    case 'md': case 'mono': case 'dual': case 'reflow': return [mode];
+    case 'all': return ['md', 'reflow', 'mono', 'dual'];
     case 'both':
     default: return ['mono', 'dual'];
   }
@@ -121,6 +142,7 @@ export function resolveModes(mode) {
 
 /** 成品类型 → 文件名后缀与中文名 */
 export const OUTPUT_META = {
+  md: { suffix: '-译文', label: 'Markdown 译文', desc: '重排为 Markdown，公式 / 表格原样保留，可在阅读器内与原文 PDF 对照' },
   mono: { suffix: '-译文', label: '单语译文版', desc: '保留原版面，原位覆盖成中文' },
   dual: { suffix: '-对照', label: '双语对照版', desc: '左原文右译文，逐段对照精读' },
   reflow: { suffix: '-重排', label: '重排版', desc: '丢弃原版面，按阅读顺序重排成 A4 单栏' },
@@ -268,10 +290,11 @@ export class PdfTranslateService extends EventEmitter {
     return this.history().find((h) => h.id === id) || null;
   }
 
-  /** 内存 job → 可序列化视图（去掉 AbortController 等） */
+  /** 内存 job → 可序列化视图（去掉 AbortController 与逐页截图；截图体积太大，不能进 SSE/历史） */
   publicView(job) {
-    const { controller, ...rest } = job;
+    const { controller, pageImages, ...rest } = job;
     void controller;
+    void pageImages;
     return rest;
   }
 
@@ -298,6 +321,9 @@ export class PdfTranslateService extends EventEmitter {
    * @param {string} [params.fileName]
    * @param {string} [params.literatureId]
    * @param {object} [params.options]
+   * @param {Array<{page:number,image:string}>} [params.pageImages]
+   *   视觉识别用的逐页截图（dataURL，由前端从原 PDF 渲染）。只在 vision 模式下使用；
+   *   缺页时该页自动回退文本层。内存里保留，不进历史 JSON（体积太大）。
    */
   start(params) {
     const settings = this.deps.getSettings();
@@ -313,6 +339,7 @@ export class PdfTranslateService extends EventEmitter {
       message: '排队中',
       logs: [],
       options,
+      pageImages: sanitizePageImages(params.pageImages),
       engineLabel: '',
       outputs: [],
       stats: null,
@@ -394,6 +421,17 @@ export class PdfTranslateService extends EventEmitter {
     }
     const sourceBytes = fs.readFileSync(job.filePath);
 
+    // 0) 本次要出哪些成品。md 不需要字体与 PDF 渲染；视觉识别只作用于 md 成品。
+    const modes = resolveModes(options.mode);
+    const useVision = options.vision && modes.includes('md');
+    const needPdfRender = modes.some((m) => m !== 'md');
+
+    // 进度锚点：视觉模式多一个识别阶段，翻译段整体后移
+    const ANALYZE_END = useVision ? 20 : 27;
+    const VISION_START = ANALYZE_END + 2;
+    const VISION_END = 44;
+    const TRANSLATE_START = useVision ? 46 : 32;
+
     // 1) 版面分析（先探测总页数，才能解析页码范围）
     //
     // 顺序说明：分析必须排在字体之前。字号/字体族都要「跟随原文」，而这两项只有
@@ -403,38 +441,58 @@ export class PdfTranslateService extends EventEmitter {
     const pageNumbers = parsePageRange(options.pageRange, probe);
     if (pageNumbers) this.log(job, `页码范围：${pageNumbers.length} 页（共 ${probe} 页）`);
 
-    const layout = await analyzePdf(sourceBytes, {
-      pageNumbers,
-      signal,
-      keepFormulas: options.keepFormulas,
-      keepTables: options.keepTables,
-      translateReferences: options.translateReferences,
-      onProgress: (p) => this.setStage(job, 'analyze', 1 + Math.round(p.percent * 0.26), `解析版面 ${p.page}/${p.total}`),
-    });
-    job.stats = { ...layout.stats };
-    this.log(job, `版面解析完成：${layout.stats.pages} 页 / ${layout.stats.blocks} 个文本块，其中可翻译 ${layout.stats.translatableBlocks} 个（约 ${layout.stats.chars} 字）`);
-    this.log(job, `正文基准字号 ${layout.stats.bodySize} pt，字形 ${layout.stats.bodySerif == null ? '族别未知' : (layout.stats.bodySerif ? '衬线体（宋体系）' : '无衬线体（黑体系）')}`);
-    if (!layout.stats.translatableBlocks) {
-      throw new Error('没有找到可翻译的文本内容。该 PDF 可能是纯扫描图片版，请先用 OCR 处理后再翻译');
+    let layout = null;
+    try {
+      layout = await analyzePdf(sourceBytes, {
+        pageNumbers,
+        signal,
+        keepFormulas: options.keepFormulas,
+        keepTables: options.keepTables,
+        translateReferences: options.translateReferences,
+        onProgress: (p) => this.setStage(job, 'analyze', 1 + Math.round(p.percent * (ANALYZE_END - 1)), `解析版面 ${p.page}/${p.total}`),
+      });
+      job.stats = { ...layout.stats };
+      this.log(job, `版面解析完成：${layout.stats.pages} 页 / ${layout.stats.blocks} 个文本块，其中可翻译 ${layout.stats.translatableBlocks} 个（约 ${layout.stats.chars} 字）`);
+      this.log(job, `正文基准字号 ${layout.stats.bodySize} pt，字形 ${layout.stats.bodySerif == null ? '族别未知' : (layout.stats.bodySerif ? '衬线体（宋体系）' : '无衬线体（黑体系）')}`);
+    } catch (e) {
+      // 视觉模式不依赖文本层（扫描版也能翻）；其余情况照旧抛出
+      if (!useVision) throw e;
+      this.log(job, `版面解析失败（${e.message}）。视觉识别模式将继续使用页面图像工作`);
+    }
+    if (!layout?.stats?.translatableBlocks && !useVision) {
+      throw new Error('没有找到可翻译的文本内容。该 PDF 可能是纯扫描图片版，请先用 OCR 处理后再翻译，或在输出 Markdown 译文时勾选「视觉模型识别版面」');
     }
 
-    // 2) 字体：家族跟随原文正文（auto），并尽量同时拿到真正的加粗档
-    const family = options.fontFamily === 'auto'
-      ? (layout.stats.bodySerif ? 'serif' : 'sans')
-      : options.fontFamily;
-    this.setStage(job, 'font', 29, '准备中文字体');
-    const fonts = await this.ensureFonts(family, (m) => this.log(job, m));
-    this.log(job, `译文正文字体：${fonts.regular.label}（${fonts.regular.source}`
-      + `，${(fonts.regular.bytes.length / 1024 / 1024).toFixed(1)} MB）`
-      + (fonts.bold ? `；加粗档：${fonts.bold.label}` : '；无独立加粗字体，加粗由描边合成'));
-    if (options.fontFamily === 'auto') {
-      this.log(job, `字体家族跟随原文：${family === 'serif' ? '衬线（宋体系）' : '无衬线（黑体系）'}`);
-    }
-    if (fonts.regular.thin) {
-      this.log(job, `提示：${fonts.regular.label} 默认字重 ${Math.round(fonts.regular.defaultWeight)} 偏细，已自动用描边补足到目标粗细`);
+    // 2) 字体：家族跟随原文正文（auto），并尽量同时拿到真正的加粗档。
+    //    只出 Markdown 时不需要嵌字体，跳过下载与解析，起跑更快。
+    let fonts = null;
+    if (needPdfRender) {
+      const family = options.fontFamily === 'auto'
+        ? (layout?.stats?.bodySerif ? 'serif' : 'sans')
+        : options.fontFamily;
+      this.setStage(job, 'font', TRANSLATE_START - 3, '准备中文字体');
+      fonts = await this.ensureFonts(family, (m) => this.log(job, m));
+      this.log(job, `译文正文字体：${fonts.regular.label}（${fonts.regular.source}`
+        + `，${(fonts.regular.bytes.length / 1024 / 1024).toFixed(1)} MB）`
+        + (fonts.bold ? `；加粗档：${fonts.bold.label}` : '；无独立加粗字体，加粗由描边合成'));
+      if (options.fontFamily === 'auto') {
+        this.log(job, `字体家族跟随原文：${family === 'serif' ? '衬线（宋体系）' : '无衬线（黑体系）'}`);
+      }
+      if (fonts.regular.thin) {
+        this.log(job, `提示：${fonts.regular.label} 默认字重 ${Math.round(fonts.regular.defaultWeight)} 偏细，已自动用描边补足到目标粗细`);
+      }
     }
 
-    // 3) 翻译
+    // 3) 视觉识别：逐页截图 → 视觉模型转录成结构化标记块
+    let visionPages = null;
+    if (useVision) {
+      visionPages = await this.runVisionStage(job, {
+        pageNumbers, totalPages: probe, signal, options,
+        progressStart: VISION_START, progressEnd: VISION_END,
+      });
+    }
+
+    // 4) 翻译（视觉路径的文本段与文本层的兜底段走同一条分段翻译管线）
     const engine = createEngine({
       engine: options.engine,
       settings: this.deps.getSettings(),
@@ -448,14 +506,35 @@ export class PdfTranslateService extends EventEmitter {
     });
     job.engineLabel = engine.label;
     this.log(job, `翻译引擎：${engine.label}；目标语言：${targetLangInfo(options.targetLang).label}`);
-    this.setStage(job, 'translate', 32, '正在翻译');
+    this.setStage(job, 'translate', TRANSLATE_START, '正在翻译');
 
     const segments = [];
-    for (const page of layout.pages) {
+    let visionSegments = [];
+    if (useVision) {
+      visionSegments = collectVisionSegments(visionPages, { translateReferences: options.translateReferences });
+      segments.push(...visionSegments);
+    }
+    // 视觉识别失败/缺图的页：用文本层兜底（这些页的文本段也要翻译）
+    const missingLayoutPages = [];
+    if (useVision) {
+      for (const pg of visionPages) {
+        if (!pg.missing) continue;
+        const lp = (layout?.pages || []).find((p) => (p.index || 0) + 1 === pg.page);
+        if (lp) missingLayoutPages.push(lp);
+      }
+      if (missingLayoutPages.length) {
+        this.log(job, `${missingLayoutPages.length} 页将由文本层兜底（视觉识别不可用或页面截图缺失）`);
+      }
+    }
+    const textLayerPages = useVision ? missingLayoutPages : (layout?.pages || []);
+    for (const page of textLayerPages) {
       for (const block of page.blocks) {
         if (!block.translatable) continue;
         segments.push({ id: block.id, text: block.text, block });
       }
+    }
+    if (!segments.length) {
+      throw new Error('没有收集到可翻译的文本。若开启了视觉识别，请确认从阅读器内发起翻译（需要页面截图），或关闭视觉识别后重试');
     }
 
     const { map, failures, stats } = await translateSegments({
@@ -468,29 +547,44 @@ export class PdfTranslateService extends EventEmitter {
       sourceLang: options.sourceLang,
       signal,
       onLog: (m) => this.log(job, m),
-      onProgress: (p) => this.setStage(job, 'translate', 32 + Math.round(p.percent * 0.52), `正在翻译 ${p.done}/${p.total} 段`),
+      onProgress: (p) => this.setStage(job, 'translate', TRANSLATE_START + Math.round(p.percent * (84 - TRANSLATE_START)), `正在翻译 ${p.done}/${p.total} 段`),
     });
+    job.stats = job.stats || {};
     job.stats.translate = stats;
     if (failures.length) {
       this.log(job, `${failures.length} 段翻译失败，已保留原文（错误示例：${failures[0].error}）`);
     }
 
     let translated = 0;
-    for (const page of layout.pages) {
+    for (const page of textLayerPages) {
       for (const block of page.blocks) {
         if (!block.translatable) continue;
         const t = map.get(block.id);
         if (t) { block.translation = t; translated++; }
       }
     }
+    if (useVision) {
+      applyVisionTranslations(visionPages, visionSegments, map);
+      translated = visionSegments.filter((s) => map.get(s.id)).length + translated;
+    }
     this.log(job, `翻译完成，共写入 ${translated} 段译文`);
 
-    // 4) 渲染
+    // 5) 渲染
     const outDir = this.jobDir(job.id);
     fs.mkdirSync(outDir, { recursive: true });
     const stem = safeStem(job.fileName);
-    // 「both / all」这类别名在这里展开成具体成品列表，下面只认具体模式
-    const modes = resolveModes(options.mode);
+
+    // Markdown 译文只需组装一次（视觉路径 / 文本层路径二选一）
+    let mdResult = null;
+    if (modes.includes('md')) {
+      this.setStage(job, 'render', 86, '正在生成 Markdown 译文');
+      mdResult = useVision
+        ? this.assembleVisionMarkdownOutput(visionPages, missingLayoutPages, layout, options)
+        : buildMarkdownFromLayout(layout?.pages || [], { reflowKeepFigures: options.reflowKeepFigures });
+      if (!mdResult.markdown.trim()) {
+        throw new Error('Markdown 译文组装结果为空，请检查该 PDF 是否有可识别内容');
+      }
+    }
 
     // 观感参数：单语/双语/重排三种成品共用同一套，保证同一篇论文三种成品粗细一致
     const look = {
@@ -508,9 +602,32 @@ export class PdfTranslateService extends EventEmitter {
       const span = Math.max(1, Math.round(13 / modes.length));
       this.setStage(job, 'render', base, `正在生成${meta.label}`);
 
+      if (mode === 'md') {
+        const fileName = `${stem}${meta.suffix}.md`;
+        const filePath = path.join(outDir, fileName);
+        fs.writeFileSync(filePath, mdResult.markdown, 'utf-8');
+        const bytes = Buffer.byteLength(mdResult.markdown, 'utf-8');
+        job.outputs.push({
+          kind: 'md',
+          label: meta.label,
+          fileName,
+          filePath,
+          relPath: `${job.id}/${fileName}`,
+          url: `/translations/${encodeURIComponent(job.id)}/${encodeURIComponent(fileName)}`,
+          size: bytes,
+          pages: layout?.stats?.pages || (visionPages?.length || 0),
+          blocks: mdResult.stats.text,
+          overflowBlocks: 0,
+          crops: mdResult.stats.crops,
+          vision: useVision,
+        });
+        this.log(job, `已生成${meta.label}：${fileName}（${(bytes / 1024).toFixed(1)} KB，${mdResult.stats.text} 段译文，公式/表格/插图 ${mdResult.stats.crops} 处按原样保留${useVision ? '，视觉模型识别版面' : ''}）`);
+        continue;
+      }
+
       const common = {
         sourceBytes,
-        pages: layout.pages,
+        pages: layout?.pages || [],
         fontBytes: fonts.regular.bytes,
         boldFontBytes: fonts.bold?.bytes,
         signal,
@@ -565,6 +682,80 @@ export class PdfTranslateService extends EventEmitter {
     job.status = 'done';
     this.setStage(job, 'done', 100, '翻译完成');
     this.log(job, '全部完成');
+  }
+
+  /**
+   * 视觉识别阶段：逐页把前端截图交给视觉模型，转录成结构化标记块。
+   * 单页失败不炸任务：该页标记 missing，稍后用文本层兜底。
+   */
+  async runVisionStage(job, { pageNumbers, totalPages, signal, options, progressStart, progressEnd }) {
+    const targets = pageNumbers || Array.from({ length: totalPages || 0 }, (_, i) => i + 1);
+    if (!targets.length) throw new Error('没有可识别的页面');
+    const images = new Map((job.pageImages || []).map((p) => [p.page, p.image]));
+    if (!images.size) {
+      this.log(job, '本次没有收到页面截图（请从阅读器内发起全文翻译），全部页面将用文本层兜底');
+      return targets.map((n) => ({ page: n, blocks: [], missing: true }));
+    }
+    const visionLabel = this.deps.visionInfo?.().model || '已配置的视觉模型';
+    this.log(job, `视觉识别：${targets.length} 页，视觉模型「${visionLabel}」，逐页转录版面`);
+    this.setStage(job, 'vision', progressStart, '视觉模型识别版面');
+
+    const prompt = visionPaperPrompt({ translateReferences: options.translateReferences });
+    const concurrency = Math.max(1, Math.min(4, Math.round(options.concurrency / 3)));
+    const results = new Map();
+    let done = 0;
+    await runAdaptivePool(targets, async (pageNo) => {
+      if (signal.aborted) throw Object.assign(new Error('任务已取消'), { name: 'AbortError' });
+      const image = images.get(pageNo);
+      if (!image) {
+        results.set(pageNo, { page: pageNo, blocks: [], missing: true });
+        this.log(job, `第 ${pageNo} 页缺少页面截图，该页将用文本层兜底`);
+      } else {
+        try {
+          const { text } = await this.deps.visionComplete({
+            image,
+            prompt,
+            timeoutMs: Math.max(30000, Math.min(options.requestTimeoutMs || 120000, 240000)),
+          });
+          const blocks = parseVisionBlocks(text);
+          if (!blocks.length) throw new Error('视觉模型没有返回可用内容');
+          results.set(pageNo, { page: pageNo, blocks });
+        } catch (e) {
+          results.set(pageNo, { page: pageNo, blocks: [], missing: true });
+          this.log(job, `第 ${pageNo} 页视觉识别失败：${e.message}，该页将用文本层兜底`);
+        }
+      }
+      done++;
+      this.setStage(job, 'vision', progressStart + Math.round((done / targets.length) * (progressEnd - progressStart)), `视觉识别 ${done}/${targets.length} 页`);
+    }, { concurrency, signal });
+    const pages = targets.map((n) => results.get(n) || { page: n, blocks: [], missing: true });
+    const ok = pages.filter((p) => !p.missing).length;
+    this.log(job, `视觉识别完成：成功 ${ok} 页 / 共 ${pages.length} 页`);
+    return pages;
+  }
+
+  /** 视觉路径的 Markdown 组装：识别成功的页用视觉块，缺图页用文本层兜底 */
+  assembleVisionMarkdownOutput(visionPages, missingLayoutPages, layout, options) {
+    const missingByPage = new Map(missingLayoutPages.map((p) => [(p.index || 0) + 1, p]));
+    const layoutPages = layout?.pages || null;
+    const chunks = [];
+    const stats = { text: 0, crops: 0 };
+    for (const pg of visionPages || []) {
+      const fallbackPage = pg.missing ? missingByPage.get(pg.page) : null;
+      if (fallbackPage) {
+        const r = visionPageFallbackMarkdown(fallbackPage, { reflowKeepFigures: options.reflowKeepFigures !== false });
+        chunks.push(r.markdown);
+        stats.text += r.textCount;
+        stats.crops += r.cropCount;
+      } else {
+        const r = assembleVisionMarkdown([pg], layoutPages);
+        chunks.push(r.markdown);
+        stats.text += r.stats.text;
+        stats.crops += r.stats.crops;
+      }
+    }
+    const markdown = chunks.filter((c) => c && c.trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    return { markdown: markdown ? markdown + '\n' : '', stats };
   }
 
   // ---------- 预估 ----------
