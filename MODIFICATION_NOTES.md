@@ -37,6 +37,13 @@
 - 验证：`node --check` 全部通过；`node --test`：**102 passed / 0 failed**（新增 `test/paper-note-utils.test.mjs`、`test/paper-notes-store.test.mjs`）。
 - 真实浏览器端到端（Playwright + Chromium，造真 PDF → 注册文献 → 开阅读器 → 点笔记模式）**22/22 通过**：PDF 在左栏渲染 2 页、比例 0.40:0.20:0.39、Markdown 自动保存、切导图由 Markdown 生成 `我的笔记 → 方法 → 对比学习 / 配对摘要`、`Tab` 键成功新增子节点、导出 `.xmind` 为 7933 字节合法 zip 且含 `content.json`、退出笔记模式 PDF 归位、重进后笔记仍在、整页刷新后笔记与对话均还在、清除记录生效、全程无 JS 报错。
 
+### 六、发布与 CI
+
+- 提交 `6c9ee29`（16 files, +16768/-10）→ CI run `35634391693` **success**；tag `v1.14.0` 指向该提交。
+- Release「一站式科研终端 v1.14.0」(id 393171812) 6 个资产齐全：`zotero-lit-tool-setup-1.14.0.exe`(96.4MB) + `.blockmap` + `latest.yml` + `SHA256SUMS.txt` + macos arm64/x64 dmg(115.9/120.5MB)。
+- **顺带修掉一个发布配置缺陷**：`.github/workflows/release.yml` 的 Release 正文原先内联在 `body:` 里、内容停在 v1.11.0，导致 v1.12/v1.13 发出来的 Release 正文是**空的**。现改为独立文件 `.github/release-body.md` + `body_path:` 引用，后续每个版本只需更新该文件。注意 `test/mail-update-features.test.mjs` 里有断言 workflow 正文的用例，已同步改为断言 `body_path` 路径并读独立文件（不再硬编码版本号）。
+- 被取代的旧 CI run `35633463875`（commit `a5ab2ab`）长期卡在 in_progress，已通过 API 取消，避免回写覆盖同名 Release。
+
 ## v1.13.0：目录化 Markdown 译文 + 模型切换（2026-09-21）
 
 - **全文翻译改为「按论文目录结构」输出**：不再把视觉识别出的块平铺，而是先归并成层级树，固定输出骨架 `一级标题 → 文章信息 → 摘要 → 第一章 → 小节 …→ 参考文献`。所有标题渲染为 `## 1 引言` 形式，下一行附 `> 原文：Introduction` 原文对照，便于核对译名。
