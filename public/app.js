@@ -2147,6 +2147,7 @@
     chat: [],            // 本篇论文的 AI 对话消息 [{role,content,images:[dataURL]}]
     chatBusy: false,
     chatAbort: null,     // 流式生成中用于「停止」的 AbortController
+    chatLoadedFor: null, // 已从服务端载入对话的文献 id（防止重复拉取 / 串台）
   };
   const prChatImages = []; // 待发送图片 [{name, dataUrl}]（按论文重置）
 
@@ -2193,7 +2194,10 @@
     document.querySelectorAll('.pr-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.prpane !== pr.tab));
     if (pr.tab === 'analysis') renderPrAnalysis();
     if (pr.tab === 'fulltext') openFullTextTab();
-    if (pr.tab === 'chat') { renderPrChat(); renderAiModelRows(); setTimeout(() => $('prChatInput')?.focus(), 60); }
+    if (pr.tab === 'chat') {
+      renderPrChat(); renderAiModelRows(); updatePrChatClearUI();
+      setTimeout(() => $('prChatInput')?.focus(), 60);
+    }
   }
 
   // ============ 全文翻译（整篇 PDF） ============
@@ -2858,10 +2862,728 @@
     $('prAnOpenLib')?.addEventListener('click', () => { closePdfReader(); switchView('library'); openDrawer(it.id); });
   }
 
+  // ==================== 笔记模式（三栏：原文/全文翻译 ｜ 划词翻译 ｜ 笔记） ====================
+  // 设计要点：
+  //  · 三栏比例默认 0.4 : 0.2 : 0.4，两根分隔条可拖拽，比例存 localStorage['pnPanes']。
+  //  · 右栏「Markdown」与「思维导图」是同一份笔记的两种视图，分别存 md / mindmap 两个字段，
+  //    服务端 PUT 支持部分更新，切换视图不会互相覆盖。
+  //  · 思维导图用 simple-mind-map（MIT）：交互与快捷键与 XMind 一致（Tab/Enter/Shift+Tab/
+  //    F2/Delete/方向键），导出 .xmind 走 doExportXMind.xmind(data, name)。
+  const paperNoteUtils = window.PaperNoteUtils;
+  const pn = {
+    on: false,          // 是否处于笔记模式
+    leftTab: 'pdf',      // 'pdf' | 'md'
+    noteTab: 'md',       // 'md' | 'mind'
+    mdEdit: 'edit',      // 'edit' | 'preview'
+    panes: { ...(paperNoteUtils?.DEFAULT_PANES || { left: 0.4, mid: 0.2, right: 0.4 }) },
+    md: '',              // 当前文献的 Markdown 笔记
+    mindmap: null,       // 当前文献的导图数据
+    mm: null,            // simple-mind-map 实例
+    mmReady: false,
+    mindPending: false,  // 容器不可见时暂缓建实例，等可见了再建
+    dirty: false,        // 有未保存改动
+    saveTimer: null,
+    loadedFor: null,     // 已载入笔记的文献 id，避免重复拉取
+  };
+  const PN_PANES_KEY = 'pnPanes';
+
+  function pnEl(id) { return document.getElementById(id); }
+
+  // ---------- 三栏比例 ----------
+
+  function applyPnPanes() {
+    pn.panes = paperNoteUtils.normalizePanes(pn.panes);
+    const left = document.querySelector('.pn-pane[data-pn="left"]');
+    const mid = document.querySelector('.pn-pane[data-pn="mid"]');
+    const right = document.querySelector('.pn-pane[data-pn="right"]');
+    if (left) left.style.flex = `0 0 ${paperNoteUtils.paneFlex(pn.panes.left)}`;
+    if (mid) mid.style.flex = `0 0 ${paperNoteUtils.paneFlex(pn.panes.mid)}`;
+    if (right) right.style.flex = `1 1 ${paperNoteUtils.paneFlex(pn.panes.right)}`;
+  }
+
+  function loadPnPanes() {
+    try {
+      const raw = localStorage.getItem(PN_PANES_KEY);
+      pn.panes = raw ? paperNoteUtils.normalizePanes(JSON.parse(raw)) : { ...paperNoteUtils.DEFAULT_PANES };
+    } catch (_) {
+      pn.panes = { ...paperNoteUtils.DEFAULT_PANES };
+    }
+  }
+
+  function savePnPanes() {
+    try { localStorage.setItem(PN_PANES_KEY, JSON.stringify(pn.panes)); } catch (_) { /* 隐私模式下忽略 */ }
+  }
+
+  /** 分隔条拖拽：全程只改 flex-basis，松手才落盘，避免拖动时频繁写 localStorage */
+  function initPnResizers() {
+    const host = document.querySelector('.pr-note-mode .pn-panes');
+    if (!host) return;
+    let dragging = null; // {handle, startX, startPanes, total}
+    host.querySelectorAll('.pn-resizer').forEach((bar) => {
+      bar.addEventListener('pointerdown', (e) => {
+        if (window.innerWidth <= 900) return; // 窄屏是纵向堆叠，没有横向拖拽
+        const rect = host.getBoundingClientRect();
+        dragging = {
+          handle: bar.dataset.pnresize === 'right' ? 'right' : 'left',
+          startX: e.clientX,
+          startPanes: { ...pn.panes },
+          total: rect.width,
+        };
+        bar.classList.add('dragging');
+        document.body.classList.add('pn-resizing');
+        bar.setPointerCapture?.(e.pointerId);
+        e.preventDefault();
+      });
+      bar.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        pn.panes = paperNoteUtils.resizePanes(
+          dragging.handle, e.clientX - dragging.startX, dragging.total, dragging.startPanes
+        );
+        applyPnPanes();
+      });
+      const finish = () => {
+        if (!dragging) return;
+        dragging = null;
+        document.querySelectorAll('.pn-resizer').forEach((b) => b.classList.remove('dragging'));
+        document.body.classList.remove('pn-resizing');
+        savePnPanes();
+      };
+      bar.addEventListener('pointerup', finish);
+      bar.addEventListener('pointercancel', finish);
+    });
+  }
+
+  // ---------- 笔记存取 ----------
+
+  function setPnSaveState(text, cls = '') {
+    const el = pnEl('pnSaveState');
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'pn-save-state' + (cls ? ' ' + cls : '');
+  }
+
+  /** 标记有改动，节流 800ms 落盘（切文献/关窗口时用 flush 立即写） */
+  function markPnDirty() {
+    pn.dirty = true;
+    setPnSaveState('未保存…', 'saving');
+    if (pn.saveTimer) clearTimeout(pn.saveTimer);
+    pn.saveTimer = setTimeout(() => { savePnNote().catch(() => {}); }, 800);
+  }
+
+  async function savePnNote({ silent = false } = {}) {
+    if (pn.saveTimer) { clearTimeout(pn.saveTimer); pn.saveTimer = null; }
+    const litId = pr.recordId;
+    if (!litId || !pn.dirty) return;
+    const payload = { md: pn.md, mindmap: pn.mindmap };
+    pn.dirty = false;
+    setPnSaveState('保存中…', 'saving');
+    try {
+      await api('/api/paper-notes/' + encodeURIComponent(litId), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      setPnSaveState('已保存', 'saved');
+      setTimeout(() => { if (pnEl('pnSaveState')?.textContent === '已保存') setPnSaveState(''); }, 1800);
+    } catch (e) {
+      pn.dirty = true;
+      setPnSaveState('保存失败', 'error');
+      if (!silent) toast('笔记保存失败：' + e.message, 'error');
+    }
+  }
+
+  async function loadPnNote(litId) {
+    pn.loadedFor = litId;
+    pn.dirty = false;
+    setPnSaveState('');
+    try {
+      const data = await api('/api/paper-notes/' + encodeURIComponent(litId));
+      if (pn.loadedFor !== litId) return; // 期间已切到别的文献
+      pn.md = data.md || '';
+      pn.mindmap = data.mindmap || null;
+    } catch (_) {
+      pn.md = '';
+      pn.mindmap = null;
+    }
+    renderPnMd();
+    // 导图视图正开着的话，用带等待的路径重建（容器可能还没量出尺寸）
+    if (pn.noteTab === 'mind') { renderPnMind(); waitPnMindHost(); }
+  }
+
+  // ---------- 左栏：原文 PDF / 全文翻译 ----------
+
+  function switchPnLeft(tab) {
+    pn.leftTab = tab === 'md' ? 'md' : 'pdf';
+    document.querySelectorAll('#pnLeftSeg .pn-seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.pnleft === pn.leftTab);
+    });
+    pnEl('pnPdfHost')?.classList.toggle('hidden', pn.leftTab !== 'pdf');
+    pnEl('pnMdHost')?.classList.toggle('hidden', pn.leftTab !== 'md');
+    if (pn.leftTab === 'md') renderPnLeftMd();
+  }
+
+  /** 把「全文翻译」的 Markdown 译文渲染到左栏（复用 pr.md 里已加载的文本） */
+  function renderPnLeftMd() {
+    const box = pnEl('pnMdContent');
+    const empty = pnEl('pnMdEmpty');
+    if (!box) return;
+    const text = pr.md?.text || '';
+    if (!text) {
+      box.innerHTML = '';
+      empty?.classList.remove('hidden');
+      return;
+    }
+    empty?.classList.add('hidden');
+    const source = text.replace(/\]\(crop:/g, '](#crop:');
+    box.innerHTML = renderMarkdown(source);
+    try { renderMdCrops(box); } catch (_) { /* 裁剪图失败不影响文字 */ }
+  }
+
+  // ---------- 中栏：划词翻译 ----------
+
+  function setPnTrans(html) {
+    const box = pnEl('pnTrans');
+    if (box) box.innerHTML = html;
+  }
+
+  /** 由左栏划词 / 手动输入触发翻译（复用 /api/translate 与当前翻译源设置） */
+  async function doPnTranslate() {
+    const text = (pnEl('pnSrc')?.value || '').trim();
+    if (!text) { toast('请先选中或输入要翻译的文本', 'error'); return; }
+    if (pnTranslateAbort) pnTranslateAbort.abort();
+    pnTranslateAbort = new AbortController();
+    const { signal } = pnTranslateAbort;
+    const target = $('prLangTo')?.value || 'zh';
+    let provider;
+    let profileId;
+    const src = $('prTranslateSource')?.value || 'auto';
+    if (src.startsWith('llm:')) { provider = 'siliconflow'; profileId = src.slice(4); }
+    else if (src !== 'auto') provider = src;
+    setPnTrans('<div class="pr-loading">翻译中…</div>');
+    try {
+      const data = await api('/api/translate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, target, provider, profileId }), signal,
+      });
+      if (signal.aborted) return;
+      setPnTrans(`<div class="md">${renderMarkdown(data.translation || '')}</div>`);
+    } catch (e) {
+      if (isAbortError(e)) return;
+      setPnTrans(`<div class="pn-trans-error">⚠ ${esc(e.message)}</div>`);
+    }
+  }
+  let pnTranslateAbort = null;
+
+  /** 划词后填充中栏并自动翻译：笔记模式下取代原来的右侧面板划词 */
+  function pnFillFromSelection(text, { append = false } = {}) {
+    const ta = pnEl('pnSrc');
+    if (!ta) return;
+    ta.value = append && ta.value.trim() ? paperNoteUtils.stripHtml(ta.value) + ' ' + text : text;
+    doPnTranslate();
+  }
+
+  // ---------- 右栏：Markdown 视图 ----------
+
+  function renderPnMd() {
+    const editor = pnEl('pnMdEditor');
+    if (editor && editor.value !== pn.md) editor.value = pn.md;
+    renderPnMdPreview();
+  }
+
+  function renderPnMdPreview() {
+    const box = pnEl('pnMdPreview');
+    if (!box) return;
+    box.innerHTML = pn.md.trim()
+      ? renderMarkdown(pn.md)
+      : '<div class="pr-trans-placeholder">笔记还是空的。可以在「编辑」里用 Markdown 写，也可以把中间栏的原文+译文「加入笔记」。</div>';
+  }
+
+  function switchPnMdEdit(mode) {
+    pn.mdEdit = mode === 'preview' ? 'preview' : 'edit';
+    document.querySelectorAll('#pnMdSeg .pn-seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.pnmdedit === pn.mdEdit);
+    });
+    pnEl('pnMdEditor')?.classList.toggle('hidden', pn.mdEdit !== 'edit');
+    pnEl('pnMdPreview')?.classList.toggle('hidden', pn.mdEdit !== 'preview');
+    if (pn.mdEdit === 'preview') renderPnMdPreview();
+    else pnEl('pnMdEditor')?.focus();
+  }
+
+  /** 把中栏的「原文 + 译文」整理成 Markdown 片段插入到光标处 */
+  function pnInsertTranslationToNote() {
+    const srcText = ($('prSourceText')?.value || '').trim();
+    const pnSrc = (pnEl('pnSrc')?.value || '').trim();
+    const source = pnSrc || srcText;
+    const transEl = pnEl('pnTrans');
+    // 译文是渲染后的 HTML，取纯文本即可（避免把标签写进笔记）
+    const translation = paperNoteUtils.stripHtml(transEl?.innerText || transEl?.textContent || '');
+    if (!source && !translation) { toast('还没有可插入的翻译内容', 'error'); return; }
+
+    const editor = pnEl('pnMdEditor');
+    const snippet = paperNoteUtils.buildNoteSnippet(source, translation, {
+      heading: prDocumentTitle(),
+    });
+    const base = editor ? editor.value : pn.md;
+    const start = editor ? editor.selectionStart : base.length;
+    const end = editor ? editor.selectionEnd : base.length;
+    const { text, cursor } = paperNoteUtils.insertSnippet(base, snippet, start, end);
+    pn.md = text;
+    if (editor) {
+      editor.value = text;
+      pn.mdEdit = 'edit';
+      switchPnMdEdit('edit');
+      editor.focus();
+      editor.setSelectionRange(cursor, cursor);
+    }
+    renderPnMdPreview();
+    markPnDirty();
+    toast('已插入到笔记', 'success');
+  }
+
+  /** Markdown ↔ 导图 互相同步：切视图时若两边都有内容，以「有改动的一侧」为准 */
+  function pnSyncMdToMindmap() {
+    const root = paperNoteUtils.mdToMindmap(pn.md);
+    if (!root) { toast('Markdown 还是空的，先写点内容再切到思维导图', 'error'); return false; }
+    pn.mindmap = root;
+    return true;
+  }
+
+  function prDocumentTitle() {
+    const it = items.find((x) => x.id === pr.recordId);
+    return it?.title || it?.originalName || '笔记';
+  }
+
+  // ---------- 右栏：思维导图视图 ----------
+
+  function renderPnMind() {
+    const host = pnEl('pnMindHost');
+    if (!host) return;
+    const lib = window.simpleMindMap;
+    if (!lib || !lib.default) { host.innerHTML = '<div class="pn-md-empty">思维导图组件加载失败，请刷新页面重试。</div>'; return; }
+
+    // simple-mind-map 在容器宽高为 0 时会直接抛错（「容器元素el的宽高不能为0」）。
+    // 处于隐藏页签 / 面板收起时先不建实例，等容器真正可见了再由 resize/切换触发。
+    if (!host.clientWidth || !host.clientHeight) {
+      pn.mindPending = true;
+      return;
+    }
+    pn.mindPending = false;
+
+    // 没有数据时给一份「以论文标题为中心主题」的初始导图，避免空白画布无从下手
+    const data = pn.mindmap || { data: { text: prDocumentTitle() }, children: [] };
+
+    if (pn.mm) {
+      // 已有实例：只换数据，不重建（重建会丢掉缩放与布局状态）
+      try {
+        pn.mm.setData(pnPaperNoteData(data));
+        pn.mm.render();
+        return;
+      } catch (_) { try { pn.mm.destroy(); } catch (__) { /* ignore */ } pn.mm = null; }
+    }
+
+    host.innerHTML = '';
+    try {
+      pn.mm = new lib.default({
+        el: host,
+        data: pnPaperNoteData(data),
+        layout: 'logicalStructure',
+        theme: 'default',
+        // 与 XMind 一致的核心交互：Tab 子主题 / Enter 同级 / F2 改文字 / Delete 删除
+        enableFreeDrag: false,
+        mousewheelAction: 'zoom',
+        mousewheelZoomActionReverse: false,
+        enableAutoFocus: true,
+        readonly: false,
+        customHandleMousewheel: false,
+      });
+      pn.mmReady = true;
+      // 数据变化（增删节点、改文字、拖动）→ 标记改动并落盘
+      pn.mm.on('data_change', () => {
+        capturePnMindmap();
+        markPnDirty();
+      });
+      setTimeout(() => { try { pn.mm.view.fit(); } catch (_) { /* ignore */ } }, 60);
+    } catch (e) {
+      pn.mm = null;
+      host.innerHTML = `<div class="pn-md-empty">思维导图初始化失败：${esc(e.message)}</div>`;
+    }
+  }
+
+  /** 统一导图数据结构：确保有 data.text 与 children 数组，避免库内部报错 */
+  function pnPaperNoteData(root) {
+    const walk = (n) => ({
+      data: {
+        text: paperNoteUtils.nodeText(n) || '未命名',
+        uid: (n?.data && n.data.uid) || paperNoteUtils.nextUid(),
+      },
+      children: (Array.isArray(n?.children) ? n.children : []).map(walk),
+    });
+    return walk(root);
+  }
+
+  /** 从实例取回当前导图数据存到 pn.mindmap（供保存用） */
+  function capturePnMindmap() {
+    if (!pn.mm) return;
+    try { pn.mindmap = pn.mm.getData(); } catch (_) { /* 实例可能正在销毁 */ }
+    // 同时把导图回写成 Markdown，让两种视图保持一致
+    if (pn.mindmap) pn.md = paperNoteUtils.mindmapToMd(pn.mindmap);
+  }
+
+  function switchPnNote(tab) {
+    const next = tab === 'mind' ? 'mind' : 'md';
+    if (next === 'mind' && pn.noteTab === 'md') {
+      // Markdown → 导图：把当前 Markdown 转成导图（这样在 MD 里写的笔记能直接看到结构）
+      if (pn.md.trim()) pnSyncMdToMindmap();
+    }
+    pn.noteTab = next;
+    document.querySelectorAll('#pnNoteSeg .pn-seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.pnnote === pn.noteTab);
+    });
+    pnEl('pnNoteMd')?.classList.toggle('hidden', pn.noteTab !== 'md');
+    pnEl('pnNoteMind')?.classList.toggle('hidden', pn.noteTab !== 'mind');
+    if (pn.noteTab === 'md') {
+      renderPnMd();
+      setTimeout(() => { pn.mm?.resize?.(); applyPnPanes(); }, 30);
+    } else {
+      // 先同步尝试建实例：容器此时通常已经可见（页签刚切完，布局是同步的）。
+      // 若尺寸还没算出来，renderPnMind 会置 mindPending，再由下面的轮询补建。
+      renderPnMind();
+      waitPnMindHost();
+    }
+  }
+
+  /**
+   * 等导图容器拿到真实宽高后再建实例。
+   * 单靠 requestAnimationFrame 不够可靠（后台标签页 / 隐藏窗口里 rAF 会被节流甚至不触发），
+   * 所以这里用短间隔轮询兜底，最多等 ~2s。
+   */
+  function waitPnMindHost(attempt = 0) {
+    if (!pn.on || pn.noteTab !== 'mind') return;
+    const host = pnEl('pnMindHost');
+    if (!host) return;
+    if (host.clientWidth && host.clientHeight) {
+      if (!pn.mm || pn.mindPending) renderPnMind();
+      pn.mm?.resize?.();
+      return;
+    }
+    if (attempt >= 20) return; // ~2s 还没尺寸就放弃，避免无限轮询
+    setTimeout(() => waitPnMindHost(attempt + 1), 100);
+  }
+
+  function pnMindActiveNode() {
+    const list = pn.mm?.renderer?.activeNodeList || [];
+    return list[0] || null;
+  }
+
+  function pnMindAddChild() {
+    if (!pn.mm) return;
+    if (!pn.mm.renderer?.root) { renderPnMind(); return; }
+    // 没有选中节点时，插到中心主题下，避免「点了没反应」
+    if (!pnMindActiveNode()) pn.mm.renderer.root.active();
+    pn.mm.execCommand('INSERT_CHILD_NODE');
+  }
+
+  function pnMindAddSibling() {
+    if (!pn.mm) return;
+    if (!pnMindActiveNode()) {
+      // 中心主题没有同级概念，改为加子主题
+      if (pn.mm.renderer?.root) pn.mm.renderer.root.active();
+      pn.mm.execCommand('INSERT_CHILD_NODE');
+      return;
+    }
+    pn.mm.execCommand('INSERT_NODE');
+  }
+
+  function pnMindDelete() {
+    const node = pnMindActiveNode();
+    if (!node) { toast('请先选中一个节点', 'error'); return; }
+    if (node.isRoot) { toast('中心主题不能删除', 'error'); return; }
+    pn.mm.execCommand('REMOVE_NODE');
+  }
+
+  /** 导出 .xmind：必须用 doExportXMind.xmind()（返回 Blob）；doExport.xmind() 只返回字符串 */
+  async function pnExportXmind() {
+    if (!pn.mm) { toast('思维导图还没准备好', 'error'); return; }
+    try {
+      capturePnMindmap();
+      const name = (prDocumentTitle() || '思维导图').replace(/[\\/:*?"<>|]/g, '_');
+      const blob = await pn.mm.doExportXMind.xmind(pn.mindmap, name);
+      downloadBlob(blob, name + '.xmind');
+      toast('已导出 .xmind，可用 XMind 打开继续编辑', 'success');
+    } catch (e) {
+      toast('导出 .xmind 失败：' + e.message, 'error');
+    }
+  }
+
+  async function pnExportPng() {
+    if (!pn.mm) { toast('思维导图还没准备好', 'error'); return; }
+    try {
+      const name = (prDocumentTitle() || '思维导图').replace(/[\\/:*?"<>|]/g, '_');
+      const blob = await pn.mm.doExport.png({ transparent: false });
+      downloadBlob(blob, name + '.png');
+      toast('已导出 PNG', 'success');
+    } catch (e) {
+      toast('导出 PNG 失败：' + e.message, 'error');
+    }
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  /** 把图片插入到导图选中节点（粘贴图片 / 拖入图片都走这里） */
+  function pnMindInsertImage(dataUrl, title = '') {
+    if (!pn.mm) return false;
+    const node = pnMindActiveNode();
+    if (!node) { toast('请先在导图里选中一个节点，再粘贴图片', 'error'); return false; }
+    try {
+      node.setImage({ url: dataUrl, title });
+      capturePnMindmap();
+      markPnDirty();
+      toast('图片已插入节点', 'success');
+      return true;
+    } catch (e) {
+      toast('插入图片失败：' + e.message, 'error');
+      return false;
+    }
+  }
+
+  // ---------- Markdown 编辑器里粘贴图片 ----------
+
+  function pnReadImageFiles(files) {
+    return [...(files || [])].filter((f) => f && /^image\//.test(f.type));
+  }
+
+  function pnFileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result || ''));
+      r.onerror = () => reject(new Error('读取图片失败'));
+      r.readAsDataURL(file);
+    });
+  }
+
+  /** 在 Markdown 光标处插入图片语法 */
+  async function pnInsertImageMd(file) {
+    const dataUrl = await pnFileToDataUrl(file);
+    const editor = pnEl('pnMdEditor');
+    const alt = (file.name || '图片').replace(/\.[^.]+$/, '');
+    const snippet = `![${alt}](${dataUrl})`;
+    const base = editor ? editor.value : pn.md;
+    const start = editor ? editor.selectionStart : base.length;
+    const end = editor ? editor.selectionEnd : base.length;
+    const { text, cursor } = paperNoteUtils.insertSnippet(base, snippet, start, end);
+    pn.md = text;
+    if (editor) {
+      editor.value = text;
+      editor.focus();
+      editor.setSelectionRange(cursor, cursor);
+    }
+    renderPnMdPreview();
+    markPnDirty();
+  }
+
+  // ---------- 模式开关 ----------
+
+  async function openPnNoteMode() {
+    pn.on = true;
+    loadPnPanes();
+    applyPnPanes();
+    $('prNoteMode')?.classList.remove('hidden');
+    document.querySelector('.pr-note-mode .pr-body, .pr-body')?.classList.add('hidden');
+    // 隐藏原本的「译文/原文」切换按钮：左栏已有独立切换
+    $('prToggleMd')?.classList.add('hidden');
+    $('prToggleNote')?.classList.add('active');
+    switchPnLeft(pn.leftTab);
+    switchPnNote(pn.noteTab);
+    switchPnMdEdit(pn.mdEdit);
+    // 左栏复用同一个 PDF 渲染容器（把 #prPages 移进左栏），关闭时再移回去
+    adoptPnPdfHost();
+    await loadPnNote(pr.recordId);
+    // 打开后再兜一次：刚显示的面板可能要下一帧才算好尺寸
+    setTimeout(() => { applyPnPanes(); if (pn.noteTab === 'mind') waitPnMindHost(); else pn.mm?.resize?.(); }, 60);
+  }
+
+  /** 把 PDF 页面容器搬进左栏（同一份 DOM，避免重复渲染两份 PDF） */
+  function adoptPnPdfHost() {
+    const pages = $('prPages');
+    const host = pnEl('pnPdfHost');
+    if (!pages || !host) return;
+    if (pages.parentElement !== host) host.appendChild(pages);
+  }
+
+  function restorePnPdfHost() {
+    const pages = $('prPages');
+    const body = document.querySelector('.pr-main');
+    if (!pages || !body) return;
+    if (pages.parentElement !== body) body.appendChild(pages);
+  }
+
+  async function closePnNoteMode() {
+    pn.on = false;
+    // 关模式前先把未落盘的笔记写掉，避免切走就丢
+    await savePnNote({ silent: true }).catch(() => {});
+    restorePnPdfHost();
+    $('prNoteMode')?.classList.add('hidden');
+    document.querySelector('.pr-body')?.classList.remove('hidden');
+    $('prToggleNote')?.classList.remove('active');
+    if (pr.md) $('prToggleMd')?.classList.remove('hidden');
+    // 导图实例销毁，下次进来自动重建（避免隐藏容器里布局错乱）
+    if (pn.mm) { try { pn.mm.destroy(); } catch (_) { /* ignore */ } pn.mm = null; pn.mmReady = false; }
+  }
+
+  async function togglePnNoteMode() {
+    if (pn.on) await closePnNoteMode();
+    else await openPnNoteMode();
+  }
+
+  /** 切换文献时重置笔记模式（新文献要重新拉笔记） */
+  async function resetPnForRecord(litId) {
+    pn.md = '';
+    pn.mindmap = null;
+    pn.loadedFor = null;
+    pn.dirty = false;
+    if (pn.mm) { try { pn.mm.destroy(); } catch (_) { /* ignore */ } pn.mm = null; pn.mmReady = false; }
+    if (pnEl('pnSrc')) pnEl('pnSrc').value = '';
+    setPnTrans('<div class="pn-trans-placeholder">翻译结果将显示在这里。</div>');
+    if (pnEl('pnMdEditor')) pnEl('pnMdEditor').value = '';
+    if (pn.on) await loadPnNote(litId);
+  }
+
+  function initPnNoteMode() {
+    if (!paperNoteUtils) { console.warn('笔记模式工具加载失败'); return; }
+    loadPnPanes();
+    applyPnPanes();
+    initPnResizers();
+
+    $('prToggleNote')?.addEventListener('click', () => { togglePnNoteMode().catch(() => {}); });
+
+    // 左栏切换
+    $('pnLeftSeg')?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pnleft]');
+      if (b) switchPnLeft(b.dataset.pnleft);
+    });
+
+    // 右栏 视图切换 + 编辑/预览
+    $('pnNoteSeg')?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pnnote]');
+      if (b) switchPnNote(b.dataset.pnnote);
+    });
+    $('pnMdSeg')?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pnmdedit]');
+      if (b) switchPnMdEdit(b.dataset.pnmdedit);
+    });
+
+    // Markdown 编辑器：输入即同步（不做实时预览重绘，避免打断输入）
+    $('pnMdEditor')?.addEventListener('input', (e) => {
+      pn.md = e.target.value;
+      markPnDirty();
+    });
+    // 粘贴图片：优先处理图片，其余交给浏览器默认行为
+    $('pnMdEditor')?.addEventListener('paste', async (e) => {
+      const files = pnReadImageFiles(e.clipboardData?.files);
+      if (!files.length) return;
+      e.preventDefault();
+      for (const f of files) await pnInsertImageMd(f);
+      toast(`已插入 ${files.length} 张图片`, 'success');
+    });
+    // 拖入图片
+    const ed = $('pnMdEditor');
+    if (ed) {
+      ed.addEventListener('dragover', (e) => { e.preventDefault(); ed.classList.add('pn-drop-active'); });
+      ed.addEventListener('dragleave', () => ed.classList.remove('pn-drop-active'));
+      ed.addEventListener('drop', async (e) => {
+        const files = pnReadImageFiles(e.dataTransfer?.files);
+        ed.classList.remove('pn-drop-active');
+        if (!files.length) return;
+        e.preventDefault();
+        for (const f of files) await pnInsertImageMd(f);
+      });
+      // Tab 在编辑器里插两个空格而不是跳焦点（写 Markdown 列表更顺手）
+      ed.addEventListener('keydown', (e) => {
+        if (e.key !== 'Tab' || e.ctrlKey || e.metaKey) return;
+        e.preventDefault();
+        const s = ed.selectionStart;
+        const t = ed.selectionEnd;
+        ed.value = ed.value.slice(0, s) + '  ' + ed.value.slice(t);
+        ed.setSelectionRange(s + 2, s + 2);
+        pn.md = ed.value;
+        markPnDirty();
+      });
+    }
+
+    // 中栏
+    $('pnDoTranslate')?.addEventListener('click', () => { doPnTranslate(); });
+    $('pnSrc')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doPnTranslate(); }
+    });
+    $('pnSendToNote')?.addEventListener('click', () => pnInsertTranslationToNote());
+    $('pnCopyTrans')?.addEventListener('click', async () => {
+      const txt = paperNoteUtils.stripHtml(pnEl('pnTrans')?.innerText || '');
+      if (!txt) { toast('还没有译文可复制', 'error'); return; }
+      try { await navigator.clipboard.writeText(txt); toast('译文已复制', 'success'); }
+      catch (_) { toast('复制失败，请手动选择', 'error'); }
+    });
+
+    // 右栏 Markdown 工具
+    $('pnMdInsertTrans')?.addEventListener('click', () => pnInsertTranslationToNote());
+
+    // 导图工具栏
+    $('pnMindAddChild')?.addEventListener('click', () => pnMindAddChild());
+    $('pnMindAddSib')?.addEventListener('click', () => pnMindAddSibling());
+    $('pnMindDelete')?.addEventListener('click', () => pnMindDelete());
+    $('pnMindFit')?.addEventListener('click', () => { try { pn.mm?.view.fit(); } catch (_) { /* ignore */ } });
+    $('pnMindZoomIn')?.addEventListener('click', () => { try { pn.mm?.view.enlarge(); } catch (_) { /* ignore */ } });
+    $('pnMindZoomOut')?.addEventListener('click', () => { try { pn.mm?.view.narrow(); } catch (_) { /* ignore */ } });
+    $('pnMindExportXmind')?.addEventListener('click', () => { pnExportXmind(); });
+    $('pnMindExportPng')?.addEventListener('click', () => { pnExportPng(); });
+
+    // 导图画布粘贴图片
+    pnEl('pnMindHost')?.addEventListener('paste', async (e) => {
+      const files = pnReadImageFiles(e.clipboardData?.files);
+      if (!files.length) return;
+      e.preventDefault();
+      for (const f of files) {
+        const dataUrl = await pnFileToDataUrl(f);
+        pnMindInsertImage(dataUrl, f.name || '');
+      }
+    });
+
+    // 关窗口/切后台前兜底落盘（笔记不能因为关页面就丢）
+    window.addEventListener('beforeunload', () => {
+      if (!pn.on || !pn.dirty) return;
+      const litId = pr.recordId;
+      if (!litId) return;
+      // sendBeacon 不能在 unload 里发自定义 JSON？可以：用 Blob 指定 content-type
+      try {
+        const blob = new Blob([JSON.stringify({ md: pn.md, mindmap: pn.mindmap })], { type: 'application/json' });
+        navigator.sendBeacon(`/api/paper-notes/${encodeURIComponent(litId)}`, blob);
+      } catch (_) { /* ignore */ }
+    });
+
+    // 窗口尺寸变化 → 让导图重新适应（窄屏切换成纵向堆叠时尤其重要）
+    let pnResizeTimer = null;
+    window.addEventListener('resize', () => {
+      if (!pn.on) return;
+      if (pnResizeTimer) clearTimeout(pnResizeTimer);
+      pnResizeTimer = setTimeout(() => {
+        if (pn.noteTab === 'mind') waitPnMindHost();
+        else pn.mm?.resize?.();
+      }, 200);
+    });
+  }
+
   // ==================== 论文 AI 对话（文本 + 图片多模态） ====================
-  // 与文献中心的 AI 助手共用同一套模型配置，但走 /api/paper-chat（流式、不落库），
+  // 与文献中心的 AI 助手共用同一套模型配置，但走 /api/paper-chat（流式），
   // 并把「当前论文的解析结果」作为强上下文，把用户上传的图片按 OpenAI 多模态
   // content 数组格式一并提交，从而支持「文字 + 图片」混合提问。
+  // 对话按文献持久化到 paper-chats.json：退出应用后重进仍能看到历史记录。
   function prChatMessageHtml(m, index) {
     const imgs = (m.images || []).length
       ? `<div class="pr-msg-attach">${m.images.map((u) => `<img src="${u}" alt="附图" />`).join('')}</div>`
@@ -3091,6 +3813,8 @@
     pr.chatBusy = false;
     setPrChatBusyUI(false);
     renderPrChat();
+    // 问答结束（含失败/中止）后落库，退出应用再进来还能看到这条记录
+    savePrChat();
   }
 
   // 生成中把「发送」按钮变成「停止」，让用户能中断长回答
@@ -3102,6 +3826,86 @@
     btn.title = busy ? '停止生成' : '发送（Enter）';
   }
 
+  // ---------- 论文对话的持久化（按文献存 paper-chats.json，退出应用不丢） ----------
+
+  /** 把当前对话写回服务端（整体覆盖；只在内容变化时调用） */
+  async function savePrChat({ silent = true } = {}) {
+    const litId = pr.recordId;
+    if (!litId) return;
+    // 流式生成中的临时消息（pending）不入库
+    const messages = pr.chat
+      .filter((m) => !m.pending)
+      .slice(-200)
+      .map((m) => {
+        const out = { role: m.role, content: m.content || '' };
+        if (m.images?.length) out.images = m.images;
+        if (m.error) out.error = true;
+        if (m.stopped) out.stopped = true;
+        if (m.visions?.length) out.visions = m.visions;
+        if (m.visionNote) out.visionNote = true;
+        return out;
+      });
+    try {
+      await api('/api/paper-chat/' + encodeURIComponent(litId), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages }),
+      });
+    } catch (e) {
+      if (!silent) toast('对话记录保存失败：' + e.message, 'error');
+    }
+  }
+
+  /** 拉回某篇文献的历史对话（切文献时调用） */
+  async function loadPrChat(litId) {
+    pr.chatLoadedFor = litId;
+    try {
+      const data = await api('/api/paper-chat/' + encodeURIComponent(litId));
+      if (pr.recordId !== litId) return; // 期间已切走
+      pr.chat = Array.isArray(data.messages) ? data.messages : [];
+    } catch (_) {
+      if (pr.recordId === litId) pr.chat = [];
+    }
+    if (pr.recordId === litId) {
+      renderPrChat();
+      updatePrChatClearUI();
+    }
+  }
+
+  function updatePrChatClearUI() {
+    const btn = $('prChatClear');
+    if (!btn) return;
+    const has = pr.chat.some((m) => !m.pending);
+    btn.disabled = !has;
+    btn.title = has ? '清除本篇论文的对话记录（不可恢复）' : '本篇还没有对话记录';
+  }
+
+  /** 清除本篇论文的对话记录（服务端也一起删，避免下次又拉回来） */
+  async function clearPrChat() {
+    const litId = pr.recordId;
+    if (!litId) return;
+    if (!pr.chat.some((m) => !m.pending)) { toast('本篇还没有对话记录', 'error'); return; }
+    showPopover($('prPopover'), '清除对话记录',
+      '<div style="margin-bottom:8px">将删除<b>当前这篇论文</b>的全部 AI 对话记录，其它论文的记录不受影响。此操作不可恢复。</div>',
+      [
+        { text: '取消', cls: '', onClick: () => {} },
+        { text: '清除', cls: 'btn-danger', onClick: async () => {
+          stopPrChat();
+          pr.chatBusy = false;
+          setPrChatBusyUI(false);
+          pr.chat = [];
+          pr.chatLoadedFor = litId;
+          renderPrChat();
+          updatePrChatClearUI();
+          try {
+            await api('/api/paper-chat/' + encodeURIComponent(litId), { method: 'DELETE' });
+            toast('已清除本篇的对话记录', 'success');
+          } catch (e) {
+            toast('清除失败：' + e.message, 'error');
+          }
+        } },
+      ]);
+  }
+
   function stopPrChat() {
     if (pr.chatAbort) { try { pr.chatAbort.abort(); } catch (_) { /* ignore */ } }
   }
@@ -3111,11 +3915,13 @@
     if (!it?.filename) { toast('该文献还没有 PDF 附件', 'error'); return; }
     pr.recordId = id;
     pr.open = true;
-    // 切换文献时终止上一篇的流式生成，并重置对话与待发图片（对话是「按论文」的）
+    // 切换文献时终止上一篇的流式生成，并重置待发图片（对话是「按论文」的）
     stopPrChat();
     pr.chatBusy = false;
     setPrChatBusyUI(false);
+    // 对话记录按文献持久化：先清空视图，再从 paper-chats.json 拉回这一篇的历史
     pr.chat = [];
+    pr.chatLoadedFor = null;
     prChatImages.length = 0;
     $('pdfReader').classList.remove('hidden');
     $('prFilename').textContent = it.originalName || '';
@@ -3140,6 +3946,11 @@
     // 划词面板的「翻译源」下拉（跟随设置 / 指定大模型 / 指定免费接口）
     loadTranslateSources();
     switchPrTab(pr.tab || 'translate');
+    // 笔记模式：换文献要重置正文/导图并重新拉这一篇的笔记
+    if (pn.on) resetPnForRecord(id).catch(() => {});
+    else { pn.md = ''; pn.mindmap = null; pn.loadedFor = null; }
+    // 对话记录：拉回历史（不阻塞 PDF 渲染）
+    loadPrChat(id).catch(() => {});
     loadPdfDocument('/uploads/' + encodeURIComponent(it.filename));
   }
 
@@ -3636,6 +4447,9 @@
   function bindPdfReader() {
     $('prClose').addEventListener('click', closePdfReader);
 
+    // 笔记模式（三栏）：绑定分隔条、页签与导图工具栏
+    initPnNoteMode();
+
     // Markdown 译文 / 原文 PDF 双向切换
     $('prToggleMd').addEventListener('click', toggleMdViewer);
     $('prMdClose').addEventListener('click', hideMdViewer);
@@ -3670,8 +4484,11 @@
       const payload = failed.retryPayload;
       pr.chat.splice(index, 1);
       renderPrChat();
+      updatePrChatClearUI();
       sendPrChat(payload);
     });
+    // 清除本篇论文的对话记录
+    $('prChatClear')?.addEventListener('click', () => { clearPrChat(); });
     $('prChatInput').addEventListener('input', () => {
       const n = $('prChatInput');
       n.style.height = 'auto';
@@ -3746,12 +4563,16 @@
     // 划词 → 工具条 + 自动翻译
     document.addEventListener('mouseup', () => {
       if (!pr.open) return;
+      // 笔记模式里在右栏编辑 / 中栏输入，不应触发 PDF 划词
+      if (pn.on && !findPageWrap(document.activeElement)) return;
       setTimeout(() => {
         const sel = captureSelection();
         if (sel) {
           pr.currentSelection = sel;
           showSelectionToolbar(sel.clientRects);
-          translateSelection(sel.text); // 选中后自动在右侧显示翻译，无需点击「译」
+          // 笔记模式：翻译结果显示在中间栏；普通模式：显示在右侧面板
+          if (pn.on) pnFillFromSelection(sel.text);
+          else translateSelection(sel.text);
         } else {
           hideSelectionToolbar();
         }
@@ -3767,7 +4588,10 @@
         navigator.clipboard.writeText(sel.text).then(() => toast('已复制选中内容', 'success')).catch(() => toast('复制失败', 'error'));
         return;
       }
-      if (btn.dataset.sel === 'translate') translateSelection(sel.text);
+      if (btn.dataset.sel === 'translate') {
+        if (pn.on) pnFillFromSelection(sel.text);
+        else translateSelection(sel.text);
+      }
       else if (btn.dataset.sel === 'highlight') doHighlight();
       else if (btn.dataset.sel === 'underline') doUnderline();
       else if (btn.dataset.sel === 'note') doNote();

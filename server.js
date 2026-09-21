@@ -2601,6 +2601,78 @@ export function createApp({
     }
   });
 
+  // ---------- 阅读器 AI 对话记录（按文献持久化，退出应用不丢） ----------
+  // GET  /api/paper-chat/:litId        读取某篇论文的对话记录
+  // PUT  /api/paper-chat/:litId        覆盖保存（前端消息变化后调用）
+  // DELETE /api/paper-chat/:litId      清除该篇论文的对话记录
+  app.get('/api/paper-chat/:litId', (req, res) => {
+    const record = store.getPaperChat(req.params.litId);
+    res.json({
+      litId: String(req.params.litId || ''),
+      messages: record?.messages || [],
+      updatedAt: record?.updatedAt || '',
+    });
+  });
+
+  app.put('/api/paper-chat/:litId', (req, res) => {
+    const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    // 只保留真正需要的字段，避免把无关数据写进磁盘
+    const cleaned = messages
+      .slice(-200)
+      .filter((m) => m && typeof m === 'object' && !Array.isArray(m))
+      // 记录里只应有 user / assistant 两种消息；system 这类提示词不进持久化记录
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => {
+        const out = { role: m.role, content: typeof m.content === 'string' ? m.content : String(m.content || '') };
+        if (Array.isArray(m.images) && m.images.length) out.images = m.images.slice(0, 8).map((x) => String(x));
+        if (m.error) out.error = true;
+        if (m.stopped) out.stopped = true;
+        return out;
+      })
+      .filter((m) => String(m.content || '').trim() || (m.images && m.images.length));
+    try {
+      const saved = store.savePaperChat(req.params.litId, cleaned);
+      res.json({ ok: true, count: cleaned.length, updatedAt: saved?.updatedAt || '' });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/paper-chat/:litId', (req, res) => {
+    const removed = store.deletePaperChat(req.params.litId);
+    res.json({ ok: true, removed });
+  });
+
+  // ---------- 阅读器笔记（Markdown + 思维导图两种视图，按文献持久化） ----------
+  app.get('/api/paper-notes/:litId', (req, res) => {
+    const note = store.getPaperNote(req.params.litId);
+    res.json({
+      litId: String(req.params.litId || ''),
+      md: note?.md || '',
+      mindmap: note?.mindmap || null,
+      updatedAt: note?.updatedAt || '',
+    });
+  });
+
+  app.put('/api/paper-notes/:litId', (req, res) => {
+    const body = req.body || {};
+    const patch = {};
+    if (typeof body.md === 'string') patch.md = body.md.slice(0, 500000);
+    if (body.mindmap && typeof body.mindmap === 'object') patch.mindmap = body.mindmap;
+    if (!Object.keys(patch).length) return res.status(400).json({ error: '没有要保存的内容' });
+    try {
+      const saved = store.savePaperNote({ litId: req.params.litId, ...patch });
+      res.json({ ok: true, updatedAt: saved?.updatedAt || '' });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/paper-notes/:litId', (req, res) => {
+    const removed = store.deletePaperNote(req.params.litId);
+    res.json({ ok: true, removed });
+  });
+
   // ---------- 世图科研下载助手：批量导入到文献中心 ----------
   app.post('/api/worldlib/import', (req, res) => {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];

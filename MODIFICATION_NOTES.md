@@ -1,3 +1,42 @@
+## v1.14.0：三栏笔记模式（Markdown + XMind 级思维导图）+ 论文对话持久化（2026-09-22）
+
+### 一、三栏笔记模式（阅读器工具栏「📓 笔记模式」）
+
+- **全新的阅读姿态**，不再是「划词弹面板」，而是一条完整的精读工作流：
+  - **左栏 = 原文 / 全文翻译**：内部分段切换「原文 PDF」与「全文翻译」，复用同一份 PDF 渲染结果（把 `#prPages` 搬进左栏，不重复渲染两份 PDF），全文翻译的 Markdown 译文直接在此阅读。
+  - **中栏 = 划词翻译**：在左栏选中文字即自动填充并翻译；也可手动输入、`Ctrl/Cmd+Enter` 触发；支持一键「→ 加入笔记」把原文+译文送进右栏，以及复制译文。
+  - **右栏 = 笔记**：Markdown 与思维导图是**同一份笔记的两种视图**，用页签切换。
+- **比例默认 0.4 : 0.2 : 0.4**，两根分隔条可自由拖拽，觉得窄随时拉宽；比例写入 `localStorage['pnPanes']`，下次打开保持一致。窄屏（≤900px）自动改为纵向堆叠。
+- **Markdown 笔记**：编辑 / 预览双模式，支持标题、列表、表格、公式、图片；`Tab` 键在编辑器内插入缩进而非跳焦点。
+- **粘贴图片**：Markdown 编辑器内直接 `Ctrl+V` 粘贴或拖入图片，自动插入 `![alt](dataURL)`。
+
+### 二、XMind 级思维导图（内置 `simple-mind-map`，MIT）
+
+- 选型：采用 **simple-mind-map（思绪思维导图）** UMD 构建，全部 21 个插件随包自动注册，无需 `usePlugin`；已 vendor 到 `public/vendor/simple-mind-map/`（含 LICENSE）。
+- **交互与快捷键对齐 XMind**：`Tab` 子主题、`Enter` 同级、`Shift+Tab` 父主题、`Insert` 子主题、`F2`/双击改文字、`Delete`/`Backspace` 删除、方向键切换节点、`Ctrl+Z/Y` 撤销重做、`Ctrl+滚轮` 缩放。工具栏另提供「＋子主题 / ＋同级 / 删除 / 适应 / 缩放 / 导出」按钮，选中节点缺失时自动回落到中心主题，不会「点了没反应」。
+- **导出 `.xmind`**：走 `doExportXMind.xmind(data, name)` 产出标准 `.xmind`（实为 zip，内部含 `content.json`），可直接用 XMind 打开继续编辑；同时支持导出 PNG。
+- **节点支持图片**：在导图画布内 `Ctrl+V` 粘贴图片即插入当前选中节点的图片（`node.setImage`，dataURL 内联）。
+- **两种视图双向同步**：Markdown → 导图按标题层级 / 列表缩进自动成树（跳过代码块、表格、引用，剥离行内强调）；导图 → Markdown 回写成缩进列表，切换视图不丢结构。
+
+### 三、论文 AI 对话持久化
+
+- 对话记录按文献持久化到 `paper-chats.json`：退出应用、刷新页面、切换文献再回来都能看到历史，不再「一关就没」。
+- 新增「🗑 清除记录」按钮（无记录时禁用），清除前弹确认，**只删当前这篇论文**的记录，其它论文不受影响。
+- 服务端清洗写入内容：最多保留 200 条、只接受 `user`/`assistant` 两种角色（`system` 提示词与非法条目一律不入库）、图片最多 8 张、过滤空消息。
+
+### 四、数据与接口
+
+- 新增两个数据文件 `paper-notes.json`（笔记，按文献存 `md` + `mindmap` 两种视图）与 `paper-chats.json`（对话），随 `ALL_DATA_FILES` 自动纳入备份 / 导出 / 目录切换。
+- 新增 6 个端点：`GET/PUT/DELETE /api/paper-notes/:litId`、`GET/PUT/DELETE /api/paper-chat/:litId`。笔记 PUT 为**部分更新**语义——只传 `mindmap` 不会清掉 `md`，反之亦然。
+- 笔记自动保存：编辑后节流 800ms 落盘，右上角显示「保存中… / 已保存 / 保存失败」；切换文献与关闭笔记模式前强制 flush，`beforeunload` 再用 `sendBeacon` 兜底。
+
+### 五、实现要点与验证
+
+- 纯逻辑抽到 `public/paper-note-utils.js`（三栏比例计算与像素下限、Markdown↔导图互转、片段插入与光标定位、空态判定），用 `vm.runInNewContext` 单测覆盖。
+- 修复一个会导致「导图空白」的真实缺陷：`simple-mind-map` 在容器宽高为 0 时直接抛错（`容器元素el的宽高不能为0`）。现改为容器无尺寸时暂缓实例化并置 `mindPending`，用短间隔轮询等容器量出尺寸再建——不依赖 `requestAnimationFrame`（后台标签页会被节流甚至不触发）。
+- 验证：`node --check` 全部通过；`node --test`：**102 passed / 0 failed**（新增 `test/paper-note-utils.test.mjs`、`test/paper-notes-store.test.mjs`）。
+- 真实浏览器端到端（Playwright + Chromium，造真 PDF → 注册文献 → 开阅读器 → 点笔记模式）**22/22 通过**：PDF 在左栏渲染 2 页、比例 0.40:0.20:0.39、Markdown 自动保存、切导图由 Markdown 生成 `我的笔记 → 方法 → 对比学习 / 配对摘要`、`Tab` 键成功新增子节点、导出 `.xmind` 为 7933 字节合法 zip 且含 `content.json`、退出笔记模式 PDF 归位、重进后笔记仍在、整页刷新后笔记与对话均还在、清除记录生效、全程无 JS 报错。
+
 ## v1.13.0：目录化 Markdown 译文 + 模型切换（2026-09-21）
 
 - **全文翻译改为「按论文目录结构」输出**：不再把视觉识别出的块平铺，而是先归并成层级树，固定输出骨架 `一级标题 → 文章信息 → 摘要 → 第一章 → 小节 …→ 参考文献`。所有标题渲染为 `## 1 引言` 形式，下一行附 `> 原文：Introduction` 原文对照，便于核对译名。

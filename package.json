@@ -1,6 +1,6 @@
 {
   "name": "zotero-lit-tool",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "一站式科研终端（经管版） —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
   "type": "module",
   "main": "electron/main.cjs",

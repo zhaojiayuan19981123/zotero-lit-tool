@@ -6,6 +6,8 @@
   <title>一站式科研终端（经管版）</title>
   <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="stylesheet" href="vendor/katex/katex.min.css" />
+  <!-- 思维导图（simple-mind-map，MIT，XMind 风格）：仅笔记模式的思维导图视图使用 -->
+  <link rel="stylesheet" href="vendor/simple-mind-map/simpleMindMap.min.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -1225,6 +1227,7 @@
         <span id="prRotationLabel" class="pr-rotation-label" title="当前页的显示旋转角度">0°</span>
         <button id="prRotateRight" class="btn btn-ghost" title="向右旋转当前页（仅本次阅读）">右转 ↷</button>
         <button id="prToggleMd" class="btn btn-ghost hidden" title="在 Markdown 译文与原文 PDF 之间切换">📑 查看译文</button>
+        <button id="prToggleNote" class="btn btn-ghost" title="笔记模式：左侧原文 / 中间划词翻译 / 右侧笔记（Markdown + 思维导图）">📓 笔记模式</button>
       </div>
       <div class="pr-tools">
         <span class="tb-label">高亮色</span>
@@ -1236,6 +1239,108 @@
         </div>
       </div>
     </div>
+    <!-- ================= 笔记模式（三栏：原文/翻译 ｜ 划词翻译 ｜ 笔记） ================= -->
+    <div id="prNoteMode" class="pr-note-mode hidden">
+      <div class="pn-panes">
+        <!-- ---------- 左：原文 PDF / 全文翻译 ---------- -->
+        <section class="pn-pane pn-left" data-pn="left">
+          <div class="pn-head">
+            <span class="pn-head-title">原文 / 译文</span>
+            <div class="pn-seg" id="pnLeftSeg">
+              <button class="pn-seg-btn active" data-pnleft="pdf">原文 PDF</button>
+              <button class="pn-seg-btn" data-pnleft="md">全文翻译</button>
+            </div>
+          </div>
+          <div class="pn-body" id="pnLeftBody">
+            <div class="pn-pdf-host" id="pnPdfHost"></div>
+            <div class="pn-md-host hidden" id="pnMdHost">
+              <div class="pn-md-empty" id="pnMdEmpty">
+                还没有全文翻译结果。请到「全文翻译」页签生成 Markdown 译文后回到这里查看。
+              </div>
+              <div class="pr-md-content" id="pnMdContent"></div>
+            </div>
+          </div>
+        </section>
+
+        <div class="pn-resizer" data-pnresize="left" title="拖动调整宽度"></div>
+
+        <!-- ---------- 中：划词翻译 ---------- -->
+        <section class="pn-pane pn-mid" data-pn="mid">
+          <div class="pn-head">
+            <span class="pn-head-title">划词翻译</span>
+            <button id="pnCopyTrans" class="btn btn-ghost btn-sm" title="复制译文">⧉</button>
+          </div>
+          <div class="pn-body pn-mid-body">
+            <div class="pn-field">
+              <div class="pn-field-label">
+                <span>原文</span>
+                <button id="pnSendToNote" class="pn-mini-btn" title="把这段原文+译文追加到右侧笔记">→ 加入笔记</button>
+              </div>
+              <textarea id="pnSrc" class="pn-src" placeholder="在左侧选中文字即可自动翻译；也可直接粘贴文本…"></textarea>
+            </div>
+            <div class="pn-field pn-field-grow">
+              <div class="pn-field-label"><span>译文</span></div>
+              <div id="pnTrans" class="pn-trans">
+                <div class="pn-trans-placeholder">翻译结果将显示在这里。</div>
+              </div>
+            </div>
+            <div class="pn-actions">
+              <button id="pnDoTranslate" class="btn btn-primary w100">翻 译</button>
+            </div>
+          </div>
+        </section>
+
+        <div class="pn-resizer" data-pnresize="right" title="拖动调整宽度"></div>
+
+        <!-- ---------- 右：笔记（Markdown / 思维导图 两种视图） ---------- -->
+        <section class="pn-pane pn-right" data-pn="right">
+          <div class="pn-head">
+            <span class="pn-head-title">笔记</span>
+            <div class="pn-seg" id="pnNoteSeg">
+              <button class="pn-seg-btn active" data-pnnote="md">Markdown</button>
+              <button class="pn-seg-btn" data-pnnote="mind">思维导图</button>
+            </div>
+            <span class="pn-save-state" id="pnSaveState"></span>
+          </div>
+          <div class="pn-body" id="pnNoteBody">
+            <!-- Markdown 视图：编辑 / 预览 -->
+            <div class="pn-note-md" id="pnNoteMd">
+              <div class="pn-md-bar">
+                <div class="pn-seg pn-seg-sm" id="pnMdSeg">
+                  <button class="pn-seg-btn active" data-pnmdedit="edit">编辑</button>
+                  <button class="pn-seg-btn" data-pnmdedit="preview">预览</button>
+                </div>
+                <button id="pnMdInsertTrans" class="pn-mini-btn" title="把中间栏的原文+译文插入到光标处">⇤ 插入翻译</button>
+              </div>
+              <textarea id="pnMdEditor" class="pn-md-editor" placeholder="在这里用 Markdown 记笔记…&#10;&#10;- 支持标题、列表、表格、公式&#10;- 可粘贴图片"></textarea>
+              <div id="pnMdPreview" class="pr-md-content pn-md-preview hidden"></div>
+            </div>
+
+            <!-- 思维导图视图 -->
+            <div class="pn-note-mind hidden" id="pnNoteMind">
+              <div class="pn-mind-bar">
+                <button id="pnMindAddChild" class="pn-mini-btn" title="插入下级节点（Tab）">＋子主题</button>
+                <button id="pnMindAddSib" class="pn-mini-btn" title="插入同级节点（Enter）">＋同级</button>
+                <button id="pnMindDelete" class="pn-mini-btn" title="删除选中节点（Delete）">删除</button>
+                <span class="pn-mind-sep"></span>
+                <button id="pnMindFit" class="pn-mini-btn" title="适应画布（自动平衡布局）">适应</button>
+                <button id="pnMindZoomIn" class="pn-mini-btn" title="放大">＋</button>
+                <button id="pnMindZoomOut" class="pn-mini-btn" title="缩小">－</button>
+                <span class="pn-mind-sep"></span>
+                <button id="pnMindExportXmind" class="pn-mini-btn pn-mini-primary" title="导出为 .xmind 文件（可用 XMind 打开继续编辑）">⤓ 导出 .xmind</button>
+                <button id="pnMindExportPng" class="pn-mini-btn" title="导出为 PNG 图片">⤓ PNG</button>
+              </div>
+              <div class="pn-mind-host" id="pnMindHost"></div>
+              <div class="pn-mind-hint">
+                Tab 子主题 ｜ Enter 同级 ｜ Shift+Tab 父主题 ｜ F2 或双击改文字 ｜ Delete 删除 ｜ 方向键切换 ｜ Ctrl+V 粘贴图片
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+      <div class="pn-empty-tip hidden" id="pnEmptyTip"></div>
+    </div>
+
     <div class="pr-body">
       <!-- 左：PDF 连续页面（Markdown 译文打开后以覆盖层形式盖在页面上方） -->
       <div class="pr-main">
@@ -1406,9 +1511,13 @@
           <div id="prAnalysisBody" class="pr-an-body"></div>
         </div>
 
-        <!-- ---------- 论文 AI 对话（支持文本 + 图片） ---------- -->
+        <!-- ---------- 论文 AI 对话（支持文本 + 图片，记录按文献持久化） ---------- -->
         <div class="pr-pane pr-pane-chat hidden" data-prpane="chat">
           <div id="prChatModelRow" class="ai-model-row"></div>
+          <div class="pr-chat-bar">
+            <span class="pr-chat-bar-title">对话记录 <span class="pr-chat-bar-note">按文献保存，退出应用不丢</span></span>
+            <button id="prChatClear" class="btn btn-ghost btn-sm" disabled title="清除本篇论文的对话记录">🗑 清除记录</button>
+          </div>
           <div id="prChatMsgs" class="pr-chat-msgs"></div>
           <div id="prChatAttach" class="pr-chat-attach"></div>
           <div class="pr-chat-input-row">
@@ -1460,7 +1569,10 @@
   <script src="vendor/dompurify/purify.min.js"></script>
   <script src="vendor/katex/katex.min.js"></script>
   <script src="vendor/lunar/lunar.js"></script>
+  <!-- 思维导图库：UMD 全局 simpleMindMap，类在 .default；21 个插件已内置自动注册 -->
+  <script src="vendor/simple-mind-map/simpleMindMap.umd.min.js"></script>
   <script src="pdf-reader-utils.js"></script>
+  <script src="paper-note-utils.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

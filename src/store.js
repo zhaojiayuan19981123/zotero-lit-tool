@@ -25,6 +25,8 @@ let MARKDOWN_NOTES_FILE = path.join(DATA_DIR, 'markdown-notes.json');
 let CALENDAR_FILE = path.join(DATA_DIR, 'calendar.json');
 let TOP_JOURNALS_FILE = path.join(DATA_DIR, 'top-journals.json');
 let TOP_JOURNAL_ANALYSES_FILE = path.join(DATA_DIR, 'top-journal-analyses.json');
+let PAPER_NOTES_FILE = path.join(DATA_DIR, 'paper-notes.json');
+let PAPER_CHATS_FILE = path.join(DATA_DIR, 'paper-chats.json');
 
 export function configure({ dataDir }) {
   if (dataDir) {
@@ -46,6 +48,8 @@ export function configure({ dataDir }) {
     CALENDAR_FILE = path.join(DATA_DIR, 'calendar.json');
     TOP_JOURNALS_FILE = path.join(DATA_DIR, 'top-journals.json');
     TOP_JOURNAL_ANALYSES_FILE = path.join(DATA_DIR, 'top-journal-analyses.json');
+    PAPER_NOTES_FILE = path.join(DATA_DIR, 'paper-notes.json');
+    PAPER_CHATS_FILE = path.join(DATA_DIR, 'paper-chats.json');
   }
 }
 
@@ -107,6 +111,8 @@ const ALL_DATA_FILES = [
   'pdf-translations.json', // 全文翻译作业历史
   'top-journals.json', // UTD
   'top-journal-analyses.json', // 顶刊 AI 分析记录 顶刊追踪：订阅、元数据、打卡与投递记录
+  'paper-notes.json',   // 阅读器笔记模式的笔记（按文献 id，含 Markdown 与思维导图两种视图）
+  'paper-chats.json',   // 阅读器 AI 对话记录（按文献 id 持久化，退出不丢）
 ];
 
 export function dataFileNames() {
@@ -551,6 +557,89 @@ export function deleteTopJournalAnalysis(id) {
   const list = listTopJournalAnalyses(); const next = list.filter((item) => item.id !== id);
   if (next.length === list.length) return false; saveFile(TOP_JOURNAL_ANALYSES_FILE, next); return true;
 }
+
+// ---------- 阅读器笔记（按文献 id，一份笔记两种视图：Markdown / 思维导图） ----------
+// 结构：[{ litId, md, mindmap, updatedAt, createdAt }]
+// md 存 Markdown 原文；mindmap 存 simple-mind-map 的 getData() 结果（{data,children}）。
+// 两者是「同一份笔记的两种视图」，各自独立保存，切换视图不会互相覆盖。
+export function listPaperNotes() {
+  return loadFile(PAPER_NOTES_FILE, []);
+}
+
+export function getPaperNote(litId) {
+  const key = String(litId || '').trim();
+  if (!key) return null;
+  return listPaperNotes().find((item) => item.litId === key) || null;
+}
+
+export function savePaperNote(record) {
+  const key = String(record?.litId || '').trim();
+  if (!key) throw new Error('缺少文献标识');
+  const list = listPaperNotes();
+  const index = list.findIndex((item) => item.litId === key);
+  const now = new Date().toISOString();
+  if (index >= 0) {
+    const prev = list[index];
+    list[index] = {
+      ...prev,
+      ...record,
+      litId: key,
+      createdAt: prev.createdAt || now,
+      updatedAt: now,
+    };
+  } else {
+    list.unshift({ ...record, litId: key, createdAt: now, updatedAt: now });
+  }
+  saveFile(PAPER_NOTES_FILE, list);
+  return list.find((item) => item.litId === key);
+}
+
+export function deletePaperNote(litId) {
+  const key = String(litId || '').trim();
+  const list = listPaperNotes();
+  const next = list.filter((item) => item.litId !== key);
+  if (next.length === list.length) return false;
+  saveFile(PAPER_NOTES_FILE, next);
+  return true;
+}
+
+// ---------- 阅读器 AI 对话记录（按文献 id 持久化，退出应用不丢） ----------
+// 结构：[{ litId, messages:[{role,content,images}], updatedAt, createdAt }]
+export function listPaperChats() {
+  return loadFile(PAPER_CHATS_FILE, []);
+}
+
+export function getPaperChat(litId) {
+  const key = String(litId || '').trim();
+  if (!key) return null;
+  return listPaperChats().find((item) => item.litId === key) || null;
+}
+
+export function savePaperChat(litId, messages) {
+  const key = String(litId || '').trim();
+  if (!key) throw new Error('缺少文献标识');
+  const list = listPaperChats();
+  const index = list.findIndex((item) => item.litId === key);
+  const now = new Date().toISOString();
+  const payload = Array.isArray(messages) ? messages : [];
+  if (index >= 0) {
+    list[index] = { ...list[index], litId: key, messages: payload, updatedAt: now };
+  } else {
+    list.unshift({ litId: key, messages: payload, createdAt: now, updatedAt: now });
+  }
+  saveFile(PAPER_CHATS_FILE, list);
+  return list.find((item) => item.litId === key);
+}
+
+export function deletePaperChat(litId) {
+  const key = String(litId || '').trim();
+  const list = listPaperChats();
+  const next = list.filter((item) => item.litId !== key);
+  if (next.length === list.length) return false;
+  saveFile(PAPER_CHATS_FILE, next);
+  return true;
+}
+
 // ---------- AI 助手多会话 ----------
 let CONVERSATIONS_FILE = path.join(DATA_DIR, 'conversations.json');
 
