@@ -93,6 +93,10 @@
   let activeSummary = '';  // 当前会话的早期对话摘要
   let convLoaded = false;
   let chatBusy = false;
+  // 当前聊天草稿附加的 PDF 与本地知识库资料。仅在发送时随请求提交，不写入聊天正文。
+  let chatAttachments = [];
+  let chatKnowledge = [];
+  let chatKnowledgeCandidates = [];
   // 多模型：供应商目录 + 已配置的模型列表 + 当前激活项（顶栏切换用）
   let providers = [];       // [{id,name,baseURL,keyHint,models:[{id,name,vision}]}]
   let profiles = [];        // 已保存的模型配置
@@ -5486,6 +5490,84 @@
     } catch (e) { toast(e.message, 'error'); }
   }
   function chatMd(v) { return renderMarkdown(v); }
+  function renderChatContext() {
+    const box = $('chatContextPills');
+    if (!box) return;
+    const pills = [
+      ...chatAttachments.map((item) => `<span class="chat-context-pill" title="${esc(item.name || 'PDF')}" data-chat-attachment="${esc(item.id || '')}">📄 ${esc(item.name || 'PDF')} <button type="button" class="chat-context-remove" data-remove-chat-attachment="${esc(item.id || '')}" aria-label="移除附件">×</button></span>`),
+      ...chatKnowledge.map((item) => `<span class="chat-context-pill" title="${esc(item.title || '')}">🧠 ${esc(item.title || '本地资料')} <button type="button" class="chat-context-remove" data-remove-chat-knowledge="${esc(item.id || '')}" aria-label="移除资料">×</button></span>`),
+    ];
+    box.innerHTML = pills.length ? pills.join('') : '<span class="chat-context-empty">可附加 PDF 或选择本地知识库内容</span>';
+  }
+
+  async function uploadChatPdf(file) {
+    if (!file) return;
+    if (file.type && file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name || '')) {
+      toast('AI 助手只支持 PDF 文件', 'error');
+      return;
+    }
+    if (chatAttachments.length >= 5) {
+      toast('单次对话最多附加 5 个 PDF', 'error');
+      return;
+    }
+    const form = new FormData();
+    form.append('file', file, file.name);
+    const button = $('btnChatAttach');
+    const original = button?.textContent || '📎';
+    if (button) { button.disabled = true; button.textContent = '解析中…'; }
+    try {
+      const res = await fetch('/api/chat/attachments', { method: 'POST', body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `PDF 上传失败 (${res.status})`);
+      chatAttachments.push(data);
+      renderChatContext();
+      toast(`已附加：${data.name || file.name}`, 'success');
+    } catch (e) {
+      toast(e.message || 'PDF 上传失败', 'error');
+    } finally {
+      if (button) { button.disabled = false; button.textContent = original; }
+    }
+  }
+
+  function renderChatKnowledgeCandidates() {
+    const box = $('chatKnowledgeList');
+    if (!box) return;
+    if (!chatKnowledgeCandidates.length) {
+      box.innerHTML = '<div class="empty">暂无可选择的本地资料。请先创建 Markdown 笔记、灵感孵化或研究记录。</div>';
+      return;
+    }
+    const selected = new Set(chatKnowledge.map((item) => item.id));
+    const groups = new Map();
+    for (const item of chatKnowledgeCandidates) {
+      const key = item.sourceLabel || item.sourceType || '本地资料';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+    box.innerHTML = [...groups.entries()].map(([label, items]) => `
+      <section class="chat-knowledge-group">
+        <h4>${esc(label)} <span>${items.length}</span></h4>
+        ${items.map((item) => `<label class="chat-knowledge-item">
+          <input type="checkbox" data-chat-knowledge-id="${esc(item.id)}" ${selected.has(item.id) ? 'checked' : ''}>
+          <span><b>${esc(item.title || '未命名资料')}</b><small>${esc(String(item.content || '').replace(/\s+/g, ' ').slice(0, 180))}</small></span>
+        </label>`).join('')}
+      </section>`).join('');
+  }
+
+  async function openChatKnowledgePicker() {
+    const modal = $('chatKnowledgeModal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    const box = $('chatKnowledgeList');
+    if (box) box.innerHTML = '<div class="loading">正在读取本地知识库…</div>';
+    try {
+      const data = await api('/api/chat/knowledge-candidates');
+      chatKnowledgeCandidates = Array.isArray(data) ? data : [];
+      renderChatKnowledgeCandidates();
+    } catch (e) {
+      chatKnowledgeCandidates = [];
+      if (box) box.innerHTML = `<div class="empty error">读取本地知识库失败：${esc(e.message)}</div>`;
+    }
+  }
   function renderChatMsgs() {
     const box = $('chatMsgs');
     if (!chatMsgs.length) {
@@ -6397,12 +6479,12 @@ a { color: #176b87; }
     $('updateSpeedText').textContent = status.bytesPerSecond ? `${formatUpdateBytes(status.bytesPerSecond)}/s` : '';
 
     // 优先显示 GitHub Release 正文；若上游未提供正文，至少列出本版本已落地的变更。
-    const knownChanges = status.availableVersion === '1.10.1' ? [
-      '应用名称更新为《一站式科研终端（经管版）》；',
-      'AI 模型兼容层支持 Chat Completions 与 Responses API 自动切换，改善测试连通但对话/翻译无返回的问题；',
-      '顶刊追踪支持 AI 分析记录持久化、历史查看、一键保存 Markdown，并在分析前压缩本地知识库上下文；',
-      'AI 助手支持上传并读取 PDF，以及选择 Markdown 笔记、研究记录、灵感孵化和收藏顶刊文章作为上下文；',
-      '邮箱支持当前文件夹一键将全部未读邮件标记为已读。',
+    const knownChanges = status.availableVersion === '1.11.0' ? [
+      '应用名称为《一站式科研终端（经管版）》；',
+      '顶刊追踪 AI 分析记录支持持久化、历史查看和一键保存至 Markdown 笔记，并在分析前压缩较大的本地知识库上下文；',
+      'AI 助手支持上传并阅读 PDF，也可以多选 Markdown 笔记、研究记录、灵感孵化、论文进度和收藏顶刊文章作为上下文；',
+      '模型请求增强 Chat Completions / Responses API 兼容与无回复兜底，避免“测试连通但实际对话/翻译无返回”；',
+      '邮箱支持当前文件夹一键将全部未读邮件标记为已读，并修复 AI 助手初始化异常导致的其他按钮失效问题。',
     ].join('\n') : '';
     const releaseNotes = String(status.releaseNotes || '').trim() || knownChanges;
     const hasNotes = Boolean(status.releaseName || releaseNotes);
@@ -6771,9 +6853,23 @@ a { color: #176b87; }
 
     $('btnChatAttach').addEventListener('click', () => $('chatPdfInput').click());
     $('chatPdfInput').addEventListener('change', (e) => { const file = e.target.files?.[0]; if (file) uploadChatPdf(file); e.target.value = ''; });
+    renderChatContext();
+    $('chatContextPills').addEventListener('click', (e) => {
+      const removePdf = e.target.closest('[data-remove-chat-attachment]');
+      if (removePdf) { chatAttachments = chatAttachments.filter((item) => item.id !== removePdf.dataset.removeChatAttachment); renderChatContext(); return; }
+      const removeKnowledge = e.target.closest('[data-remove-chat-knowledge]');
+      if (removeKnowledge) { chatKnowledge = chatKnowledge.filter((item) => item.id !== removeKnowledge.dataset.removeChatKnowledge); renderChatContext(); }
+    });
     $('btnChatKnowledge').addEventListener('click', openChatKnowledgePicker);
     $('btnChatKnowledgeClose').addEventListener('click', () => $('chatKnowledgeModal').classList.add('hidden'));
-    $('btnChatKnowledgeDone').addEventListener('click', () => { $('chatKnowledgeModal').classList.add('hidden'); toast('已选择 ' + chatKnowledge.length + ' 项本地资料', 'success'); });
+    $('btnChatKnowledgeDone').addEventListener('click', () => {
+      const ids = [...document.querySelectorAll('[data-chat-knowledge-id]:checked')].map((input) => input.dataset.chatKnowledgeId);
+      const byId = new Map(chatKnowledgeCandidates.map((item) => [item.id, item]));
+      chatKnowledge = ids.map((id) => byId.get(id)).filter(Boolean);
+      $('chatKnowledgeModal').classList.add('hidden');
+      renderChatContext();
+      toast('已选择 ' + chatKnowledge.length + ' 项本地资料', 'success');
+    });
     // AI 助手：多会话
     document.querySelectorAll('[data-quick]').forEach((b) => b.addEventListener('click', () => sendChat(QUICK_PROMPTS[b.dataset.quick])));
     $('btnNewChat').addEventListener('click', () => newConversation());

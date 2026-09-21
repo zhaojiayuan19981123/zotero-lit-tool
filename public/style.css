@@ -1589,6 +1589,20 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .chat-bubble .md p { margin: 4px 0; }
 .chat-cursor { display: inline-block; width: 7px; height: 15px; background: var(--primary); vertical-align: -2px; animation: blink 1s step-start infinite; }
 @keyframes blink { 50% { opacity: 0; } }
+.chat-context-pills { display: flex; flex-wrap: wrap; gap: 6px; min-height: 30px; padding: 8px 16px 0; background: var(--panel, #fff); }
+.chat-context-empty { color: var(--muted, #8a94a6); font-size: 12px; }
+.chat-context-pill { display: inline-flex; align-items: center; gap: 4px; max-width: 280px; padding: 4px 8px; border: 1px solid var(--border, #dfe4ec); border-radius: 999px; background: var(--soft, #f5f7fb); color: var(--text, #334155); font-size: 12px; }
+.chat-context-pill > .chat-context-remove { border: 0; background: transparent; cursor: pointer; color: inherit; font-size: 15px; line-height: 1; padding: 0 0 0 2px; }
+.chat-context-pill > .chat-context-remove:hover { color: var(--danger, #d14343); }
+.chat-knowledge-list { display: flex; flex-direction: column; gap: 14px; }
+.chat-knowledge-group { border: 1px solid var(--border, #dfe4ec); border-radius: 10px; padding: 10px; }
+.chat-knowledge-group h4 { display: flex; justify-content: space-between; margin: 0 0 8px; font-size: 13px; }
+.chat-knowledge-group h4 span { color: var(--muted, #8a94a6); font-weight: 400; }
+.chat-knowledge-item { display: flex; gap: 8px; align-items: flex-start; padding: 8px; border-radius: 8px; cursor: pointer; }
+.chat-knowledge-item:hover { background: var(--soft, #f5f7fb); }
+.chat-knowledge-item input { margin-top: 3px; }
+.chat-knowledge-item span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.chat-knowledge-item small { color: var(--muted, #8a94a6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-input-row {
   display: flex; gap: 10px; padding: 12px 18px 16px; background: var(--surface);
   border-top: 1px solid var(--border); align-items: flex-end;
