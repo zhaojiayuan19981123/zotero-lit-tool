@@ -264,9 +264,35 @@
   }
 
   // ---------- 导图节点框自适应 ----------
+  // ★ 这里的设计约束来自 simple-mind-map 库的实现（已读源码确认，改动前请先看）：
+  //
+  //   1) 节点宽度被 hard-clamp 到 textAutoWrapWidth：
+  //        width = Math.min(Math.ceil(width) + 1, textAutoWrapWidth)
+  //      所以 textAutoWrapWidth 是**内容区宽度**，节点框实际宽度 = 该值 + 左右内边距。
+  //      给多宽，节点框就最多能有多宽；给窄了 → 文字被挤成多行甚至显示不全。
+  //
+  //   2) 纯文本节点的换行判定是「逐字累加后用真实字体 measureText」：
+  //        if (measureText(text).width <= maxWidth) 收进本行，否则换行
+  //      用的是**渲染字体（默认主题是 微软雅黑 16px）的真实宽度**，且比较符是 <=。
+  //      汉字在微软雅黑下正好等于 fontSize（实测 20 字 = 320.0px），没有小数余量。
+  //
+  //   3) 因此「估算值」必须留出明确余量，而且这个余量**不能被上界截掉**。
+  //      之前版本把上界硬编码成 320（Math.min(320, ...)），
+  //      结果 20 字标题算出 320+2=322 → 被截成 320 → 恰等于实测宽度 320.0，
+  //      比较符又是 <=，任何亚像素取整都会让最后一个字掉到下一行 / 被裁掉。
+  //      这就是「框还是显示不全字」的根因。
+  //
+  // 结论：上界要放开到「右栏大部分宽度」，并保证余量生效。
+  /** 换行阈值的全局上限（内容区宽度）。放开到 620，避免长标题被强行压窄。 */
+  const MIND_WRAP_HARD_CAP = 620;
+  /** 每行末尾保留的余量（px）：抵消真实字体的亚像素宽度与 getBoundingClientRect 取整。 */
+  const MIND_WRAP_SLACK = 6;
+
   /**
    * 估算一个字符的显示宽度（px @ fontSize）。
    * 中日韩字符与全角标点按 1 个字宽算，ASCII 按约 0.55 算，其余按 0.8。
+   * ★ 汉字在微软雅黑下实测就是 fontSize（无小数），这里保持一致，
+   *   余量统一交给 MIND_WRAP_SLACK，不要在这里偷偷打折。
    */
   function charWidth(ch, fontSize) {
     const code = ch.codePointAt(0);
@@ -289,49 +315,60 @@
   }
 
   /**
-   * 按最长一行算节点文本所需的理想宽度（含左右内边距）。
+   * 按最长一行算节点文本所需的理想宽度（内容区宽度，不含内边距）。
    * 用于给库的 textAutoWrapWidth 定一个「够放下最长行、但不会太离谱」的值，
    * 这样短文字的框会收紧、长文字会换行把框撑高，而不是把字挤出框外。
    */
   function idealNodeTextWidth(text, opts = {}) {
     const fontSize = Number(opts.fontSize) || 16;
     const min = Number(opts.minWidth) > 0 ? Number(opts.minWidth) : 96;
-    const max = Number(opts.maxWidth) > 0 ? Number(opts.maxWidth) : 320;
+    const max = Number(opts.maxWidth) > 0 ? Number(opts.maxWidth) : MIND_WRAP_HARD_CAP;
     const lines = String(text || '').split(/\r?\n/);
     let longest = 0;
     for (const line of lines) {
       longest = Math.max(longest, estimateTextWidth(line, fontSize));
     }
     if (!longest) return min;
-    // +2 规避 getBoundingClientRect 取整导致的最后一字换行
-    const want = Math.ceil(longest) + 2;
-    return Math.min(Math.max(want, min), max);
+    // 余量必须在夹取之前加、且夹取只作用于「需求」而不是「需求+余量」，
+    // 否则一旦贴到上界，余量就会被 Math.min 吃掉（旧代码的 bug）。
+    const want = Math.ceil(longest) + MIND_WRAP_SLACK;
+    if (want <= max) return Math.max(want, min);
+    // 需求本身超过上界：允许换行，此时上界就是最终宽度。
+    return Math.min(Math.max(Math.ceil(longest), min), max);
   }
 
   /**
    * 扫描整棵导图，取所有节点里「最宽的一行」来决定统一换行宽度。
    * 统一值是必要的：库的 textAutoWrapWidth 是全局配置，无法逐节点设置。
+   * 因此取最大值 —— 保证最长的那个节点不被挤，其余节点盒子宽一点无妨。
    */
   function fitMindmapWrapWidth(root, opts = {}) {
-    const max = Number(opts.maxWidth) > 0 ? Number(opts.maxWidth) : 320;
+    const max = Number(opts.maxWidth) > 0 ? Number(opts.maxWidth) : MIND_WRAP_HARD_CAP;
     const min = Number(opts.minWidth) > 0 ? Number(opts.minWidth) : 96;
+    const fontSize = Number(opts.fontSize) || 16;
     let longest = 0;
     const walk = (n) => {
       const t = nodeText(n);
       for (const line of t.split(/\r?\n/)) {
-        longest = Math.max(longest, estimateTextWidth(line, Number(opts.fontSize) || 16));
+        longest = Math.max(longest, estimateTextWidth(line, fontSize));
       }
       (Array.isArray(n?.children) ? n.children : []).forEach(walk);
     };
     if (root) walk(root);
     if (!longest) return min;
-    return Math.min(Math.max(Math.ceil(longest) + 2, min), max);
+    // 同 idealNodeTextWidth：余量先加、且不参与与上界的夹取，
+    // 否则贴边时余量会被吃光，导致「刚好差一点点」的裁字。
+    const want = Math.ceil(longest) + MIND_WRAP_SLACK;
+    if (want <= max) return Math.max(want, min);
+    return Math.min(Math.max(Math.ceil(longest), min), max);
   }
 
   window.PaperNoteUtils = {
     DEFAULT_PANES,
     MIN_PANE_RATIO,
     MIN_PANE_PX,
+    MIND_WRAP_HARD_CAP,
+    MIND_WRAP_SLACK,
     normalizePanes,
     resizePanes,
     paneFlex,

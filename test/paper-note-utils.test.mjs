@@ -305,3 +305,66 @@ test('节点文字里的 HTML 会被 nodeText 剥掉（不会把标签当正文�
   const plain = U.idealNodeTextWidth('中心主题', { fontSize: 16, minWidth: 96, maxWidth: 320 });
   assert.equal(withTag, plain);
 });
+
+// ---------- 导图节点框裁字回归（v1.15.1）----------
+// 背景（库源码取证）：
+//   simple-mind-map 会把节点宽度 hard-clamp 到 textAutoWrapWidth：
+//     width = Math.min(Math.ceil(width) + 1, textAutoWrapWidth)
+//   纯文本节点换行是拿**真实渲染字体**逐字 measureText 后与该值比较，比较符是 <=。
+//   汉字在默认主题（微软雅黑 16px, bold）下宽度**正好等于 fontSize**，没有小数余量。
+// 旧代码的 bug：上界被硬编码成 Math.min(320, ...)，20 个汉字算出 320+2=322 被截成 320，
+//   恰好等于实测宽度 320.0，于是任何亚像素取整都会把最后一个字挤到下一行 / 裁掉。
+
+test('余量不会被上界吃掉：需求恰好等于上限时仍不多给，但绝不欠给', () => {
+  // 20 个汉字 @16px = 320px 需求（用真实用户标题，实测正好 20 字 / 320.0px）
+  const t = '打破常规：视觉非典型性如何影响品牌生成图';
+  assert.equal([...t].length, 20);
+  const est = U.estimateTextWidth(t, 16);
+  assert.equal(est, 320, '20 个汉字 @16px 必须正好估成 320');
+
+  const atCap = U.fitMindmapWrapWidth({ data: { text: t }, children: [] }, { fontSize: 16, minWidth: 96, maxWidth: 320 });
+  assert.ok(atCap >= est, `贴到上限时也不得小于需求（得到 ${atCap}，需求 ${est}）`);
+});
+
+test('上界放宽后必须留出余量，避免与真实字宽零间隙相撞', () => {
+  const t = '打破常规：视觉非典型性如何影响品牌生成图';
+  const est = U.estimateTextWidth(t, 16);
+  // 上限充裕 → 必须比裸需求更大（留 MIND_WRAP_SLACK），否则贴死就会裁字
+  const w = U.fitMindmapWrapWidth({ data: { text: t }, children: [] }, { fontSize: 16, minWidth: 96, maxWidth: 620 });
+  assert.ok(w > est, `应留余量：wrap=${w} 应 > 需求 ${est}`);
+  assert.ok(w <= 620, `不得超过上界：${w}`);
+});
+
+test('超长标题仍受上界约束（不能无限撑宽）', () => {
+  const t = '这是一个非常长的标题用来验证节点框会不会把文字裁掉以及完整显示的边界行为';
+  const w = U.fitMindmapWrapWidth({ data: { text: t }, children: [] }, { fontSize: 16, minWidth: 96, maxWidth: 620 });
+  assert.ok(w <= 620, `超长也必须夹回上界，得到 ${w}`);
+});
+
+test('旧上界 320 与新上界 620 的差异：长标题不再被压到 320', () => {
+  const t = 'AI辅助经管类学术文献精读与知识沉淀一体化科研终端系统设计与实现路径研究';
+  const narrow = U.fitMindmapWrapWidth({ data: { text: t }, children: [] }, { fontSize: 16, minWidth: 96, maxWidth: 320 });
+  const wide = U.fitMindmapWrapWidth({ data: { text: t }, children: [] }, { fontSize: 16, minWidth: 96, maxWidth: 620 });
+  assert.equal(narrow, 320, '上界 320 时被压到 320（这就是旧的裁字现场）');
+  assert.ok(wide > 320, `上界放开后应显著变宽，得到 ${wide}`);
+  // 且放宽后必须不小于该标题的真实需求（实测 561.4px）
+  assert.ok(wide >= 561, `应至少容纳实测需求 561.4px，得到 ${wide}`);
+});
+
+test('MIND_WRAP 常量已按预期导出', () => {
+  assert.equal(U.MIND_WRAP_HARD_CAP, 620);
+  assert.ok(U.MIND_WRAP_SLACK >= 4 && U.MIND_WRAP_SLACK <= 16, `余量应在合理区间，得到 ${U.MIND_WRAP_SLACK}`);
+});
+
+test('多子树时取全局最长行（不只根节点）', () => {
+  const tree = {
+    data: { text: '根' },
+    children: [
+      { data: { text: '短子节点' }, children: [] },
+      { data: { text: '这是一个明显更长的子节点文案需要被考虑进来以撑宽换行阈值' }, children: [] },
+    ],
+  };
+  const w = U.fitMindmapWrapWidth(tree, { fontSize: 16, minWidth: 96, maxWidth: 620 });
+  const rootOnly = U.fitMindmapWrapWidth({ data: { text: '根' }, children: [] }, { fontSize: 16, minWidth: 96, maxWidth: 620 });
+  assert.ok(w > rootOnly, '子节点的长文案必须参与计算');
+});

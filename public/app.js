@@ -2943,6 +2943,8 @@
           dragging.handle, e.clientX - dragging.startX, dragging.total, dragging.startPanes
         );
         applyPnPanes();
+        // 右栏变宽/变窄后，节点可用宽度也变了，重算换行阈值（节流，拖动中不必每帧重排）
+        schedulePnWrapWidth();
       });
       const finish = () => {
         if (!dragging) return;
@@ -3221,7 +3223,13 @@
         // 文字变长/变短后重算换行宽度，让框始终贴合内容
         applyPnWrapWidth();
       });
-      setTimeout(() => { try { pn.mm.view.fit(); } catch (_) { /* ignore */ } }, 60);
+      setTimeout(() => {
+        // 建实例时容器可能刚显示、宽度还没定，这里用真实宽度再校准一次换行阈值
+        applyPnWrapWidth();
+        try { pn.mm.view.fit(); } catch (_) { /* ignore */ }
+      }, 60);
+      // 库首次渲染是异步的，渲染完成后再校一次，确保首屏就不会裁字
+      setTimeout(() => { applyPnWrapWidth(); }, 260);
     } catch (e) {
       pn.mm = null;
       host.innerHTML = `<div class="pn-md-empty">思维导图初始化失败：${esc(e.message)}</div>`;
@@ -3229,14 +3237,25 @@
   }
 
   /**
-   * 按当前导图内容算一个合适的换行宽度。
-   * 右栏宽度也要参与参考：太窄的话统一上限，避免节点横向撑爆画布。
+   * 按当前导图内容算一个合适的换行宽度（内容区宽度，不含节点内边距）。
+   *
+   * ★ 为什么上界要放到 620 而不是原来的 320：
+   * 库把节点宽度 hard-clamp 到 textAutoWrapWidth，且纯文本换行是拿**真实字体**
+   * 逐字 measureText 后与它比较（<=）。汉字在默认主题（微软雅黑 16px）下正好
+   * 等于 fontSize，没有小数余量。原来上界 320 时，20 个汉字的标题算出来就是
+   * 320 + 2 = 322 → 被截成 320 → 恰好等于实测宽度 320.0，比较符又是 <=，
+   * 于是任何一个亚像素取整都会把最后一个字挤掉 —— 这就是「框显示不全字」的根因。
+   *
+   * 现在：上界跟随右栏真实宽度（留出内边距与滚动条的余量），
+   * 最长不超过 MIND_WRAP_HARD_CAP(620)，短文字照旧收紧。
    */
   function pnFitWrapWidth(root) {
     const host = pnEl('pnMindHost');
-    // 右栏可用宽度的一半~八成之间夹一层，保证长标题换行后不会比画布还宽
-    const hostW = host?.clientWidth || 600;
-    const hardMax = Math.max(160, Math.min(320, Math.round(hostW * 0.8)));
+    const utils = window.PaperNoteUtils;
+    const cap = utils?.MIND_WRAP_HARD_CAP || 620;
+    // 右栏可用宽度扣掉左右内边距与一点滚动条余量；至少给 240 才有排版意义
+    const hostW = host?.clientWidth || 640;
+    const hardMax = Math.max(240, Math.min(cap, hostW - 40));
     return paperNoteUtils.fitMindmapWrapWidth(root || pn.mindmap, {
       fontSize: 16,
       minWidth: 96,
@@ -3253,6 +3272,18 @@
       pn.mm.opt.textAutoWrapWidth = wrap;
       pn.mm.render();
     } catch (_) { /* 渲染中的竞态忽略 */ }
+  }
+
+  /** applyPnWrapWidth 的节流版：拖动分隔条时高频触发，等手停下来再重排 */
+  let pnWrapTimer = null;
+  function schedulePnWrapWidth() {
+    if (!pn.mm || pn.noteTab !== 'mind') return;
+    if (pnWrapTimer) clearTimeout(pnWrapTimer);
+    pnWrapTimer = setTimeout(() => {
+      pnWrapTimer = null;
+      applyPnWrapWidth();
+      try { pn.mm?.view?.fit(); } catch (_) { /* 忽略 */ }
+    }, 160);
   }
 
   /** 统一导图数据结构：确保有 data.text 与 children 数组，避免库内部报错 */
@@ -3620,7 +3651,7 @@
       if (!pn.on) return;
       if (pnResizeTimer) clearTimeout(pnResizeTimer);
       pnResizeTimer = setTimeout(() => {
-        if (pn.noteTab === 'mind') waitPnMindHost();
+        if (pn.noteTab === 'mind') { waitPnMindHost(); schedulePnWrapWidth(); }
         else pn.mm?.resize?.();
       }, 200);
     });
