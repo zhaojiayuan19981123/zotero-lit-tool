@@ -385,16 +385,6 @@ export async function setSeen(account, { folder = 'INBOX', uid, seen }) {
   });
 }
 
-// 将当前文件夹内所有未读邮件一次性标记为已读。只搜索 UID，不下载正文，适合大邮箱。
-export async function markAllSeen(account, { folder = 'INBOX' } = {}) {
-  return withMailbox(account, folder, async (client) => {
-    const uids = await client.search({ seen: false }, { uid: true });
-    const list = Array.isArray(uids) ? uids.filter((uid) => Number.isFinite(Number(uid))) : [];
-    if (list.length) await client.messageFlagsAdd(list, ['\\Seen'], { uid: true });
-    return { ok: true, seen: true, markedCount: list.length };
-  });
-}
-
 // 删除邮件
 export async function deleteMessage(account, { folder = 'INBOX', uid }) {
   return withMailbox(account, folder, async (client) => {

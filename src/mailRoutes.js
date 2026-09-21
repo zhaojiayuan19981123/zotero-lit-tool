@@ -2,7 +2,7 @@
 import * as store from './store.js';
 import {
   MAIL_PROVIDERS, getProvider, testAccount, listFolders, listMessages, getMessage,
-  getAttachment, setSeen, markAllSeen, deleteMessage, sendMail, describeMailError, dropConnection, peekRecent,
+  getAttachment, setSeen, deleteMessage, sendMail, describeMailError, dropConnection, peekRecent,
 } from './mail.js';
 
 function publicAccount(a) {
@@ -175,16 +175,6 @@ export function registerMailRoutes(app) {
   });
 
   // ---------- 标记已读 / 未读 ----------
-  app.post('/api/mail/accounts/:id/messages/seen-all', async (req, res) => {
-    const acc = store.getMailAccount(req.params.id);
-    if (!acc) return res.status(404).json({ error: '账户不存在' });
-    try {
-      res.json(await markAllSeen(acc, { folder: (req.body || {}).folder || 'INBOX' }));
-    } catch (e) {
-      res.status(502).json({ error: describeMailError(e) });
-    }
-  });
-
   app.post('/api/mail/accounts/:id/messages/:uid/seen', async (req, res) => {
     const acc = store.getMailAccount(req.params.id);
     if (!acc) return res.status(404).json({ error: '账户不存在' });

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>一站式科研终端（经管版）</title>
+  <title>一站式科研终端</title>
   <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="stylesheet" href="vendor/katex/katex.min.css" />
   <link rel="stylesheet" href="style.css" />
@@ -14,7 +14,7 @@
     <div class="brand">
       <img src="favicon.png" alt="" class="brand-logo-img" />
       <div class="brand-copy">
-        <h1>一站式科研终端（经管版）</h1>
+        <h1>一站式科研终端</h1>
         <span>Research Workspace</span>
       </div>
       <span class="ai-badge">AI READY</span>
@@ -490,7 +490,6 @@
             <div class="mail-list-head">
               <input id="mailSearch" class="tb-input mail-search" placeholder="搜索主题 / 发件人，回车确认…" />
               <button class="tb-btn" id="btnMailRefresh" title="刷新当前文件夹">⟳</button>
-              <button class="tb-btn" id="btnMailMarkAllRead" title="将当前文件夹所有未读邮件标记为已读">✓ 全部已读</button>
               <button class="tb-btn" id="btnMailCompose" title="写邮件">✎ 写邮件</button>
             </div>
             <div id="mailListHead" class="mail-list-title"></div>
@@ -522,8 +521,6 @@
             </div>
             <div class="chat-input-row">
               <textarea id="chatInput" rows="2" placeholder="输入问题，Enter 发送 / Shift+Enter 换行…"></textarea>
-              <button id="btnChatAttach" class="btn btn-ghost" title="上传 PDF">📎</button>
-              <button id="btnChatKnowledge" class="btn btn-ghost" title="选择本地知识">🧠</button>
               <button id="btnChatSend" class="btn btn-primary">发送</button>
             </div>
           </div>
@@ -989,13 +986,6 @@
                 <option value="user">把系统提示并入用户消息</option>
               </select>
             </label>
-            <label class="field"><span>接口协议</span>
-              <select id="mlApiFormat" class="tb-select">
-                <option value="auto">自动（Chat → Responses）</option>
-                <option value="chat">Chat Completions</option>
-                <option value="responses">Responses API</option>
-              </select>
-            </label>
             <label class="field"><span>鉴权方式</span>
               <select id="mlAuthMode" class="tb-select">
                 <option value="auto">自动（有密钥才发 Bearer）</option>
@@ -1143,7 +1133,7 @@
           <div class="update-progress-meta"><span id="updateProgressText">0%</span><span id="updateSpeedText"></span></div>
         </div>
         <div id="updateReleaseWrap" class="update-release hidden">
-          <div class="update-release-title" id="updateReleaseName">本次更新内容</div>
+          <div class="update-release-title" id="updateReleaseName">版本说明</div>
           <div id="updateReleaseNotes" class="md-render update-release-notes"></div>
         </div>
         <p class="update-caution">安装前建议完成正在编辑的内容。下载完成后，应用将退出并启动安装程序；辅助式安装包在部分系统上仍可能要求确认安装选项。</p>
@@ -1182,13 +1172,9 @@
         <button class="modal-close" id="btnTopJournalAnalysisClose">✕</button>
       </div>
       <div class="modal-body" id="topJournalAnalysisBody"></div>
-      <div class="modal-foot"><button id="btnTopJournalAnalysisSave" class="btn">保存至 Markdown</button><button id="btnTopJournalAnalysisHistory" class="btn">查看历史分析</button><button id="btnTopJournalAnalysisDone" class="btn btn-primary">完成</button></div>
+      <div class="modal-foot"><button id="btnTopJournalAnalysisDone" class="btn btn-primary">完成</button></div>
     </div>
   </div>
-
-
-  <div id="chatKnowledgeModal" class="modal hidden"><div class="modal-mask"></div><div class="modal-dialog modal-wide"><div class="modal-head"><h3>选择本地知识库内容</h3><button class="modal-close" id="btnChatKnowledgeClose">✕</button></div><div class="modal-body"><div id="chatKnowledgeList" class="chat-knowledge-list"></div></div><div class="modal-foot"><button id="btnChatKnowledgeDone" class="btn btn-primary">使用所选内容</button></div></div></div>
-  <input id="chatPdfInput" type="file" accept="application/pdf" class="hidden" />
 
   <div id="toast" class="toast hidden"></div>
 

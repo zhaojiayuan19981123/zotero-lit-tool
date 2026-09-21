@@ -163,7 +163,7 @@ export function newProfileId() {
 // 后续调用只拼接一次 /chat/completions，避免测试可用、实际请求却变成双重路径。
 export function normalizeBaseURL(value) {
   let base = String(value || '').trim().replace(/\s+/g, '').replace(/\/+$/, '');
-  base = base.replace(/\/(?:chat\/completions|responses)$/i, '');
+  base = base.replace(/\/chat\/completions$/i, '');
   return base.replace(/\/+$/, '');
 }
 
@@ -180,11 +180,6 @@ export function normalizeSystemPromptMode(value) {
 export function normalizeAuthMode(value) {
   const mode = String(value || '').trim().toLowerCase();
   return ['auto', 'bearer', 'none'].includes(mode) ? mode : 'auto';
-}
-
-export function normalizeApiFormat(value) {
-  const mode = String(value || '').trim().toLowerCase();
-  return ['auto', 'chat', 'responses'].includes(mode) ? mode : 'auto';
 }
 
 // ---------- 迁移：把老的单模型设置转成 profiles ----------
@@ -213,7 +208,6 @@ export function migrateSettings(settings) {
       streamMode: 'auto',
       systemPromptMode: 'auto',
       authMode: 'auto',
-      apiFormat: 'auto',
       createdAt: new Date().toISOString(),
     });
     s.activeProfileId = s.modelProfiles[0].id;
@@ -232,7 +226,6 @@ export function migrateSettings(settings) {
       streamMode: 'auto',
       systemPromptMode: 'auto',
       authMode: 'auto',
-      apiFormat: 'auto',
       createdAt: new Date().toISOString(),
     });
     s.activeProfileId = s.modelProfiles[0].id;
@@ -258,7 +251,6 @@ export function migrateSettings(settings) {
       systemPromptMode: normalizeSystemPromptMode(p.systemPromptMode),
       // 自定义本地服务可能不需要认证；auto 有 Key 时发送 Bearer，无 Key 时不发送。
       authMode: normalizeAuthMode(p.authMode),
-      apiFormat: normalizeApiFormat(p.apiFormat),
       // 旧配置没有该字段，保留为 auto；用户可在编辑器里明确覆盖。
       visionOverride: normalizeVisionOverride(
         Object.prototype.hasOwnProperty.call(p, 'visionOverride') ? p.visionOverride
@@ -309,7 +301,6 @@ function describeProfile(p) {
     streamMode: normalizeStreamMode(p.streamMode),
     systemPromptMode: normalizeSystemPromptMode(p.systemPromptMode),
     authMode: normalizeAuthMode(p.authMode),
-    apiFormat: normalizeApiFormat(p.apiFormat),
     vision: resolveVisionCapability(p),
     visionOverride: normalizeVisionOverride(p.visionOverride),
   };
