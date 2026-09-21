@@ -271,6 +271,7 @@
           </div>
         </div>
         <div id="topJournalStats" class="top-journal-stats"></div>
+        <div class="ai-model-row" id="topJournalModelRow"></div>
         <nav class="top-journal-tabs" id="topJournalTabs">
           <button class="active" data-top-journal-tab="today">今日推送</button>
           <button data-top-journal-tab="latest">最新文章</button>
@@ -327,6 +328,7 @@
           <select id="noteProjFilter" class="tb-select"><option value="">全部项目</option></select>
           <span class="tb-label">支持自定义 Study 划分、项目联动与研究模板</span>
         </div>
+        <div class="ai-model-row" id="notesModelRow"></div>
         <div id="noteCards" class="note-cards"></div>
       </section>
 
@@ -403,6 +405,7 @@
           <span class="tb-spacer"></span>
           <span id="ideaCount" class="stat-badge"></span>
         </div>
+        <div class="ai-model-row" id="ideasModelRow"></div>
         <div id="ideaCards" class="idea-grid"></div>
       </section>
 
@@ -420,6 +423,7 @@
           <div id="reviewList" class="review-list"></div>
         </aside>
         <main class="reviewer-main">
+          <div class="ai-model-row" id="reviewModelRow"></div>
           <div id="reviewEmpty" class="review-empty">导入一篇 PDF 或 DOCX，开始模拟同行评审</div>
           <div id="reviewWorkspace" class="review-workspace hidden">
             <div class="review-title-row">
@@ -521,6 +525,7 @@
               </div>
             </div>
             <div id="chatContextPills" class="chat-context-pills" aria-live="polite"><span class="chat-context-empty">可附加 PDF 或选择本地知识库内容</span></div>
+            <div class="ai-model-row" id="chatModelRow"></div>
             <div class="chat-input-row">
               <textarea id="chatInput" rows="2" placeholder="输入问题，Enter 发送 / Shift+Enter 换行…"></textarea>
               <button id="btnChatAttach" class="btn btn-ghost" title="上传 PDF">📎</button>
@@ -769,6 +774,7 @@
             <button class="tb-btn" id="btnTranslateReview" title="用 AI 把英文审稿意见整理成逐条中文（忠于原文，不增不减）">🈯 一键翻译</button>
           </div>
         </label>
+        <div class="ai-model-row" id="revTransModelRow"></div>
         <div id="reviewTransWrap" class="review-trans-wrap hidden">
           <div class="review-trans-head"><b>🈯 审稿意见中文整理</b><span class="side-count">AI 整理 · 忠于原文</span></div>
           <div id="reviewTransBody" class="review-trans-body"></div>
@@ -1402,6 +1408,7 @@
 
         <!-- ---------- 论文 AI 对话（支持文本 + 图片） ---------- -->
         <div class="pr-pane pr-pane-chat hidden" data-prpane="chat">
+          <div id="prChatModelRow" class="ai-model-row"></div>
           <div id="prChatMsgs" class="pr-chat-msgs"></div>
           <div id="prChatAttach" class="pr-chat-attach"></div>
           <div class="pr-chat-input-row">

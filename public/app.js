@@ -1442,6 +1442,7 @@
       activeVisionInfo = d.activeVision || null;
       // 后端返回的才是权威值，回填到 settings，避免设置页渲染时用的是旧配置
       if (settings) settings.visionProfileId = d.visionProfileId || '';
+      modelChoices = null; // 模型配置变了，各入口的选择器下次渲染时重新拉取
     } catch (_) { /* 首次启动后端未就绪时忽略 */ }
   }
 
@@ -1453,6 +1454,75 @@
   }
   function profileTitle(p) {
     return p.label || modelMeta(p.provider, p.model)?.name || p.model || p.provider || '未命名模型';
+  }
+
+  // ============ 单对话模型切换（像 Codex 的 /model）============
+  //
+  // 口径：**只影响当前这一次请求**，不改全局激活模型。
+  // 全局激活模型由顶栏切换器负责；这里选的是「这个对话临时用哪个模型」，
+  // 所以选择结果按功能域分别记在 localStorage 里，切页面也还在。
+  //
+  // 提示语统一走 toast('已切换模型：XXX')，与 Codex 的反馈方式一致。
+
+  let modelChoices = null;           // /api/models/choices 缓存
+
+  /** 拉取可用模型列表（只含已填 Key 的配置），失败返回空数组 */
+  async function loadModelChoices(force = false) {
+    if (modelChoices && !force) return modelChoices;
+    try {
+      const d = await api('/api/models/choices');
+      modelChoices = d.choices || [];
+      return modelChoices;
+    } catch (_) {
+      modelChoices = [];
+      return modelChoices;
+    }
+  }
+
+  /**
+   * 渲染一个「模型选择」下拉框。
+   * @param {string} key 存储键（不同 AI 入口各用一份）
+   * @returns {{html: string, read: () => string, onChange: (handler) => void}}
+   */
+  function modelPickerHtml(key) {
+    const saved = localStorage.getItem('aiModel:' + key) || '';
+    const opts = (modelChoices || []).map((c) => {
+      const mark = c.isActive ? '（全局默认）' : '';
+      const vision = c.vision ? ' 👁' : '';
+      return `<option value="${esc(c.id)}"${c.id === saved ? ' selected' : ''}>${esc(c.label)}${vision} ${mark}</option>`;
+    }).join('');
+    const follow = `<option value=""${saved ? '' : ' selected'}>跟随全局默认模型</option>`;
+    const label = activeModelInfo ? `${activeModelInfo.providerName} · ${activeModelInfo.model}` : '未配置';
+    return `<select class="ai-model-picker tb-select w100" data-model-key="${esc(key)}" title="只影响本处 AI 调用，不改全局默认模型">${follow}${opts}</select>
+      <div class="ai-model-hint" data-model-hint="${esc(key)}">当前全局默认：${esc(label)}</div>`;
+  }
+
+  /** 读取某个入口当前选中的模型 id（''=跟随全局） */
+  function readModelPick(key) {
+    return localStorage.getItem('aiModel:' + key) || '';
+  }
+
+  /** 绑定所有模型选择框（同一入口可能有多处渲染，统一按 data-model-key 绑定） */
+  function bindModelPickers(root = document) {
+    root.querySelectorAll('.ai-model-picker').forEach((sel) => {
+      if (sel.dataset.bound === '1') return;
+      sel.dataset.bound = '1';
+      sel.addEventListener('change', () => {
+        const key = sel.dataset.modelKey;
+        const id = sel.value;
+        if (id) localStorage.setItem('aiModel:' + key, id);
+        else localStorage.removeItem('aiModel:' + key);
+        const chosen = (modelChoices || []).find((c) => c.id === id);
+        const name = chosen ? chosen.label : (activeModelInfo ? `${activeModelInfo.providerName} · ${activeModelInfo.model}` : '全局默认模型');
+        toast('已切换模型：' + name, 'success');
+      });
+    });
+  }
+
+  /** 供各 AI 请求体使用：把选中的模型 id 塞进 body（''=不传，后端用全局默认） */
+  function withProfileId(body, key) {
+    const id = readModelPick(key);
+    return id ? { ...body, profileId: id } : body;
   }
 
   // 顶栏切换器：显示当前激活的模型
@@ -2123,7 +2193,7 @@
     document.querySelectorAll('.pr-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.prpane !== pr.tab));
     if (pr.tab === 'analysis') renderPrAnalysis();
     if (pr.tab === 'fulltext') openFullTextTab();
-    if (pr.tab === 'chat') { renderPrChat(); setTimeout(() => $('prChatInput')?.focus(), 60); }
+    if (pr.tab === 'chat') { renderPrChat(); renderAiModelRows(); setTimeout(() => $('prChatInput')?.focus(), 60); }
   }
 
   // ============ 全文翻译（整篇 PDF） ============
@@ -2352,7 +2422,11 @@
   }
 
   /**
-   * 视觉识别用：把原 PDF 逐页渲染成 JPEG 截图（目标宽约 1400px）。
+   * 视觉识别用：把原 PDF 逐页渲染成 JPEG 截图。
+   *
+   * ★ 分辨率直接决定标题能不能识别（踩过的坑）：早期用 1400px 宽，正文勉强能认，
+   *   但标题字号虽大、笔画密，模型反而频繁只输出章节编号、丢掉标题文字。
+   *   现在提到 2200px 宽（约 200 DPI）并降低 JPEG 压缩，标题与斜体副标题清晰可读。
    * 始终从「原文 PDF」取图——左侧此刻预览的可能已经是译文 PDF，不能拿错。
    */
   async function collectPageImages(it, pageRange) {
@@ -2367,17 +2441,22 @@
         toast(`该文献共 ${targets.length} 页，视觉识别只处理前 ${MAX_VISION_PAGES} 页（其余页用文本层兜底）`);
       }
       const out = [];
+      const TARGET_WIDTH = 2200;
       for (const n of targets.slice(0, MAX_VISION_PAGES)) {
         const page = await doc.getPage(n);
         const base = page.getViewport({ scale: 1 });
-        const scale = Math.min(2, 1400 / Math.max(base.width, 1));
+        // 上限 3.2 倍：A4 理论宽度下正好落在 ~2200px，超出也无意义（模型会自行缩放）
+        const scale = Math.min(3.2, TARGET_WIDTH / Math.max(base.width, 1));
         const viewport = page.getViewport({ scale });
         const canvas = document.createElement('canvas');
         canvas.width = Math.max(1, Math.floor(viewport.width));
         canvas.height = Math.max(1, Math.floor(viewport.height));
         const ctx = canvas.getContext('2d');
+        // 白底：PDF 透明区域在 JPEG 里会变黑，干扰识别
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
         await page.render({ canvasContext: ctx, viewport }).promise;
-        out.push({ page: n, image: canvas.toDataURL('image/jpeg', 0.8) });
+        out.push({ page: n, image: canvas.toDataURL('image/jpeg', 0.92) });
       }
       return out;
     } catch (e) {
@@ -2950,13 +3029,13 @@
     };
 
     pr.chatAbort = new AbortController();
-    const r = await streamSSE('/api/paper-chat', {
+    const r = await streamSSE('/api/paper-chat', withProfileId({
       messages: [
         { role: 'system', content: sys },
         ...pr.chat.filter((m) => !m.pending && m !== userMessage && !m.error).slice(-8).map((m) => ({ role: m.role, content: m.content })),
         { role: 'user', content: userContent },
       ],
-    }, {
+    }, 'paperchat'), {
       signal: pr.chatAbort.signal,
       onEvent: (o) => {
         if (o.model) {
@@ -4076,7 +4155,7 @@
     renderIdeas();
     let full = '';
     let streamError = '';
-    const result = await streamSSE(`/api/ideas/${id}/incubate`, {}, {
+    const result = await streamSSE(`/api/ideas/${id}/incubate`, withProfileId({}, 'ideas'), {
       onEvent(event) {
         if (event.error) streamError = event.error;
         if (event.delta) {
@@ -4210,7 +4289,7 @@
     await saveActiveReview();
     reviewErrors.delete(review.id); reviewingIds.add(review.id); renderReviews();
     let full = ''; let streamError = '';
-    const result = await streamSSE(`/api/reviews/${review.id}/generate`, {}, {
+    const result = await streamSSE(`/api/reviews/${review.id}/generate`, withProfileId({}, 'review'), {
       onEvent(event) {
         if (event.error) streamError = event.error;
         if (event.delta) {
@@ -4513,7 +4592,7 @@
     const trigger = document.querySelector('[data-tj-analyze]'); const original = trigger?.textContent;
     if (trigger) { trigger.disabled = true; trigger.textContent = 'AI 分析中…'; }
     try {
-      const result = await api('/api/top-journals/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ articleIds }) });
+      const result = await api('/api/top-journals/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(withProfileId({ articleIds }, 'topjournal')) });
       currentTopJournalAnalysisId = result.analysisId || '';
       $('topJournalAnalysisBody').innerHTML = `<p class="tj-analysis-note">基于本次选中的 ${result.articleCount} 篇文章及本地资料生成。${result.compressed ? '本地上下文已先压缩。' : ''}结论仅代表所选样本，不代表全部 UTD24 期刊。</p><div class="md">${renderMarkdown(result.analysis)}</div>`;
       $('topJournalAnalysisModal').classList.remove('hidden');
@@ -4618,6 +4697,8 @@
     if (v === 'ideas') { if (!ideasLoaded) await loadIdeas(); else renderIdeas(); }
     if (v === 'reviewer') { if (!reviewsLoaded) await loadReviews(); else renderReviews(); }
     if (v === 'mail') await enterMailView();
+    // 带 AI 能力的视图统一补上「模型切换」下拉（放在最后，保证容器已经显示）
+    if (['ai', 'ideas', 'reviewer', 'notes', 'topjournals', 'papers'].includes(v)) renderAiModelRows();
     if (v === 'ai') {
       renderChatMeta();
       if (!convLoaded) {
@@ -4625,6 +4706,35 @@
         if (!activeConvId && conversations.length) await openConversation(conversations[0].id);
       }
     }
+  }
+
+  /**
+   * 把所有「单对话模型切换」下拉框填上内容。
+   * 容器 id → 存储键 的映射集中在这里，新增 AI 入口只加一行。
+   */
+  const AI_MODEL_ROWS = [
+    ['chatModelRow', 'chat'],
+    ['prChatModelRow', 'paperchat'],
+    ['ideasModelRow', 'ideas'],
+    ['reviewModelRow', 'review'],
+    ['notesModelRow', 'notes'],
+    ['topJournalModelRow', 'topjournal'],
+    ['revTransModelRow', 'revtrans'],
+  ];
+  async function renderAiModelRows() {
+    await loadModelChoices();
+    for (const [elId, key] of AI_MODEL_ROWS) {
+      const box = $(elId);
+      if (!box) continue;
+      const prev = readModelPick(key);
+      box.innerHTML = modelPickerHtml(key);
+      // 之前选的模型被删了：静默回落全局默认，避免请求报「模型不存在」
+      if (prev && !(modelChoices || []).some((c) => c.id === prev)) {
+        localStorage.removeItem('aiModel:' + key);
+        box.innerHTML = modelPickerHtml(key);
+      }
+    }
+    bindModelPickers();
   }
 
   // ---------- 首页 Dashboard ----------
@@ -5212,6 +5322,7 @@
     const hist0 = paperDraft.history;
     $('paperStatusDate').value = (hist0.length ? hist0[hist0.length - 1].date : '') || p?.submitDate || todayStr();
     $('paperRankChips').innerHTML = paperDraft.rank?.summary ? rankChips(paperDraft.rank.items) : '';
+    renderAiModelRows(); // 审稿意见整理同样支持切换模型
     // 已有译文则显示，否则收起
     const rtWrap = $('reviewTransWrap');
     if (paperDraft.reviewTranslation) {
@@ -5281,7 +5392,7 @@
     body.textContent = '正在用 AI 整理审稿意见（忠于原文、逐条中文、不增不减）…';
     let full = '';
     let streamError = '';
-    const result = await streamSSE('/api/translate-review', { text }, {
+    const result = await streamSSE('/api/translate-review', withProfileId({ text }, 'revtrans'), {
       onEvent(event) {
         if (event.error) streamError = event.error;
         if (event.delta) {
@@ -5592,10 +5703,10 @@
     $('btnNoteAiStop').classList.remove('hidden');
     $('btnNoteAiInsert').classList.add('hidden');
     let full = ''; let streamError = '';
-    const result = await streamSSE('/api/notes/organize', {
+    const result = await streamSSE('/api/notes/organize', withProfileId({
       fragments, title: $('noteTitle').value.trim(), projectId: $('noteProject').value || null,
       paperId: $('notePaper').value || null, studyNo: $('noteStudy').value.trim(), existingContent: $('noteContent').value,
-    }, {
+    }, 'notes'), {
       signal: noteAiAbort.signal,
       onEvent(event) {
         if (requestId !== noteAiRequestId) return;
@@ -5857,7 +5968,7 @@
     let errMsg = '';
     let compressed = false;
     let lastPaint = 0;
-    const result = await streamSSE('/api/chat', { conversationId: activeConvId, content: text, retry, attachments: chatAttachments, selectedKnowledge: chatKnowledge }, {
+    const result = await streamSSE('/api/chat', withProfileId({ conversationId: activeConvId, content: text, retry, attachments: chatAttachments, selectedKnowledge: chatKnowledge }, 'chat'), {
       onEvent(event) {
         if (event.error) errMsg = event.error;
         if (event.compressed) compressed = true;

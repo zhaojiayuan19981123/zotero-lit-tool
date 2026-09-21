@@ -47,7 +47,7 @@ test('md 是一等输出模式：默认值 / MODES / resolveModes / OUTPUT_META 
 
 // ==================== 文本层路径 ====================
 
-test('buildMarkdownFromLayout：标题层级 / 段落 / 图注的 Markdown 映射', () => {
+test('buildMarkdownFromLayout：按论文目录结构输出（标题 → 章节 → 正文），图注不再保留', () => {
   const pages = [mkPage(0, [
     mkBlock({ id: 't', kind: 'title', size: 18, y1: 750, text: 'Paper Title', translation: '论文标题' }),
     mkBlock({ id: 'h', kind: 'heading', size: 14, y1: 700, text: '1 Introduction', translation: '1 引言' }),
@@ -57,32 +57,32 @@ test('buildMarkdownFromLayout：标题层级 / 段落 / 图注的 Markdown 映�
   ])];
   const { markdown, stats } = buildMarkdownFromLayout(pages);
   assert.ok(markdown.startsWith('# 论文标题'), '论文主标题应为 H1');
-  assert.ok(markdown.includes('## 1 引言'), '字号最大的 heading 定级为 H2');
+  assert.ok(markdown.includes('## 1 引言'), '一级章节标题为 H2');
+  // 文本层拿不到原文（buildElements 已把 text 换成译文），因此不附「> 原文」
+  assert.ok(!markdown.includes('> 原文：'), '文本层路径不附原文行（避免把译文重复一遍）');
   assert.ok(markdown.includes('正文一'));
-  assert.ok(markdown.includes('*图 1：示例*'), '图注输出为斜体');
-  assert.equal(stats.text, 5);
+  assert.ok(!markdown.includes('图 1：示例'), '用户口径：图表（含图注）一律不要');
+  assert.ok(stats.dropped >= 1, '被丢弃的图表块应计数');
 });
 
-test('buildMarkdownFromLayout：公式块与插图区域转成 crop 引用，参考文献/页眉丢弃', () => {
+test('buildMarkdownFromLayout：文章信息保留、公式保留、图与表全部丢弃', () => {
   const pages = [mkPage(0, [
+    mkBlock({ id: 'm', kind: 'body', size: 10, y1: 730, text: 'Journal of X, 2025. ISSN 1234-5678. DOI: 10.1/abc', translation: 'Journal of X, 2025. ISSN 1234-5678. DOI: 10.1/abc' }),
     mkBlock({ id: 'p', kind: 'body', size: 10, y1: 650, translation: '正文' }),
-    // 不可译的公式块 → 裁剪保留
+    // 不可译的公式块 → 保留（公式属于正文语义）
     mkBlock({ id: 'f', kind: 'formula', translatable: false, y1: 500, y0: 460, text: 'E=mc^2' }),
     // 参考文献与页眉（furniture）→ 直接丢弃
     mkBlock({ id: 'r', kind: 'reference', translatable: false, y1: 100, text: '[1] someone' }),
     mkBlock({ id: 'h', kind: 'furniture', translatable: false, y1: 790, text: 'header' }),
   ], [
-    // 插图区域（面积 ≥ 2200）
-    { x0: 320, y0: 250, x1: 520, y1: 400 },
+    { x0: 320, y0: 250, x1: 520, y1: 400 },   // 插图区域：按用户要求不再插入
   ])];
   const { markdown, stats } = buildMarkdownFromLayout(pages);
-  // 公式 crop：p1 + 矩形坐标（带 1.5 pad）
-  assert.ok(/\[E=mc\^2\]\(crop:p1:48\.5:458\.5:501\.5:501\.5\)/.test(markdown), `公式 crop 引用缺失：${markdown}`);
-  // 插图 crop：318.5:248.5:521.5:401.5
-  assert.ok(/\(crop:p1:318\.5:248\.5:521\.5:401\.5\)/.test(markdown), `插图 crop 引用缺失：${markdown}`);
-  assert.ok(!markdown.includes('someone'), '参考文献不应出现在 Markdown 里');
+  assert.ok(markdown.includes('E=mc^2'), '公式保留为 LaTeX 块');
+  assert.ok(!markdown.includes('crop:'), '不再输出任何裁剪图引用');
+  assert.ok(!markdown.includes('Someone') && !markdown.includes('someone'), '参考文献不应出现在 Markdown 里');
   assert.ok(!markdown.includes('header'), '页眉不应出现在 Markdown 里');
-  assert.equal(stats.crops, 2);
+  assert.equal(stats.crops, 0);
 });
 
 test('elementsToMarkdown：译文缺失时回退原文', () => {
@@ -151,77 +151,147 @@ test('collectVisionSegments：TABLE/FORMULA/FIG 不送翻译，REF 按开关决�
       { tag: 'FORMULA', text: 'E=mc^2' },
       { tag: 'FIG', text: 'a diagram' },
       { tag: 'REF', text: '[1] ref' },
+      { tag: 'META', text: 'Journal of X' },
+      { tag: 'SEC', text: 'Abstract' },
       { tag: 'CAP', text: 'Figure 1' },
     ],
   }];
   const ids = (opts) => collectVisionSegments(pages, opts).map((s) => s.id);
-  assert.deepEqual(ids({}), ['v3:0', 'v3:1', 'v3:6'], '默认不翻参考文献');
-  assert.deepEqual(ids({ translateReferences: true }), ['v3:0', 'v3:1', 'v3:5', 'v3:6']);
+  // TABLE/FORMULA/FIG 不送翻译（图表会被丢弃，公式原样保留）；META/SEC/CAP 要翻
+  assert.deepEqual(ids({}), ['v3:0', 'v3:1', 'v3:6', 'v3:7', 'v3:8'], '默认不翻参考文献');
+  assert.deepEqual(ids({ translateReferences: true }), ['v3:0', 'v3:1', 'v3:5', 'v3:6', 'v3:7', 'v3:8']);
 });
 
-test('applyVisionTranslations + assembleVisionMarkdown：回填、回退、FIG→crop 映射', () => {
+test('assembleVisionMarkdown：按目录层级组装，回填 / 回退 / 丢弃图表', () => {
   const pages = [
     {
-      page: 2,
+      page: 1,
       blocks: [
-        { tag: 'H2', text: '2.1 Model' },
+        { tag: 'TITLE', text: 'Full Paper Title', t: '完整论文标题' },
+        { tag: 'META', text: 'Journal of X, 2025. ISSN 1111-2222. DOI: 10.1/xyz' },
+        { tag: 'SEC', text: 'Abstract' },
+        { tag: 'P', text: 'Abstract body here.', t: '这里是摘要正文。' },
+        { tag: 'H1', text: '1 Introduction', t: '1 引言' },
+        { tag: 'P', text: 'Intro paragraph.', t: '引言段落。' },
+        { tag: 'H2', text: '1.1 Background', t: '1.1 研究背景' },
         { tag: 'P', text: 'untranslated paragraph' },
         { tag: 'FORMULA', text: '$$y=x$$' },
         { tag: 'TABLE', text: '| a | b |\n|---|---|\n| 1 | 2 |' },
         { tag: 'FIG', text: 'framework diagram' },
-        { tag: 'FIG', text: 'second figure' },
+        { tag: 'CAP', text: 'Figure 1: model' },
+        { tag: 'H1', text: '2 Method', t: '2 研究方法' },
+        { tag: 'P', text: 'Method body.', t: '方法正文。' },
       ],
     },
   ];
-  const layoutPages = [mkPage(0, [mkBlock({ id: 'x' })], [
-    { x0: 100, y0: 100, x1: 300, y1: 200 },
-  ])];
-  // 第 2 页（1 起始）→ layout.index = 1；给第 2 页一个图片区域
-  layoutPages.push(mkPage(1, [mkBlock({ id: 'y' })], [
-    { x0: 40, y0: 500, x1: 400, y1: 640 },
-    { x0: 40, y0: 300, x1: 400, y1: 440 },
-  ]));
-
   const segments = collectVisionSegments(pages);
-  // 只给 H2 回填译文；P 不给 → 组装时必须回退原文
-  const map = new Map([['v2:0', '2.1 模型']]);
+  // 只回填部分块；[P] untranslated paragraph 不给译文 → 组装时回退原文
+  const map = new Map([
+    ['v1:0', '完整论文标题'],
+    ['v1:3', '这里是摘要正文。'],
+    ['v1:4', '1 引言'],
+    ['v1:5', '引言段落。'],
+    ['v1:6', '1.1 研究背景'],
+    ['v1:12', '2 研究方法'],
+    ['v1:13', '方法正文。'],
+  ]);
   applyVisionTranslations(pages, segments, map);
 
-  const { markdown, stats } = assembleVisionMarkdown(pages, layoutPages);
-  assert.ok(markdown.includes('### 2.1 模型'), 'H2 经翻译回填 → ###');
-  assert.ok(!markdown.includes('2.1 Model'), '回填后不应残留原文标题');
+  const { markdown, stats } = assembleVisionMarkdown(pages, null);
+  assert.ok(markdown.startsWith('# 完整论文标题'), '主标题为 H1');
+  assert.ok(markdown.includes('## 文章信息'), '含文章信息小节');
+  assert.ok(!markdown.includes('ISSN') && !markdown.includes('DOI'), '文章信息里的 ISSN/DOI 被清理');
+  assert.ok(markdown.includes('## 摘要'), '含摘要小节');
+  assert.ok(markdown.includes('## 1 引言'), '一级章节 → h2');
+  assert.ok(markdown.includes('### 1.1 研究背景'), '二级小节 → h3');
+  assert.ok(markdown.includes('## 2 研究方法'), '第二章 → h2');
   assert.ok(markdown.includes('untranslated paragraph'), '未译块回退原文');
-  assert.ok(markdown.includes('$$\ny=x\n$$'), '公式用 $$ 包裹');
-  assert.ok(markdown.includes('| a | b |'), '表格 GFM 原样透传');
-  assert.ok(/\[framework diagram\]\(crop:p2:38\.5:498\.5:401\.5:641\.5\)/.test(markdown), `FIG 按顺序映射图片区域：${markdown}`);
-  assert.ok(/\(crop:p2:38\.5:298\.5:401\.5:441\.5\)/.test(markdown), '第二个 FIG 用第二个图片区域');
-  assert.equal(stats.crops, 2);
-  assert.ok(stats.text >= 3);
+  assert.ok(markdown.includes('$$\ny=x\n$$'), '公式用 $$ 包裹保留');
+  assert.ok(!markdown.includes('| a | b |'), '表格按要求丢弃');
+  assert.ok(!markdown.includes('framework diagram'), '插图按要求丢弃');
+  assert.ok(!markdown.includes('Figure 1: model'), '图注按要求丢弃');
+  assert.ok(!markdown.includes('crop:'), '不再插入裁剪图');
+  assert.equal(stats.crops, 0);
+  assert.ok(stats.dropped >= 3, '被丢弃的图表块应计数');
 });
 
-test('assembleVisionMarkdown：图片区域不够时 FIG 退化为文字占位', () => {
-  const pages = [{ page: 1, blocks: [{ tag: 'FIG', text: 'some figure' }] }];
-  const { markdown } = assembleVisionMarkdown(pages, [mkPage(0, [mkBlock({ id: 'x' })], [])]);
-  assert.ok(markdown.includes('（图：some figure）'));
+test('assembleVisionMarkdown：参考文献标题被标成 H1 时不重复出标题，序号不重复', () => {
+  const pages = [{
+    page: 1,
+    blocks: [
+      { tag: 'H1', text: '1 Introduction', t: '1 引言' },
+      { tag: 'P', text: 'body', t: '正文。' },
+      // 视觉模型可能把 References 当成普通一级标题（而不是 [SEC]）
+      { tag: 'H1', text: 'References', t: '参考文献' },
+      { tag: 'REF', text: '[1] Smith, J. (2023). Visual branding. JMR.' },
+      { tag: 'REF', text: '[2] Doe, A. (2024). Consumer reviews. JM.' },
+    ],
+  }];
+  const { markdown } = assembleVisionMarkdown(pages, null);
+  assert.equal(markdown.split('## 参考文献').length - 1, 1, '参考文献标题只出现一次');
+  assert.ok(markdown.includes('[1] Smith'), '保留原文序号');
+  assert.ok(markdown.includes('[2] Doe'), '保留第二条原文序号');
+  assert.ok(!markdown.includes('[1] [1]'), '不重复叠加序号');
+  assert.ok(!markdown.includes('[2] [2]'), '不重复叠加序号（第二条）');
+});
+
+test('assembleVisionMarkdown：参考文献没有序号时自动补号', () => {
+  const pages = [{
+    page: 1,
+    blocks: [
+      { tag: 'SEC', text: 'References' },
+      { tag: 'REF', text: 'Smith, J. (2023). Visual branding. JMR.' },
+      { tag: 'REF', text: 'Doe, A. (2024). Consumer reviews. JM.' },
+    ],
+  }];
+  const { markdown } = assembleVisionMarkdown(pages, null);
+  assert.ok(markdown.includes('[1] Smith'), '无序号时补 [1]');
+  assert.ok(markdown.includes('[2] Doe'), '无序号时补 [2]');
+  assert.equal(markdown.split('## 参考文献').length - 1, 1, '参考文献标题只出现一次');
+});
+
+test('assembleVisionMarkdown：无编号章节按出现顺序补号', () => {
+  const pages = [{
+    page: 1,
+    blocks: [
+      { tag: 'H1', text: 'Introduction', t: '引言' },
+      { tag: 'P', text: 'a.', t: 'a。' },
+      { tag: 'H1', text: 'Conclusion', t: '结论' },
+      { tag: 'P', text: 'b.', t: 'b。' },
+    ],
+  }];
+  const { markdown } = assembleVisionMarkdown(pages, null);
+  assert.ok(markdown.includes('## 1 引言'), '无编号首章补 1');
+  assert.ok(markdown.includes('## 2 结论'), '无编号次章补 2');
 });
 
 test('visionPageFallbackMarkdown：缺图页用文本层兜底（含译文）', () => {
+  // y1 递减 = 视觉上从上到下（buildElements 按 y 排序，顺序不能写反）
   const page = mkPage(0, [
-    mkBlock({ id: 'p', kind: 'body', y1: 650, translation: '兜底正文' }),
+    mkBlock({ id: 't', kind: 'title', size: 18, y1: 760, translation: '兜底大标题' }),
     mkBlock({ id: 'h', kind: 'heading', size: 13, y1: 700, translation: '兜底标题' }),
+    mkBlock({ id: 'p', kind: 'body', y1: 650, translation: '兜底正文' }),
   ]);
   const { markdown } = visionPageFallbackMarkdown(page);
-  assert.ok(markdown.includes('## 兜底标题'));
+  assert.ok(markdown.startsWith('# 兜底大标题'));
+  assert.ok(markdown.includes('## 1 兜底标题'), '兜底页同样按目录层级输出');
   assert.ok(markdown.includes('兜底正文'));
   assert.equal(visionPageFallbackMarkdown(null).markdown, '');
 });
 
-test('visionPaperPrompt：提示词包含全部标记且按开关提及参考文献', () => {
+test('visionPaperPrompt：强调标题必须完整、图表必须跳过', () => {
   const p1 = visionPaperPrompt({});
-  for (const tag of ['[TITLE]', '[H1]', '[P]', '[TABLE]', '[FORMULA]', '[FIG]', '[CAP]']) {
+  for (const tag of ['[TITLE]', '[H1]', '[H2]', '[P]', '[FORMULA]', '[SEC]', '[META]']) {
     assert.ok(p1.includes(tag), `缺少标记 ${tag}`);
   }
-  assert.ok(/跳过|不要转录/.test(p1), '默认提示应说明跳过参考文献');
+  // 标题完整性的硬要求（否则目录全是「1」「2」这种空壳标题）
+  assert.ok(p1.includes('标题必须完整'), '提示词必须强调标题完整性');
+  assert.ok(p1.includes('不能只写章节编号'), '提示词必须禁止只输出编号');
+  // 图表必须跳过
+  assert.ok(p1.includes('图表一律跳过') || p1.includes('图表'), '提示词必须说明跳过图表');
+  assert.ok(/不要输出 \[FIG\]/.test(p1), '提示词应明确不要 FIG/TABLE');
+  // 参考文献开关
+  assert.ok(/跳过/.test(p1), '默认提示应说明跳过参考文献');
   const p2 = visionPaperPrompt({ translateReferences: true });
   assert.ok(p2.includes('完整转录'), '开启后要求转录参考文献');
 });
