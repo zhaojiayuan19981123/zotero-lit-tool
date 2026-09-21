@@ -26,6 +26,10 @@ test('更新检查结果包含发布说明字段并在 Release 中列出变更',
   assert.match(app, /knownChanges/);
   // workflow 走 body_path 引用独立文件，正文内容在 release-body.md 里
   assert.match(workflow, /body_path:\s*\.github\/release-body\.md/);
+  // ★ 必须显式关掉自动生成：generate_release_notes: true 会**覆盖 body_path**，
+  //   让 Release 正文只剩 "Full Changelog" 链接（v1.12/v1.13/v1.15.0/v1.15.1 都踩过）。
+  assert.match(workflow, /generate_release_notes:\s*false/, 'generate_release_notes 必须为 false，否则会覆盖 body_path');
+  assert.doesNotMatch(workflow, /generate_release_notes:\s*true/, '不得再打开自动生成发布说明');
   assert.match(releaseBody, /## 安装包说明/);
   assert.match(releaseBody, /本版本主要更新（v1\.\d+\.\d+）/);
   assert.match(releaseBody, /Windows 客户端自动更新还需要本 Release 中的同名 `\.blockmap` 和 `latest\.yml`/);

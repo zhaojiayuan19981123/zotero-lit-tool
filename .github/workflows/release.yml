@@ -100,6 +100,9 @@ jobs:
           draft: false
           prerelease: false
           make_latest: true
-          generate_release_notes: true
+          # ★ 必须为 false：设为 true 时会自动生成 "Full Changelog" 并**覆盖 body_path**，
+          #   导致 Release 正文只剩一个链接（v1.12 / v1.13 / v1.15.0 / v1.15.1 都踩过，
+          #   每次都得事后 PATCH 补正文）。正文一律以 .github/release-body.md 为准。
+          generate_release_notes: false
           body_path: .github/release-body.md
           files: release-assets/*
