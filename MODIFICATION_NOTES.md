@@ -1,3 +1,59 @@
+## v1.16.4：修思维导图滚轮缩放方向 + 修「复制译文粘贴成一坨 JSON」（2026-09-23）
+
+### 一、Ctrl + 滚轮：下滑缩小、上滑放大
+
+- `public/app.js` 的 `renderPnMind()` 里 `mousewheelZoomActionReverse` 由 `false` 改为 **`true`**。
+- ★ 这个选项名与行为**是反的**，改之前请先读 `public/vendor/simple-mind-map/INTEGRATION_NOTES.md` 第 10 条：
+  库源码是 `mousewheelZoomActionReverse ? this.enlarge() : this.narrow()`，作用在「滚轮向上 / 向左」这一支上，
+  而且**默认值就是 `true`**。上一版显式写 `false`，等于把默认行为反了过来，于是「Ctrl+下滑」变成了放大。
+- 实测对照（真实 Chromium + `page.mouse.wheel`）：`false` → 下滑 154→185px（放大）；`true` → 下滑缩小、上滑放大。
+- `mousewheelAction: 'move'` 保持不变：不按 Ctrl 平移、按住 Ctrl 缩放（不按 Ctrl 不会误缩放）。
+
+### 二、粘贴译文变成 `{"simpleMindMap":true,…}`
+
+**复现路径**：在导图画布内选中节点（按过 Ctrl+C）→ 到中栏复制译文 → 回导图双击节点进编辑 → Ctrl+V，
+节点文字里出现整段 JSON（用户截图的现象）。
+
+**根因（真实浏览器复现 + 读库源码确认）**：
+
+1. 库 `copy()` 在画布内 Ctrl+C 时用 `createSmmFormatData()` + `setDataToClipboard()`，
+   把 `{"simpleMindMap":true,"data":[…]}` 写进剪贴板的 **text/plain**；
+2. 库对**普通**文本编辑框有兜底（`textEditNode` 的 paste 里 `checkSmmFormatData` + `getTextFromHtml`），
+   但**富文本（RichText / quill）编辑框这条路径没有**：quill 的 `Clipboard.convert()` 在
+   「没有 html、只有 text」时直接 `delta.insert(text)`，不经过 smm 注册的 matcher → 整段 JSON 进节点。
+
+**修法**：
+
+- `public/paper-note-utils.js` 新增两个**纯函数**（便于单测）：
+  - `smmClipboardToPlainText(raw)`：识别导图数据并抽出纯文字（前序遍历，含多层）；不是导图数据返回 `null`（放行默认粘贴）；
+  - `appendMindmapChild(root, targetUid, text)`：返回**新树**（不修改入参），找不到目标 uid 时挂到根节点，保证「点了总有反应」。
+- `public/app.js`：
+  - 在 **`document` 捕获阶段**拦 paste：命中导图编辑框（`.smm-richtext-node-edit-wrap / .smm-node-edit-wrap / .ql-editor`）
+    且内容为导图数据时，`preventDefault` + `stopPropagation`，改用 `document.execCommand('insertText')` 写入；
+    ★ 必须走 execCommand（会派发标准的 beforeinput/input），直接改 innerHTML 会被 quill 回滚；
+    ★ 编辑框是 `appendChild` 到 `document.body` 的（或 `customInnerElsAppendTo`），**不在 `#pnMindHost` 里**，
+      所以监听导图容器拦不到，必须挂 document；
+  - 新增 `pnInsertTranslationToMind()`：把译文作为新节点挂到当前选中节点下。`setData` 之后**选中新节点必须在
+    `render(cb)` 回调里做** —— 否则 `renderer.nodeList` 里还是上一轮的节点对象，会把库的选中态弄乱
+    （实测症状：之后点节点没反应、F2 进不了编辑、Ctrl+V 失效）；
+  - 中栏 `#pnSendToNote` 按钮改为**跟随右栏视图**：Markdown 视图是「→ 加入笔记」，导图视图自动变「→ 加入导图」。
+
+### 三、测试
+
+- `test/paper-note-utils.test.mjs` 新增 12 项：导图数据的识别与抽取（富文本标签剥离、多层遍历、畸形 JSON、
+  空文字、`data` 不是数组…）、追加子节点的边界（uid 找不到回落根节点、纯函数不改入参、新 uid 唯一、非法输入返回 null）。
+- 单元测试 **183/183**；做了**变异验证**（去掉 `!parsed.simpleMindMap` 判断 → 恰好 1 条断言报错，确认非空断言）；
+  真实浏览器 E2E **25/25**（脚本 `C:\Users\zjy1998\.workbuddy\zotero-lit-e2e\verify-pn-mind-paste.mjs`）；
+  原有功能回归 **75/75**。
+
+### 四、写验证脚本时踩到的坑（已同步进 INTEGRATION_NOTES 第 13 条）
+
+- 点击**已激活**的节点是 toggle（会取消激活）→ 点完要检查 `.smm-node.active` 数量，必要时补点；
+- 提交编辑后旧编辑框会以 `display:none` 留在 DOM 里 → 要按 `getBoundingClientRect().width > 0` 过滤出可见的那个；
+- 节点文字变长后框会变宽，自己算中心点可能落到可视区外 → 交给 Playwright 的 `locator.click()` 处理可见性最稳。
+
+---
+
 ## v1.16.3：更新消息推送（后台自动检查 + 发现新版本时提醒，同一版本只弹一次）（2026-09-23）
 
 本版新增：应用在后台定期检查 GitHub 上的新版本，发现更新后主动提醒，且**同一个版本只提醒一次**。

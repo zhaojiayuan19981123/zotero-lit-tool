@@ -3156,6 +3156,79 @@
     toast('已插入到笔记', 'success');
   }
 
+  /**
+   * 把中栏的译文作为**新节点**插入思维导图（挂到当前选中的节点下）。
+   *
+   * 为什么要有这条通道：靠「复制译文 → 在导图里 Ctrl+V」其实很脆 ——
+   * 只要剪贴板里残留的是导图自己的数据（在画布内按过 Ctrl+C 就会写进去），
+   * 粘出来就是一坨 JSON（见 smmClipboardToPlainText 的注释）。给它一个
+   * 确定性的按钮入口，绕开剪贴板的歧义。
+   */
+  function pnInsertTranslationToMind() {
+    const translation = paperNoteUtils.stripHtml(pnEl('pnTrans')?.innerText || '').trim();
+    if (!translation) { toast('还没有译文可插入', 'error'); return; }
+    if (!pn.mm) { renderPnMind(); toast('思维导图正在准备，请稍后再试', 'error'); return; }
+
+    capturePnMindmap();
+    const root = pn.mindmap || { data: { text: prDocumentTitle() }, children: [] };
+    // 选中节点的 uid；没有选中就挂到中心主题下，避免「点了没反应」
+    const activeUid = pnMindActiveNode()?.getData?.('uid') || null;
+    const res = paperNoteUtils.appendMindmapChild(root, activeUid, translation);
+    if (!res) { toast('插入失败：译文为空或导图数据不可用', 'error'); return; }
+
+    pn.mindmap = res.root;
+    try {
+      pn.mm.setData(pnPaperNoteData(res.root));
+      // ★ 选中新节点必须等渲染完成再做：setData 之后 renderer.nodeList 里的还是
+      //   上一轮的节点对象，此时拿 uid 去找 / 去 active() 会点到已经失效的节点，
+      //   把库的内部选中态弄乱（表现为之后点节点无反应、F2 进不了编辑、粘贴也不生效）。
+      pn.mm.render(() => {
+        try {
+          const node = (pn.mm.renderer?.nodeList || []).find((n) => n.getData?.('uid') === res.newUid);
+          if (node) node.active();
+        } catch (_) { /* 选中失败不影响数据 */ }
+      });
+    } catch (e) {
+      toast('插入导图失败：' + e.message, 'error');
+      return;
+    }
+    markPnDirty();
+    applyPnWrapWidth();
+    toast('已把译文插入思维导图', 'success');
+  }
+
+  /**
+   * 往导图节点文本编辑器里插入纯文本。
+   * 用 execCommand('insertText') 而不是直接改 innerHTML：前者会派发标准的
+   * beforeinput/input 事件，quill（富文本编辑器）才能同步自己的内部 delta，
+   * 否则一退出编辑，刚插进去的内容就会被回滚掉。
+   */
+  function pnInsertTextIntoNodeEditor(box, text) {
+    const editor = box?.classList?.contains('ql-editor') ? box : box?.querySelector?.('.ql-editor');
+    if (!editor) return;
+    try { editor.focus(); } catch (_) { /* 忽略 */ }
+    const lines = String(text == null ? '' : text).split('\n');
+    lines.forEach((line, i) => {
+      if (i > 0) {
+        // 先试换行专用命令，不支持就退化成插一个 \n
+        const ok = document.execCommand('insertLineBreak');
+        if (!ok) document.execCommand('insertText', false, '\n');
+      }
+      if (line) document.execCommand('insertText', false, line);
+    });
+  }
+
+  /** 中栏「→ 加入笔记 / 加入导图」按钮的文案跟随右栏当前视图 */
+  function updatePnSendToNoteLabel() {
+    const btn = pnEl('pnSendToNote');
+    if (!btn) return;
+    const toMind = pn.noteTab === 'mind';
+    btn.textContent = toMind ? '→ 加入导图' : '→ 加入笔记';
+    btn.title = toMind
+      ? '把这段译文作为新节点插入思维导图（挂在当前选中的节点下）'
+      : '把这段原文+译文追加到右侧笔记';
+  }
+
   /** Markdown ↔ 导图 互相同步：切视图时若两边都有内容，以「有改动的一侧」为准 */
   function pnSyncMdToMindmap() {
     const root = paperNoteUtils.mdToMindmap(pn.md);
@@ -3224,7 +3297,15 @@
         // 所以 'move' 恰好就是「Ctrl 缩放、否则平移」，与 XMind 浏览习惯一致。
         mousewheelAction: 'move',
         mousewheelMoveStep: 100,
-        mousewheelZoomActionReverse: false,
+        // ★ 缩放方向：Ctrl+下滑 = 缩小，Ctrl+上滑 = 放大。
+        //
+        // 这个选项名极其反直觉，实测（真实浏览器 + 读库源码）确认：
+        //   库源码 `mousewheelZoomActionReverse ? this.enlarge() : this.narrow()`
+        //   作用在「滚轮向上 / 向左」这一支上，而它的默认值是 **true**。
+        //   也就是默认（true）= 向上滚放大、向下滚缩小。
+        // 之前这里显式写了 false，等于把默认行为反过来，于是「Ctrl+下滑」变成了放大，
+        // 与用户习惯相反（本机实测：false 时下滑 154px→185px 是放大）。
+        mousewheelZoomActionReverse: true,
         enableAutoFocus: true,
         readonly: false,
         customHandleMousewheel: false,
@@ -3615,6 +3696,7 @@
     });
     pnEl('pnNoteMd')?.classList.toggle('hidden', pn.noteTab !== 'md');
     pnEl('pnNoteMind')?.classList.toggle('hidden', pn.noteTab !== 'mind');
+    updatePnSendToNoteLabel();
     if (pn.noteTab === 'md') {
       renderPnMd();
       setTimeout(() => { pn.mm?.resize?.(); applyPnPanes(); }, 30);
@@ -3900,7 +3982,11 @@
     $('pnSrc')?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doPnTranslate(); }
     });
-    $('pnSendToNote')?.addEventListener('click', () => pnInsertTranslationToNote());
+    // 「→ 加入笔记 / 加入导图」：跟随右栏当前视图走（否则在导图视图下点了会没反应）
+    $('pnSendToNote')?.addEventListener('click', () => {
+      if (pn.noteTab === 'mind') pnInsertTranslationToMind();
+      else pnInsertTranslationToNote();
+    });
     $('pnCopyTrans')?.addEventListener('click', async () => {
       const txt = paperNoteUtils.stripHtml(pnEl('pnTrans')?.innerText || '');
       if (!txt) { toast('还没有译文可复制', 'error'); return; }
@@ -3931,6 +4017,27 @@
         pnMindInsertImage(dataUrl, f.name || '');
       }
     });
+
+    // ★ 拦截「把思维导图自己的数据粘进节点文字」。
+    //
+    //   背景：在画布内 Ctrl+C 复制节点时，库会把整段
+    //   `{"simpleMindMap":true,"data":[…]}` 写进剪贴板的 text/plain。
+    //   库对普通文本编辑框有 checkSmmFormatData 兜底，但**富文本节点编辑器
+    //   （RichText / quill）这条路径没有拦截** —— 实测粘出来就是整段 JSON 文字
+    //   （用户截图里的现象）。这里在捕获阶段先接住，只插入其中的节点文字。
+    //   用 capture 是必须的：quill 在编辑区自身监听 paste，冒泡阶段轮不到我们。
+    //   普通文本（包括译文）不受影响，原样走默认粘贴。
+    document.addEventListener('paste', (e) => {
+      if (!pn.on || pn.noteTab !== 'mind') return;
+      const box = e.target?.closest?.('.smm-richtext-node-edit-wrap, .smm-node-edit-wrap, .ql-editor');
+      if (!box) return;
+      const plain = paperNoteUtils.smmClipboardToPlainText(e.clipboardData?.getData('text/plain') || '');
+      if (plain === null) return;   // 不是导图数据 → 放行
+      e.preventDefault();
+      e.stopPropagation();
+      if (plain) pnInsertTextIntoNodeEditor(box, plain);
+      toast('剪贴板里是思维导图节点数据，已只粘贴其中的文字；若要粘贴译文，请回中栏重新复制', 'error');
+    }, true);
 
     // 关窗口/切后台前兜底落盘（笔记不能因为关页面就丢）
     window.addEventListener('beforeunload', () => {

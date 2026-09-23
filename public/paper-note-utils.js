@@ -253,6 +253,75 @@
     return { text, cursor };
   }
 
+  // ---------- 剪贴板：识别 simple-mind-map 自己写进去的数据 ----------
+  /**
+   * ★ 为什么需要这个函数（真实浏览器实测出的用户可见 bug）：
+   *
+   *   simple-mind-map 在画布内按 Ctrl+C 复制节点时，会往剪贴板写一整段
+   *   `{"simpleMindMap":true,"data":[{"data":{"text":"<p>…</p>",…}}]}`
+   *   （库内部 createSmmFormatData + setDataToClipboard，text/plain 就是这段 JSON）。
+   *
+   *   库对「普通文本编辑框」有 checkSmmFormatData 兜底，能只取节点文字；
+   *   但**富文本节点编辑器（quill）这条路径没有拦截**：粘贴时整段 JSON 会被
+   *   原样插进节点文字，用户看到的就是一坨 `{"simpleMindMap":true,…}`。
+   *
+   * 这里把这类内容识别出来并抽成可读纯文本。
+   * @returns {string|null} 是导图数据 → 返回其文字（可能为空字符串，表示确实没有文字）；
+   *                        不是导图数据 → 返回 null，调用方应当放行走默认粘贴。
+   */
+  function smmClipboardToPlainText(raw) {
+    const text = String(raw == null ? '' : raw).trim();
+    // 快速预筛：导图数据一定是一个 JSON 对象；非对象直接放行，避免对大段文本做解析
+    if (!text || text[0] !== '{') return null;
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch (_) { return null; }
+    if (!parsed || typeof parsed !== 'object' || !parsed.simpleMindMap) return null;
+
+    const list = Array.isArray(parsed.data) ? parsed.data : (parsed.data ? [parsed.data] : []);
+    const lines = [];
+    // 复制多个节点时数据是多棵子树，按前序遍历收集文字（比库「只取第一个」更符合直觉）
+    const walk = (n) => {
+      if (!n || typeof n !== 'object') return;
+      const t = nodeText(n);
+      if (t) lines.push(t);
+      (Array.isArray(n.children) ? n.children : []).forEach(walk);
+    };
+    list.forEach(walk);
+    return lines.join('\n');
+  }
+
+  /**
+   * 在导图数据里找到目标节点并追加一个子节点。
+   *
+   * 纯函数，返回**新的**整棵树（不修改入参），方便单测与撤销。
+   * targetUid 为空、或树里找不到该 uid 时，挂到根节点下（保证「点了总有反应」）。
+   *
+   * @returns {{root:object, parentUid:string|null, newUid:string}|null} 输入不合法/文字为空时返回 null
+   */
+  function appendMindmapChild(root, targetUid, text) {
+    if (!root || typeof root !== 'object') return null;
+    const label = String(text == null ? '' : text).trim();
+    if (!label) return null;
+
+    // 深拷贝，避免改动调用方持有的对象（pn.mindmap 同时被 Markdown 同步逻辑使用）
+    const clone = JSON.parse(JSON.stringify(root));
+    let target = null;
+    if (targetUid) {
+      const find = (n) => {
+        if (target || !n || typeof n !== 'object') return;
+        if (n.data && n.data.uid === targetUid) { target = n; return; }
+        (Array.isArray(n.children) ? n.children : []).forEach(find);
+      };
+      find(clone);
+    }
+    if (!target) target = clone;
+    if (!Array.isArray(target.children)) target.children = [];
+
+    const newUid = nextUid();
+    target.children.push({ data: { text: label, uid: newUid }, children: [] });
+    return { root: clone, parentUid: (target.data && target.data.uid) || null, newUid };
+  }
+
   /** 笔记内容是否算「空」（两种视图都空才提示未填写） */
   function isNoteEmpty(note) {
     const md = String(note?.md || '').trim();
@@ -621,6 +690,8 @@
     buildNoteSnippet,
     insertSnippet,
     isNoteEmpty,
+    smmClipboardToPlainText,
+    appendMindmapChild,
     charWidth,
     estimateTextWidth,
     idealNodeTextWidth,

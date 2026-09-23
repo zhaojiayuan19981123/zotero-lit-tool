@@ -523,3 +523,129 @@ test('MIND_FONTS / MIND_LINE_WIDTHS / MIND_LINE_STYLES 结构完整', () => {
   // 跨 realm：用 join 比较，避免原型不同导致 deepStrictEqual 失败
   assert.equal(U.MIND_LINE_STYLES.map((s) => s.value).join(','), 'curve,straight');
 });
+
+// ---------- 剪贴板：识别导图自己写进去的数据 ----------
+// 这段 JSON 就是 simple-mind-map 在画布内 Ctrl+C 时写进剪贴板 text/plain 的真实内容，
+// 用户把它粘进节点文本编辑框会看到一整坨 JSON（v1.16.4 修的 bug）。
+const SMM_CLIP = JSON.stringify({
+  simpleMindMap: true,
+  data: [{
+    data: { text: '<p>你应该多密切地跟随趋势？非典型性和社交媒体的参与度</p>', expand: true, richText: true, isActive: false, imgMap: {} },
+    children: [{
+      data: { text: '<p>第二层文字</p>', richText: true, dir: 'right', expand: true, isActive: false },
+      children: [{ data: { text: '<p>第三层文字</p>' }, children: [] }],
+    }],
+  }],
+});
+
+test('smmClipboardToPlainText：识别导图数据并剥出纯文字（不再返回 JSON）', () => {
+  const out = U.smmClipboardToPlainText(SMM_CLIP);
+  assert.equal(typeof out, 'string');
+  assert.ok(!out.includes('simpleMindMap'), '绝不能把 JSON 关键字带出来');
+  assert.ok(!out.includes('richText'), '绝不能把节点字段带出来');
+  assert.ok(!out.includes('<p>'), '富文本标签要剥掉');
+  // 按前序把三个层级的文字都收集出来
+  assert.equal(out, '你应该多密切地跟随趋势？非典型性和社交媒体的参与度\n第二层文字\n第三层文字');
+});
+
+test('smmClipboardToPlainText：前后有空白/换行也能识别', () => {
+  assert.equal(U.smmClipboardToPlainText('  \n' + SMM_CLIP + '\n  ').startsWith('你应该多密切地'), true);
+});
+
+test('smmClipboardToPlainText：普通文本（译文）一律返回 null 交给默认粘贴', () => {
+  const cases = [
+    '你应该多密切地跟随趋势？',
+    '{"a":1}',                       // 是 JSON，但不是导图数据
+    '[]',
+    '{ 这不是 JSON',
+    '',
+    '   ',
+    null,
+    undefined,
+    'simpleMindMap:true 随手写的笔记',   // 不是合法 JSON
+  ];
+  for (const c of cases) {
+    assert.equal(U.smmClipboardToPlainText(c), null, `应放行：${String(c).slice(0, 20)}`);
+  }
+});
+
+test('smmClipboardToPlainText：是导图数据但节点没文字时返回空串（仍需拦下）', () => {
+  const noText = JSON.stringify({ simpleMindMap: true, data: [{ data: { text: '' }, children: [] }] });
+  assert.equal(U.smmClipboardToPlainText(noText), '');
+  const noData = JSON.stringify({ simpleMindMap: true, data: [] });
+  assert.equal(U.smmClipboardToPlainText(noData), '');
+});
+
+test('smmClipboardToPlainText：data 是单个对象（非数组）也能处理', () => {
+  const single = JSON.stringify({ simpleMindMap: true, data: { data: { text: '<p>单节点</p>' }, children: [] } });
+  assert.equal(U.smmClipboardToPlainText(single), '单节点');
+});
+
+// ---------- 往导图追加子节点 ----------
+const tree = () => ({
+  data: { text: '中心主题', uid: 'root-1' },
+  children: [
+    { data: { text: '子主题一', uid: 'a' }, children: [] },
+    { data: { text: '子主题二', uid: 'b' }, children: [{ data: { text: '孙节点', uid: 'b1' }, children: [] }] },
+  ],
+});
+
+test('appendMindmapChild：挂到指定 uid 的节点下', () => {
+  const res = U.appendMindmapChild(tree(), 'a', '新译文');
+  assert.ok(res && res.root);
+  assert.equal(res.parentUid, 'a');
+  const a = res.root.children.find((c) => c.data.uid === 'a');
+  assert.equal(a.children.length, 1);
+  assert.equal(a.children[0].data.text, '新译文');
+  // 其他分支不受影响
+  assert.equal(res.root.children.find((c) => c.data.uid === 'b').children.length, 1);
+});
+
+test('appendMindmapChild：能找到深层节点', () => {
+  const res = U.appendMindmapChild(tree(), 'b1', '孙下新节点');
+  assert.equal(res.parentUid, 'b1');
+  const b1 = res.root.children.find((c) => c.data.uid === 'b').children[0];
+  assert.equal(b1.children.length, 1);
+});
+
+test('appendMindmapChild：uid 找不到 / 为空 / 树里没 uid 时挂到根节点', () => {
+  for (const uid of ['nope', null, undefined, '']) {
+    const res = U.appendMindmapChild(tree(), uid, 'X');
+    assert.equal(res.parentUid, 'root-1', `uid=${uid} 应回落到根节点`);
+    assert.equal(res.root.children.length, 3);
+  }
+});
+
+test('appendMindmapChild：不修改入参（纯函数）', () => {
+  const src = tree();
+  const before = JSON.stringify(src);
+  const res = U.appendMindmapChild(src, 'a', 'X');
+  assert.equal(JSON.stringify(src), before, '原树必须原封不动');
+  assert.notEqual(res.root, src, '应返回新对象');
+});
+
+test('appendMindmapChild：新节点 uid 唯一且非空', () => {
+  const r1 = U.appendMindmapChild(tree(), 'a', 'X');
+  const r2 = U.appendMindmapChild(tree(), 'a', 'Y');
+  const uid1 = r1.newUid;
+  const uid2 = r2.newUid;
+  assert.ok(uid1 && uid2);
+  assert.notEqual(uid1, uid2);
+  assert.equal(r1.newUid, r1.root.children.find((c) => c.data.uid === 'a').children[0].data.uid);
+});
+
+test('appendMindmapChild：非法输入返回 null', () => {
+  assert.equal(U.appendMindmapChild(null, 'a', 'X'), null);
+  assert.equal(U.appendMindmapChild(tree(), 'a', ''), null);
+  assert.equal(U.appendMindmapChild(tree(), 'a', '   '), null);
+  assert.equal(U.appendMindmapChild(tree(), 'a', null), null);
+});
+
+test('appendMindmapChild：children 字段缺失/非数组时能补上', () => {
+  const broken = { data: { text: '根', uid: 'r' } };
+  const res = U.appendMindmapChild(broken, 'r', 'X');
+  assert.equal(res.root.children.length, 1);
+  const weird = { data: { text: '根', uid: 'r' }, children: null };
+  const res2 = U.appendMindmapChild(weird, 'r', 'X');
+  assert.equal(res2.root.children.length, 1);
+});

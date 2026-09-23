@@ -96,6 +96,57 @@
 9. **`view` 与 `resize` API 都在**：`mm.view.fit()`（适应画布）、`mm.view.enlarge()`、
    `mm.view.narrow()`、`mm.resize()`、`mm.destroy()`、`mm.setData(data)`、`mm.render()`。
    切换数据用 `setData` + `render`，不要 destroy 重建（会丢缩放与布局状态）。
+   ⚠️ **`setData` 之后必须等 `render(cb)` 回调再按 uid 找节点 / 调 `node.active()`**：
+   `renderer.nodeList` 里此时还是上一轮的节点对象，过早操作会点到失效节点、把库的
+   选中态弄乱（实测表现：之后点节点无反应、F2 进不了编辑、Ctrl+V 也失效）。
+
+10. **`mousewheelZoomActionReverse` 的名字与行为是反的（务必按实测写）**：
+   库源码 `mousewheelZoomActionReverse ? this.enlarge() : this.narrow()` 作用在
+   「滚轮向上 / 向左」这一支上，**默认值是 `true`**。
+   实测（真实 Chromium + `page.mouse.wheel`）：
+
+   | 配置 | Ctrl + 上滑（deltaY<0） | Ctrl + 下滑（deltaY>0） |
+   | --- | --- | --- |
+   | `reverse: true`（默认） | **放大** | **缩小** |
+   | `reverse: false` | 缩小 | 放大 |
+
+   → 想要「Ctrl+下滑缩小、上滑放大」（等同 XMind 习惯）就必须写 **`true`**。
+   另外 `mousewheelAction: 'move'` 才是「不按 Ctrl 时平移、按住 Ctrl 缩放」，
+   `'zoom'` 会让滚轮无条件缩放。
+
+11. **快捷键默认只在鼠标位于画布内时响应**：`enableShortcutOnlyWhenMouseInSvg`
+   默认 `true`，且 `defaultEnableCheck` 只放行「事件目标为 `document.body` 或
+   `editNodeClassList` 里的编辑框元素」。快捷键监听挂在 **`window`** 上（全局），
+   所以要抢也抢得到 —— 好在有上面这层 `isInSvg` 兜底。
+   `KeyCommand.bindEvent` 会监听 `svg_mouseenter` / `svg_mouseleave` 维护 `isInSvg`；
+   节点文本编辑期间库会 `stopCheckInSvg()` 暂停检查、结束再 `recoveryCheckInSvg()`。
+
+12. **⚠️ RichText（quill）节点编辑框粘贴时不会识别 smm 自己的剪贴板数据**：
+   - 在画布内 Ctrl+C 复制节点 → 库 `copy()` 会把 `createSmmFormatData()` 的结果
+     （`{"simpleMindMap":true,"data":[…]}`）经 `setDataToClipboard()` 写进剪贴板的
+     **text/plain**。
+   - 库对**普通**（非富文本）编辑框有兜底：`textEditNode` 的 paste 监听里会
+     `checkSmmFormatData` + `getTextFromHtml(data[0].data.text)`，只取节点纯文本。
+   - 但**富文本编辑框（`RichText` 插件 → quill）这条路径没有拦截**：quill 的
+     `Clipboard.convert()` 在「没有 html、只有 text」时直接 `delta.insert(text)`，
+     不经过 smm 注册的 matcher → **整段 JSON 被原样插入节点文字**（用户会看到一坨
+     `{"simpleMindMap":true,…}`）。
+   - 本项目的做法（见 `public/app.js`）：在 **`document` 的捕获阶段**拦 paste
+     （必须在捕获阶段 —— quill 在编辑区自身监听，冒泡阶段轮不到我们），
+     用 `PaperNoteUtils.smmClipboardToPlainText()` 识别并抽出文字，再用
+     `document.execCommand('insertText', …)` 写进 quill（**不要直接改 innerHTML**：
+     execCommand 会派发标准的 beforeinput/input，quill 才能同步内部 delta，
+     否则一退出编辑内容就被回滚）。
+   - 判断编辑框用 `.smm-richtext-node-edit-wrap / .smm-node-edit-wrap / .ql-editor`；
+     注意这些元素是 `appendChild` 到 `document.body`（或 `customInnerElsAppendTo`）
+     的，**不在导图容器里**，所以监听 `#pnMindHost` 是拦不到的。
+   - 提交编辑后旧编辑框会以 `display:none` 留在 DOM 里，写验证脚本时要用
+     `getBoundingClientRect().width > 0` 过滤出**可见**的那个，否则会读到旧的。
+
+13. **点击「已激活」的节点是 toggle（会取消激活）**。写自动化脚本时不能假定
+   「点一下就选中」；点完要检查 `.smm-node.active` 数量，必要时补点。
+   另外节点文字变长后框会变宽，自己算中心点可能落到可视区外（点不到）——
+   用 Playwright 的 `locator.click()` 交给它处理可见性最稳。
 
 ### 实测环境注意（本机）
 
