@@ -4054,60 +4054,104 @@
     }
   }
 
-  /** 主 AI 助手：选择一篇文献，把回答导入它的笔记 */
+  /**
+   * 主 AI 助手：把回答导入「Markdown 笔记」（独立笔记库，不是某篇文献的笔记）。
+   * 支持两种落点：新建一篇笔记，或追加到已有笔记。
+   */
   async function chatImportToNote(index) {
     const m = chatMsgs[index];
     if (!m || m.role !== 'assistant' || !String(m.content || '').trim()) return;
-    const list = await ensureLiteratureLoaded();
-    if (!list.length) { toast('文献库还是空的，请先添加一篇文献', 'error'); return; }
-
+    // 往前找最近的一条用户提问，作为笔记里的上下文
     let question = '';
     for (let i = index - 1; i >= 0; i -= 1) {
       if (chatMsgs[i]?.role === 'user') { question = chatMsgs[i].content || ''; break; }
     }
-    // 只有一篇文献时不必打扰用户，直接导入
-    if (list.length === 1) {
-      try {
-        await appendToPaperNote(list[0].id, buildChatNoteSnippet(m.content, { source: list[0].title || '未命名文献', question }));
-        toast(`已导入到《${(list[0].title || '未命名文献').slice(0, 18)}》的笔记`, 'success');
-      } catch (e) { toast('导入失败：' + e.message, 'error'); }
-      return;
+
+    // 载入已有笔记供选择；若用户正在编辑别的笔记，先落盘，免得被随后的重渲染覆盖
+    if (!markdownNotesLoaded) await loadMarkdownNotes();
+    else if (activeMarkdownNote()) await saveActiveMarkdownNote();
+
+    // 一篇笔记都没有时不必打扰用户，直接新建
+    let target = { mode: 'new' };
+    if (markdownNotes.length) {
+      const picked = await askMarkdownNoteTarget(markdownNotes);
+      if (!picked) return;
+      target = picked;
     }
-    const picked = await askPaperForNote(list);
-    if (!picked) return;
+
+    const snippet = buildChatNoteSnippet(m.content, { question });
     try {
-      await appendToPaperNote(picked.id, buildChatNoteSnippet(m.content, { source: picked.title || '未命名文献', question }));
-      toast(`已导入到《${(picked.title || '未命名文献').slice(0, 18)}》的笔记`, 'success');
+      const note = target.mode === 'new'
+        ? await createMarkdownNoteFromAnswer(buildAnswerNoteTitle(question), snippet)
+        : await appendToMarkdownNote(target.note, snippet);
+      if (!note) return;
+      refreshMarkdownNotesAfterImport(note);
+      toast(target.mode === 'new'
+        ? `已新建 Markdown 笔记《${clipTitle(note.title, 18)}》`
+        : `已追加到 Markdown 笔记《${clipTitle(note.title, 18)}》`, 'success');
     } catch (e) {
       toast('导入失败：' + e.message, 'error');
     }
   }
 
-  /** 文献列表（带缓存），供导入笔记选择用 */
-  let literatureCache = null;
-  async function ensureLiteratureLoaded() {
-    if (Array.isArray(literatureCache) && literatureCache.length) return literatureCache;
-    try {
-      const data = await api('/api/literature');
-      literatureCache = Array.isArray(data) ? data : (data?.items || []);
-    } catch (_) { literatureCache = []; }
-    return literatureCache;
+  /** 给「新建笔记」起个能认出来的标题：优先用刚才的提问 */
+  function buildAnswerNoteTitle(question) {
+    const q = String(question || '').replace(/^[\s#>*\-]+/, '').replace(/\s+/g, ' ').trim();
+    return q ? `AI 问答 · ${clipTitle(q, 24)}` : `AI 回答 · ${fmtTime(new Date().toISOString())}`;
   }
 
-  /** 选择「导入到哪篇文献的笔记」 */
-  function askPaperForNote(list) {
+  /** 追加到已有 Markdown 笔记：直接走 API，不受编辑器当前状态影响 */
+  async function appendToMarkdownNote(note, snippet) {
+    if (!note?.id) throw new Error('没有选中笔记');
+    const prev = String(note.content || '');
+    const next = prev.trim() ? `${prev.replace(/\s+$/, '')}\n\n${snippet}\n` : `${snippet}\n`;
+    const saved = await api('/api/markdown-notes/' + encodeURIComponent(note.id), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: next }),
+    });
+    Object.assign(note, saved);
+    return note;
+  }
+
+  /** 新建一篇 Markdown 笔记并写入 AI 回答 */
+  async function createMarkdownNoteFromAnswer(title, snippet) {
+    const note = await api('/api/markdown-notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, content: `${snippet}\n`, sourceName: 'AI 助手' }),
+    });
+    // 只在笔记模块**已经载入过**时同步内存列表：否则会把「未载入」误标成已载入，
+    // 之后打开模块就只看得到这一篇（loadMarkdownNotes 会被跳过）。
+    if (markdownNotesLoaded) markdownNotes.unshift(note);
+    return note;
+  }
+
+  /** 导入后刷新「Markdown 笔记」界面，但不改变用户当前的选中项 */
+  function refreshMarkdownNotesAfterImport(note) {
+    if (!markdownNotesLoaded) return;
+    if (note?.id && note.id === activeMarkdownNoteId) renderMarkdownNotes();
+    else renderMarkdownNoteList();
+  }
+
+  /**
+   * 选择导入目标：新建一篇 Markdown 笔记，或追加到已有笔记。
+   * 返回 { mode:'new' } / { mode:'existing', note } / null（取消）
+   */
+  function askMarkdownNoteTarget(notes) {
     return new Promise((resolve) => {
       const wrap = document.createElement('div');
       wrap.className = 'modal';
       wrap.innerHTML = `
         <div class="modal-mask"></div>
-        <div class="modal-dialog note-pick-modal" role="dialog" aria-label="选择要导入的文献">
+        <div class="modal-dialog note-pick-modal" role="dialog" aria-label="选择要导入的笔记">
           <div class="modal-head">
-            <h3>导入到哪篇文献的笔记？</h3>
+            <h3>导入到 Markdown 笔记</h3>
             <button class="modal-close" data-np-cancel aria-label="关闭">×</button>
           </div>
           <div class="modal-body">
-            <input class="tb-input note-pick-search" id="npSearch" placeholder="搜索标题 / 作者…" />
+            <button class="note-pick-new" data-np-new>＋ 新建一篇笔记</button>
+            <input class="tb-input note-pick-search" id="npSearch" placeholder="搜索已有笔记…" />
             <div class="note-pick-list" id="npList"></div>
           </div>
           <div class="modal-foot"><button class="tb-btn" data-np-cancel>取消</button></div>
@@ -4118,22 +4162,23 @@
       const renderList = (keyword) => {
         const kw = String(keyword || '').trim().toLowerCase();
         const filtered = kw
-          ? list.filter((it) => `${it.title || ''} ${it.authors || ''} ${it.journal || ''}`.toLowerCase().includes(kw))
-          : list;
+          ? notes.filter((n) => `${n.title || ''} ${n.content || ''}`.toLowerCase().includes(kw))
+          : notes;
         const box = wrap.querySelector('#npList');
         box.innerHTML = filtered.length
-          ? filtered.slice(0, 200).map((it) => `
-              <button class="note-pick-item" data-np-pick="${esc(it.id)}">
-                <b>${esc(it.title || '未命名文献')}</b>
-                <span>${esc([it.authors, it.journal, it.year].filter(Boolean).join(' · ') || '—')}</span>
+          ? filtered.slice(0, 200).map((n) => `
+              <button class="note-pick-item" data-np-pick="${esc(n.id)}">
+                <b>${esc(n.title || '未命名笔记')}</b>
+                <span>追加到这篇 · 更新于 ${esc(fmtTime(n.updatedAt || n.createdAt))}</span>
               </button>`).join('')
-          : '<div class="note-pick-empty">没有匹配的文献</div>';
+          : '<div class="note-pick-empty">没有匹配的笔记，可点上方「新建一篇笔记」</div>';
       };
 
       wrap.addEventListener('click', (e) => {
         if (e.target.classList?.contains('modal-mask')) return close(null);
+        if (e.target.closest('[data-np-new]')) return close({ mode: 'new' });
         const pick = e.target.closest('[data-np-pick]');
-        if (pick) return close(list.find((it) => it.id === pick.dataset.npPick) || null);
+        if (pick) return close({ mode: 'existing', note: notes.find((n) => n.id === pick.dataset.npPick) || null });
         if (e.target.closest('[data-np-cancel]')) close(null);
       });
       wrap.querySelector('#npSearch')?.addEventListener('input', (e) => renderList(e.target.value));
@@ -7539,7 +7584,7 @@
     box.innerHTML = summaryHint + chatMsgs.map((m, index) =>
       `<div class="chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}${m.error ? ' error' : ''}">${m.role === 'user'
         ? esc(m.content).replace(/\n/g, '<br />')
-        : `<div class="md md-render">${m.content ? chatMd(m.content) : ''}${m.pending ? '<span class="chat-cursor"></span>' : ''}</div>${(m.content && !m.pending) ? `<div class="chat-bubble-actions"><button class="pr-msg-act" data-chat-to-note="${index}" title="把这段回答追加到某篇文献的 Markdown 笔记">📥 导入笔记</button></div>` : ''}${m.error ? `<button class="btn btn-sm md-retry" data-chat-retry="${index}">重试回答</button>` : ''}`}</div>`).join('');
+        : `<div class="md md-render">${m.content ? chatMd(m.content) : ''}${m.pending ? '<span class="chat-cursor"></span>' : ''}</div>${(m.content && !m.pending) ? `<div class="chat-bubble-actions"><button class="pr-msg-act" data-chat-to-note="${index}" title="把这段回答导入 Markdown 笔记（可新建一篇，或追加到已有笔记）">📥 导入笔记</button></div>` : ''}${m.error ? `<button class="btn btn-sm md-retry" data-chat-retry="${index}">重试回答</button>` : ''}`}</div>`).join('');
     box.scrollTop = box.scrollHeight;
   }
   async function sendChat(text, { retry = false } = {}) {

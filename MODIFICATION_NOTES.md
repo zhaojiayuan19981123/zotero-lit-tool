@@ -1,3 +1,52 @@
+## v1.16.1：修正「导入笔记」落点（改为 Markdown 笔记，可新建）+ 根治 Release 正文为空（2026-09-23）
+
+本版只做两件事：改一处导入行为，并把发布流水线上反复出现的「空正文」问题从根上修掉。
+
+### 一、「📥 导入笔记」改为写入「Markdown 笔记」，并支持新建
+
+**问题**：主 AI 助手里的「📥 导入笔记」会弹出「导入到哪篇文献的笔记？」，把回答写进**某篇文献的笔记**（`PUT /api/paper-notes/:litId`）。但该入口的本意是把 AI 结论沉淀成**可独立查阅、可继续编辑、可导出 PDF / Markdown** 的笔记；这类结论往往不属于某一篇文献，混进文献笔记后也很难再整理。
+
+**改法**（全部在 `public/app.js`）：
+
+- `chatImportToNote()` 重写：落点由 `paper-notes` 改为独立的 Markdown 笔记库 `/api/markdown-notes`；
+- 新增 `askMarkdownNoteTarget()`：弹窗顶部固定「＋ 新建一篇笔记」，下方是已有笔记列表（可搜索），点击即确定为追加目标；
+- 新增 `createMarkdownNoteFromAnswer()`：新建笔记，`title` 由提问生成（`AI 问答 · <提问前 24 字>`），`content` 是带时间与提问的 Markdown 片段，`sourceName` 记为「AI 助手」；
+- 新增 `appendToMarkdownNote()`：`PATCH /api/markdown-notes/:id`，把片段追加到已有笔记末尾，原有内容不动；
+- 新增 `buildAnswerNoteTitle()` / `refreshMarkdownNotesAfterImport()`。后者只在笔记模块**已经载入过**时刷新界面 —— 若未载入就顺手 `markdownNotes.unshift()`，会把「未载入」误标成已载入，导致之后打开模块只看得见这一篇（`loadMarkdownNotes` 会被跳过）；
+- 笔记库为空时不弹框直接新建；导入前若正在编辑别的笔记，先 `saveActiveMarkdownNote()` 落盘，避免被随后的重渲染覆盖；
+- 删除已无用的 `askPaperForNote()` / `ensureLiteratureLoaded()` / `literatureCache`；
+- 论文阅读器里的「📥 导入笔记」**行为不变**，仍写入当前这篇论文的笔记（`appendToPaperNote()` 保留）；
+- `public/style.css` 新增 `.note-pick-new` 样式，弹窗文案由「文献」改为「笔记」。
+
+### 二、根治 Release 说明正文为空（`.github/workflows/release.yml`）
+
+**问题**：从 v1.12 起每个版本的 Release 正文都是空的，一直靠事后调 API 手工 PATCH 补写。
+
+**根因**（本次从 CI 日志里拿到确凿证据）：
+
+```
+⚠️ Failed to read body_path ".github/release-body.md" (ENOENT). Falling back to 'body' input.
+```
+
+发版作业只 `actions/download-artifact` 下载构建产物，**从未检出源码**，因此 `body_path` 指向的文件在工作区里根本不存在。`softprops/action-gh-release` 对此**只打一条 warning 就继续执行**，于是静默发出空正文的 Release。此前把它归因于 `generate_release_notes` 覆盖 `body_path`，方向不对。
+
+**改法**：
+
+- `release` 作业新增 `actions/checkout@v4`（在下载产物之前）；
+- 新增「Verify release notes file」步骤：`.github/release-body.md` 缺失或为空则 `exit 1`，宁可让流水线失败，也不再发空正文；
+- 更正 workflow 内注释与 `test/mail-update-features.test.mjs` 里关于 `generate_release_notes` 的旧结论。
+
+### 三、测试
+
+- 单元测试 **148 → 150 项全绿**（新增两条：`release` 作业必须检出源码并校验正文非空；导入笔记的落点与「新建」入口必须存在）；
+- 真实浏览器端到端 **70 项断言全绿**。第 4 节由 5 条改写扩为 12 条，其中最关键的一条是回归守卫：**导入不会写进文献笔记**（断言 `paper-notes.md` 前后完全一致）。
+
+> 经验：**「动作只 warning 不报错」的配置错误最阴**。`body_path` 读不到文件只打 warning，
+> 所以流水线一路绿灯、Release 照样发布，问题只在人去看 Release 页面时才暴露。凡是用到
+> `body_path` 这类「读文件」的配置，都值得额外加一条显式的存在性校验。
+
+---
+
 ## v1.16.0：导图样式面板（XMind 级）+ 顶刊 DOI 批量导出 + AI 回答导入笔记 + 邮件一键翻译 + 应用图标（2026-09-23）
 
 六项功能落地。**其中三项在自查阶段被真实浏览器验证揪出了缺陷并当场修掉**（含一个会让导图连线与子节点直接渲染不出来的严重问题），详见第六节。
@@ -39,6 +88,8 @@
   ```
 - 主助手侧：文献库只有一篇时直接写入，多篇时弹「导入到哪篇文献的笔记」选择框（可搜索）；
 - 导入只追加 Markdown，不动导图数据与样式。
+
+> 注：主助手侧的落点已在 **v1.16.1** 修正 —— 改为写入独立的「Markdown 笔记」并支持新建笔记，不再写入文献笔记；论文阅读器里的入口保持不变。详见本文件顶部的 v1.16.1 说明。
 
 ### 四、邮件一键翻译
 

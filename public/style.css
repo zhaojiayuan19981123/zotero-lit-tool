@@ -623,9 +623,17 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .pr-msg-act:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft, rgba(43,127,212,.06)); }
 .chat-bubble-actions { display: flex; gap: 8px; margin-top: 8px; }
 
-/* 选择导入目标文献 */
+/* 选择导入目标（文献笔记 / Markdown 笔记） */
 .note-pick-modal { width: 520px; max-width: 94vw; }
 .note-pick-search { width: 100%; margin-bottom: 10px; }
+.note-pick-new {
+  width: 100%; margin-bottom: 8px; padding: 9px 12px; cursor: pointer;
+  border: 1px dashed var(--accent); border-radius: 8px;
+  background: var(--accent-soft, rgba(43,127,212,.06)); color: var(--accent);
+  font: inherit; font-size: 12.5px; font-weight: 600; text-align: center;
+  transition: background .15s;
+}
+.note-pick-new:hover { background: var(--accent-soft, rgba(43,127,212,.14)); }
 .note-pick-list { max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
 .note-pick-item {
   display: flex; flex-direction: column; gap: 2px; text-align: left; cursor: pointer;

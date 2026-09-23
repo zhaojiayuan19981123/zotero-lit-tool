@@ -81,6 +81,20 @@ jobs:
       - macos
     runs-on: ubuntu-latest
     steps:
+      # ★ 必须有 checkout：body_path 是相对**工作区**解析的，本作业若不检出源码，
+      #   .github/release-body.md 就找不到 —— action-gh-release 只会打一条
+      #   "Failed to read body_path ... (ENOENT)" 的警告然后静默发**空正文**的 Release
+      #   （v1.12 / v1.13 / v1.15.0 / v1.15.1 / v1.16.0 都因此中招，每次都靠事后 PATCH 补）。
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify release notes file
+        run: |
+          test -s .github/release-body.md || {
+            echo "::error::.github/release-body.md 缺失或为空，拒绝发出空正文的 Release"
+            exit 1
+          }
+
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
@@ -100,9 +114,10 @@ jobs:
           draft: false
           prerelease: false
           make_latest: true
-          # ★ 必须为 false：设为 true 时会自动生成 "Full Changelog" 并**覆盖 body_path**，
-          #   导致 Release 正文只剩一个链接（v1.12 / v1.13 / v1.15.0 / v1.15.1 都踩过，
-          #   每次都得事后 PATCH 补正文）。正文一律以 .github/release-body.md 为准。
+          # 正文一律以 .github/release-body.md 为准，故 generate_release_notes 保持 false。
+          # ⚠️ 更正：v1.16.0 从 CI 日志确认，历次「正文为空」的**真正**原因是本作业缺 checkout
+          #    导致 body_path 读不到文件（ENOENT），与 generate_release_notes 无关。
+          #    两个设置都保留即可 —— 但真正修复它的是上面的 Check out source + 文件非空校验。
           generate_release_notes: false
           body_path: .github/release-body.md
           files: release-assets/*
