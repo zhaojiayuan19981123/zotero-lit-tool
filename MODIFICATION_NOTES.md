@@ -1,3 +1,54 @@
+## v1.16.2：应用图标背景改为透明（修掉深色任务栏上的白方块）（2026-09-23）
+
+本版只修一处：图标的背景本来是**不透明白**，在深色表面上（Windows 任务栏 / 开始菜单 / 桌面快捷方式、macOS Dock、安装程序界面）会显出一块白方块。
+
+### 一、根因：生成脚本把设计稿的透明通道丢掉了
+
+设计稿（`D:\desktop\icon-256.png`）本身**就是透明背景**的 —— 它是带透明索引的调色板 PNG，四角像素为 `(255, 255, 255, 0)`。问题出在 `build/make-icons.py`：
+
+1. `content_bbox()` 用 `img.convert("RGB")` 找图形范围。`convert("RGB")` 会**丢掉 alpha**，透明背景被读成纯白 —— 包围盒碰巧还对（白色本来就要裁掉），但透明信息从这里就没了；
+2. `square_crop()` 用 `Image.new("RGBA", size, (255, 255, 255, 255))` 建**不透明白**画布，再用 `canvas.paste(src, box, src)` 合成。`paste` 会把传入的 mask 乘到**每一个通道**（包括 alpha 通道）上，于是半透明边缘的 alpha 变成 a² —— 边缘变暗；
+3. 最终所有产物 alpha 恒为 255，背景全白。
+
+### 二、改法（`build/make-icons.py`）
+
+```python
+# 1) 有透明通道就以 alpha 为准，不透明白底的设计稿仍走「非白」判定
+if has_alpha_content(rgba):
+    mask = rgba.split()[3].point(lambda v: 255 if v > ALPHA_TOL else 0)
+    bbox = mask.getbbox()
+
+# 2) 目标区域完全落在源图内就直接 crop；需要外扩则用全透明画布
+if left >= 0 and top >= 0 and right <= w and bottom <= h:
+    return src.crop((left, top, right, bottom))
+canvas = Image.new("RGBA", (right - left, bottom - top), (0, 0, 0, 0))
+canvas.alpha_composite(src, (-left, -top))   # ★ 不能用 paste(..., mask=src)
+```
+
+并新增 `check_transparent()` 自检：产物必须是 RGBA、四角 alpha 必须为 0，否则脚本**直接报错退出**（退出码 2），不再静默产出白底图标。
+
+### 三、产物
+
+| 文件 | 说明 | 修复后 |
+|---|---|---|
+| `build/icon.png` | 1024×1024 通用 | alpha (0,255)，四角 0 |
+| `build/icon.ico` | Windows 多尺寸（7 帧） | 每帧为带 alpha 的内嵌 PNG |
+| `build/icon.icns` | macOS | RGBA |
+| `build/icon-256.png` | 预览 / 安装器 | 四角 0 |
+| `public/favicon.png` | 标签页 + 界面左上角 logo | 四角 0 |
+| `electron/icon.png` | 运行时窗口 / 任务栏 | 四角 0 |
+
+### 四、回归防护
+
+- **新增 `test/app-icons.test.mjs`**：不依赖 Pillow，直接解析 PNG 字节校验 ——
+  4 个 PNG 产物必须是 RGBA 且左上角 alpha 为 0；`.ico` 的每个尺寸帧必须是带 alpha 的内嵌 PNG（16px 帧因透明内边距不足一个像素，容差 32）；并守住生成脚本里「全透明画布 + `alpha_composite`」这两处关键写法。
+- **验证过该测试确实能抓到旧产物**：把 v1.16.1 的白底 favicon 放回去，2 条断言立即失败。
+- 真实浏览器端到端脚本（`verify-features.mjs`）第 1 节同步增加透明度断言。
+
+> 注：界面左上角 logo 位于 `.topbar`（`var(--surface)`，浅色主题下是白底），白底图标在那里反而不明显；真正会露白的是**深色表面** —— 任务栏 / Dock / 暗色主题 / 安装程序界面。
+
+---
+
 ## v1.16.1：修正「导入笔记」落点（改为 Markdown 笔记，可新建）+ 根治 Release 正文为空（2026-09-23）
 
 本版只做两件事：改一处导入行为，并把发布流水线上反复出现的「空正文」问题从根上修掉。
