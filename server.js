@@ -186,73 +186,229 @@ function modelHeaders(profile) {
   return headers;
 }
 
-function modelEndpoint(profile, format = null) {
-  const base = catalog.normalizeBaseURL(profile?.baseURL || '');
-  if (!base) throw new Error('当前模型缺少 Base URL，请到 AI 设置中补全');
+// Base URL 只写到域名（漏了 /v1）时，根路径上拿到的往往是网关首页而不是模型接口。
+// 只在「确实没写任何路径」时允许补一次 /v1，避免把用户写好的地址改坏。
+function baseHasPath(base) {
+  try {
+    const u = new URL(base);
+    return u.pathname.replace(/\/+$/, '') !== '';
+  } catch (_) { return true; }
+}
+
+function modelEndpoint(profile, format = null, basePrefix = '') {
+  const raw = catalog.normalizeBaseURL(profile?.baseURL || '');
+  if (!raw) throw new Error('当前模型缺少 Base URL，请到 AI 设置中补全');
   const mode = format || catalog.normalizeApiFormat(profile?.apiFormat);
+  const base = basePrefix && !baseHasPath(raw) ? raw + basePrefix : raw;
   return base + (mode === 'responses' ? '/responses' : '/chat/completions');
 }
 
-function responsesInput(messages) {
-  return (messages || []).map((message) => {
-    const role = message?.role === 'assistant' ? 'assistant' : (message?.role === 'system' ? 'system' : 'user');
-    const raw = message?.content;
-    const content = Array.isArray(raw) ? raw.map((part) => {
-      if (part?.type === 'image_url') return { type: 'input_image', image_url: part.image_url?.url || part.image_url || '' };
-      if (part?.type === 'text' || part?.type === 'input_text') return { type: 'input_text', text: String(part.text || '') };
-      return { type: 'input_text', text: String(part?.text || part || '') };
-    }) : [{ type: 'input_text', text: String(raw || '') }];
-    return { role, content };
-  });
+// ---------- Responses API 入参 ----------
+// ★ 硬约束（2026-09-24 定位）：Responses API 对「哪个角色的 content 用哪种 part」有要求，
+//   历史里的 assistant 消息必须用 output_text（或干脆给纯字符串）；一律写成 input_text
+//   会被上游直接 400：
+//     {"code":"invalid_request","param":"input[1].content[0]",
+//      "message":"Invalid value: 'input_text'. Supported values are: 'output_text' and 'refusal'."}
+//   注意 input[1] 指向的正是「上一轮回答」——所以单轮问答正常、一旦带上历史立刻报错，
+//   这也是「论文阅读里聊到第二轮才失败」的原因。
+//   另外空文本 part 同样算非法参数，所以空内容的消息直接丢弃、不发出去。
+export const RESPONSES_ASSISTANT_TEXT = 'text';           // assistant 用纯字符串（兼容面最广）
+export const RESPONSES_ASSISTANT_OUTPUT_TEXT = 'output_text'; // assistant 用 output_text part
+
+function flipAssistantStyle(style) {
+  return style === RESPONSES_ASSISTANT_TEXT ? RESPONSES_ASSISTANT_OUTPUT_TEXT : RESPONSES_ASSISTANT_TEXT;
 }
 
-function payloadForModel(profile, payload, format, stream) {
+function responsesInput(messages, assistantStyle = RESPONSES_ASSISTANT_TEXT) {
+  const items = [];
+  for (const message of (messages || [])) {
+    if (!message || typeof message !== 'object') continue;
+    const role = message.role === 'assistant' ? 'assistant'
+      : (message.role === 'system' ? 'system' : 'user');
+    const isAssistant = role === 'assistant';
+    const raw = message.content;
+    const parts = [];
+    const pushText = (value) => {
+      const text = String(value ?? '');
+      if (!text) return;
+      parts.push({ type: isAssistant ? 'output_text' : 'input_text', text });
+    };
+    if (Array.isArray(raw)) {
+      for (const part of raw) {
+        if (part == null) continue;
+        if (part.type === 'image_url') {
+          // 图片只会出现在用户消息里；assistant 历史不带图
+          if (isAssistant) continue;
+          const url = String(part.image_url?.url || part.image_url || '');
+          if (url) parts.push({ type: 'input_image', image_url: url });
+          continue;
+        }
+        pushText(typeof part === 'object' ? part.text : part);
+      }
+    } else {
+      pushText(raw);
+    }
+    if (!parts.length) continue; // 空 content 会被上游判为参数非法
+    const text = parts.filter((p) => p.type !== 'input_image').map((p) => p.text).join('');
+    items.push({
+      role,
+      // assistant 给纯字符串最稳：部分网关不接受它的 content 数组里有 input_text
+      content: isAssistant && assistantStyle === RESPONSES_ASSISTANT_TEXT ? text : parts,
+    });
+  }
+  return items;
+}
+
+function payloadForModel(profile, payload, format, stream, assistantStyle = RESPONSES_ASSISTANT_TEXT) {
   const messages = profile?.systemPromptMode === 'user' ? flattenSystemMessages(payload.messages) : payload.messages;
   if (format === 'responses') {
     const { messages: _messages, max_tokens, ...rest } = payload || {};
-    const next = { ...rest, model: payload.model || profile.model, input: responsesInput(messages), stream };
+    const next = {
+      ...rest,
+      model: payload.model || profile.model,
+      input: responsesInput(messages, assistantStyle),
+      stream,
+    };
     if (max_tokens != null) next.max_output_tokens = max_tokens;
+    // gpt-5 系列与 responses 端点都不接受 temperature
     delete next.temperature;
     return next;
   }
   return { ...payload, messages, stream };
 }
 
-function shouldTryResponses(status, detail) {
-  return [404, 405, 415, 422].includes(Number(status)) || /(?:responses|chat\/completions|endpoint|not found|method)/i.test(String(detail || ''));
+// 上游对「assistant 消息的 content part 类型」报错时的特征（见 responsesInput 注释）
+function isResponsesPartError(detail) {
+  const text = String(detail || '');
+  return /Invalid value: ?'(?:input_text|output_text)'/i.test(text)
+    || /supported values are: ?'?output_text/i.test(text);
+}
+
+// 网关把「这个路径不是模型接口」渲染成网页（200 + text/html）是常见做法，
+// 这种响应必须当成「端点不对」处理，不能当成「模型返回空内容」。
+function isHtmlResponse(up) {
+  const contentType = String(up?.headers?.get?.('content-type') || '').toLowerCase();
+  return contentType.includes('text/html') || contentType.includes('application/xhtml');
+}
+
+/**
+ * 是否值得「换一个端点」再试。
+ *
+ * 设计取舍：只在**明显是端点/路径不对**时才换。鉴权失败、限流、参数非法换端点也没用，
+ * 反而会把真正的原因盖掉——此前 auto 模式用一条很宽的正则去判断，导致 chat 端点的真实
+ * 报错被 responses 端点的二次报错顶掉，用户看到的是一句毫不相干的「参数错误」。
+ */
+function shouldTryAlternateEndpoint(status, detail) {
+  const text = String(detail || '');
+  const code = Number(status);
+  if ([404, 405, 415, 501].includes(code)) return true;
+  // 网关明确提示「该模型/该路径要用另一个端点」
+  if (/(?:only|not)\s+support\w*[^.]{0,60}(?:chat\/completions|responses)/i.test(text)) return true;
+  if (/(?:please\s+)?(?:use|try|switch\s+to)[^.]{0,30}(?:chat\/completions|responses)/i.test(text)) return true;
+  if (/(?:endpoint|route|path|url)[^.]{0,40}(?:not\s+found|not\s+exist|unsupported|invalid|incorrect)/i.test(text)) return true;
+  return false;
+}
+
+// Base URL 只写到域名时，按顺序尝试：chat → chat+/v1 → responses → responses+/v1。
+// 先补齐同一个格式的路径（更像「地址写错了」），再考虑换 API 格式，诊断信息才读得懂。
+function buildEndpointAttempts(profile) {
+  const configured = catalog.normalizeApiFormat(profile?.apiFormat);
+  const formats = configured === 'auto' ? ['chat', 'responses'] : [configured];
+  const out = formats.map((format) => ({ format, basePrefix: '', assistantStyle: RESPONSES_ASSISTANT_TEXT }));
+  const base = catalog.normalizeBaseURL(profile?.baseURL || '');
+  if (base && !baseHasPath(base)) {
+    for (const format of formats) {
+      out.push({ format, basePrefix: '/v1', assistantStyle: RESPONSES_ASSISTANT_TEXT });
+    }
+  }
+  return out;
+}
+
+function describeEndpointFailures(failures) {
+  const parts = (failures || []).map((f) => {
+    const path = `${f.basePrefix || ''}/${f.format === 'responses' ? 'responses' : 'chat/completions'}`;
+    // 网页响应最容易让人一头雾水（状态码明明是 200），单独说清楚
+    const status = f.html ? 'HTTP 200 但返回的是网页（Base URL 可能少写了 /v1）'
+      : (f.status ? `HTTP ${f.status}` : '无响应');
+    return `${path} → ${status}${f.detail ? '：' + clip(f.detail, 160) : ''}`;
+  });
+  return `AI 接口调用失败（已尝试 ${parts.length} 个端点）：${parts.join('；')}`;
+}
+
+/**
+ * 生成「调用失败」的提示文本。
+ * 试过多个端点时，把每个端点的原因都列出来——只报最后一个会把真实原因盖掉
+ * （曾经把 chat 端点的失败换成 responses 端点的参数校验错误报给用户，看着毫不相干）。
+ */
+function endpointFailureMessage(up, detail) {
+  const failures = up?._litFailures;
+  if (failures && failures.length > 1) return describeEndpointFailures(failures);
+  return `AI 接口返回 ${up?.status}：${clip(detail, 300)}`;
 }
 
 async function fetchModelCompletion(profile, payload, { stream = false, timeoutMs = LLM_REQUEST_TIMEOUT_MS } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const configured = catalog.normalizeApiFormat(profile?.apiFormat);
-  const formats = configured === 'auto' ? ['chat', 'responses'] : [configured];
-  let lastDetail = '';
-  try {
-    for (let index = 0; index < formats.length; index += 1) {
-      const format = formats[index];
-      let messages = payload.messages;
-      let up = await fetch(modelEndpoint(profile, format), {
-        method: 'POST', headers: modelHeaders(profile), signal: controller.signal,
-        body: JSON.stringify(payloadForModel(profile, payload, format, stream)),
-      });
-      if (!up.ok && profile?.systemPromptMode === 'auto') {
-        const detail = await up.text().catch(() => '');
-        if (isSystemRoleError(detail)) {
-          messages = flattenSystemMessages(payload.messages);
-          up = await fetch(modelEndpoint(profile, format), {
-            method: 'POST', headers: modelHeaders(profile), signal: controller.signal,
-            body: JSON.stringify(payloadForModel(profile, { ...payload, messages }, format, stream)),
-          });
-        } else { up._litErrorText = detail; lastDetail = detail; }
+  const attempts = buildEndpointAttempts(profile);
+  const failures = [];
+
+  // 同一端点内的一次请求（含「服务拒绝 system role」的兜底重发）
+  const send = async (attempt) => {
+    const url = modelEndpoint(profile, attempt.format, attempt.basePrefix);
+    const build = (messages) => JSON.stringify(payloadForModel(
+      profile,
+      messages ? { ...payload, messages } : payload,
+      attempt.format, stream, attempt.assistantStyle,
+    ));
+    let up = await fetch(url, {
+      method: 'POST', headers: modelHeaders(profile), signal: controller.signal, body: build(null),
+    });
+    if (!up.ok && profile?.systemPromptMode === 'auto') {
+      const detail = await up.text().catch(() => '');
+      if (isSystemRoleError(detail)) {
+        up = await fetch(url, {
+          method: 'POST', headers: modelHeaders(profile), signal: controller.signal,
+          body: build(flattenSystemMessages(payload.messages)),
+        });
+      } else {
+        up._litErrorText = detail;
       }
-      if (up.ok || index === formats.length - 1 || !shouldTryResponses(up.status, up._litErrorText)) {
-        up._litFormat = format;
-        return { up, cancel: () => clearTimeout(timer) };
-      }
-      lastDetail = up._litErrorText || await up.text().catch(() => '');
     }
-    throw new Error('AI 接口不可用：' + lastDetail.slice(0, 300));
+    up._litFormat = attempt.format;
+    return up;
+  };
+
+  try {
+    let last = null;
+    for (let index = 0; index < attempts.length; index += 1) {
+      const attempt = attempts[index];
+      const up = await send(attempt);
+      // 正常响应：只有 content-type 不是网页，才认定「这个端点是对的」
+      if (up.ok && !isHtmlResponse(up)) return { up, cancel: () => clearTimeout(timer) };
+
+      const detail = up._litErrorText || await up.text().catch(() => '');
+      const html = isHtmlResponse(up);
+      up._litErrorText = detail;   // 上层还要用这段文本，避免二次读取
+      failures.push({ ...attempt, status: up.status, detail, html });
+      last = up;
+
+      // ① 上游不接受这种 content part 写法：换另一种 assistant 风格再试一次
+      const triedBothStyles = attempts.some((a) => a.format === 'responses'
+        && a.assistantStyle !== attempt.assistantStyle);
+      if (attempt.format === 'responses' && isResponsesPartError(detail) && !triedBothStyles) {
+        attempts.splice(index + 1, 0, { ...attempt, assistantStyle: flipAssistantStyle(attempt.assistantStyle) });
+        continue;
+      }
+      // ② 只有「端点不对」（含网关首页那种网页响应）才继续换；
+      //    其它错误立刻停手并保留真实原因，避免被下一个端点的报错顶掉。
+      if (html || shouldTryAlternateEndpoint(up.status, detail)) continue;
+      break;
+    }
+    if (!last) throw new Error('当前模型没有可用的接口地址，请到 AI 设置中检查 Base URL');
+    // 不在这里抛错：上层（streamModelResponse）还有「流式失败退非流式」等兜底要做。
+    // 把各端点的失败明细挂在响应上，等上层真要报错时再一次性说清楚。
+    last._litFailures = failures.slice();
+    return { up: last, cancel: () => clearTimeout(timer) };
   } catch (e) {
     clearTimeout(timer);
     if (e?.name === 'AbortError') throw new Error('AI 请求超时（' + Math.round(timeoutMs / 1000) + ' 秒）。请确认本地模型服务已启动、模型已加载，或检查网关地址');
@@ -335,12 +491,12 @@ async function streamModelResponse(profile, payload, res, { onDelta } = {}) {
         request.cancel();
         request = await fetchModelCompletion(profile, payload, { stream: false });
       } else {
-        throw new Error(`AI 接口返回 ${request.up.status}：${clip(detail, 300)}`);
+        throw new Error(endpointFailureMessage(request.up, detail));
       }
     }
     if (!request.up.ok) {
       const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
-      throw new Error(`AI 接口返回 ${request.up.status}：${clip(detail, 300)}`);
+      throw new Error(endpointFailureMessage(request.up, detail));
     }
     let result = await pipeLLMStream(request.up, res, { onDelta });
     // 非标准网关常在 stream=true 下直接断开或没有 token；auto 退回普通 JSON，前端仍能收到内容。

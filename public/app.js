@@ -4552,8 +4552,9 @@
     delete holder.streaming;
     delete holder.stage;
     if (!holder.content) {
+      // 后端返回的错误文本常已带「请求失败：」前缀，别重复叠成「请求失败：请求失败：」
       holder.content = holder.error
-        ? '请求失败：' + holder.error
+        ? (/^请求失败/.test(holder.error) ? holder.error : '请求失败：' + holder.error)
         : (r.aborted ? '（已停止生成）' : '（AI 没有返回内容，请重试）');
       if (!r.aborted && !holder.error) holder.error = 'AI 没有返回内容，请重试';
     } else if (r.error) {
@@ -7734,7 +7735,8 @@
     delete holder.pending;
     if (errMsg || !full) {
       holder.error = errMsg || '模型没有返回内容，请稍后重试';
-      holder.content = `请求失败：${holder.error}`;
+      // 后端错误文本通常已带「请求失败：」前缀，别重复叠加
+      holder.content = /^请求失败/.test(holder.error) ? holder.error : `请求失败：${holder.error}`;
     } else {
       holder.content = full;
       delete holder.retryContent;

@@ -1,3 +1,44 @@
+## v1.16.5：修「论文对话第二轮起报 400」（Responses 入参角色感知 + 端点失败原因不再被顶掉）（2026-09-24）
+
+### 一、根因：assistant 消息被写成了 `input_text`
+
+- 走 Responses API 的模型要求 assistant 只能用 **`output_text`**（或纯字符串）；旧代码对所有角色一律用 `input_text`。
+- 于是**上一轮的回答**成为非法入参 → 报错 `param: input[1].content[0]`，症状固定是「第一轮通、第二轮挂」。
+- 旧代码在端点之间重试时用宽正则换端点，**把第一个端点的真实报错丢掉**，用户看到的是第二个端点的参数校验错误。
+
+### 二、改动（`server.js`）
+
+1. **`responsesInput()` 角色感知**：
+   - assistant → 优先 `output_text` 片段，或**纯字符串**（兼容面最广）；
+   - user / system → `input_text`；
+   - 用 `assistantStyle`（`RESPONSES_ASSISTANT_TEXT` / `RESPONSES_ASSISTANT_OUTPUT_TEXT`）表达两种写法；
+   - 上游若报「不支持该 content part」（`isResponsesPartError`），自动 `flipAssistantStyle` **换另一种写法重试一次**。
+2. **端点尝试与失败汇总重写**：
+   - `buildEndpointAttempts()` 按 `apiFormat`（auto 时 chat→responses）+ Base URL 前缀组合出候选端点；
+   - `fetchModelCompletion()` 逐个尝试，**每个端点的失败都进 `failures`**；
+   - `describeEndpointFailures()` 汇总输出：`路径 → HTTP 状态：明细`，一条不丢；
+   - 只有「端点不对」（含网关首页那种 **HTML 响应**）才继续换端点，其它错误立刻停手保留真实原因；
+   - `isHtmlResponse()` 识别「状态码 200 但返回的是网页」→ 提示 Base URL 可能少写 `/v1`。
+3. **Base URL 归一化**：`catalog.normalizeBaseURL()` 配合端点前缀推导，覆盖「少写 /v1 返回网关首页」的情况。
+4. **空内容消息丢弃**：`content` 为空字符串 / 空数组的历史消息不再进入 `input`。
+5. **失败兜底不破坏流式回退**：失败明细挂到 `up._litErrorText`，由上层决定「流式失败→非流式」「每端点原因汇总」，不再改变既有回退语义。
+
+### 三、改动（`public/app.js`）
+
+- 论文对话与主 AI 助手两处错误文案：去掉重复的 `请求失败：` 前缀（前端与后端各加过一次）。
+
+### 四、测试
+
+- 新增 `test/responses-api-compat.test.mjs`（6 条）：mock 上游，覆盖
+  「assistant 必须是 output_text / 纯字符串」「不支持的 part 自动换写法」「Base URL 少 /v1 时识别网页响应并重试」
+  「空内容消息被丢弃」「多端点失败原因全部列出」。
+- 单元测试 **189/189**；变异验证：回退成旧写法 → 恰好 3 条失败，报错即 `input[1].content[0]`。
+- 真机对照（本机真实 8 条配置 + 2 条显式 `/responses`）：**改前 5/10 失败 → 改后 10/10 成功**
+  （脚本 `C:\Users\zjy1998\.workbuddy\zotero-lit-e2e\verify-paper-chat-400.mjs`）。
+- 浏览器功能回归 **75/75**。
+
+---
+
 ## v1.16.4：修思维导图滚轮缩放方向 + 修「复制译文粘贴成一坨 JSON」（2026-09-23）
 
 ### 一、Ctrl + 滚轮：下滑缩小、上滑放大
