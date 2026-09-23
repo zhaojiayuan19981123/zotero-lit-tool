@@ -624,6 +624,17 @@ export function createApp({
       }
     });
   }
+  // 页面弹过「发现新版本」卡片后回执，主进程据此把该版本记为「已提醒」，
+  // 保证同一个版本只弹一次（下一个新版本才会再弹）。
+  app.post('/api/update/prompt-ack', async (req, res) => {
+    try {
+      if (!updateService?.ackPrompt) return res.status(409).json({ error: browserUpdateStatus.error });
+      const version = typeof req.body?.version === 'string' ? req.body.version : '';
+      res.json(await updateService.ackPrompt(version));
+    } catch (e) {
+      res.status(409).json({ error: e.message || '记录更新提醒状态失败' });
+    }
+  });
 
   const storage = multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, currentUploadDir),

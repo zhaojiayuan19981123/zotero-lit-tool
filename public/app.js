@@ -133,6 +133,11 @@
   let updateStatus = null;
   let updatePollTimer = null;
   let updateActionBusy = false;
+  // 新版本提醒卡片：本进程内已弹过的版本 + 首屏缓冲
+  let updateNotifyVersion = '';
+  let updateNotifyShownFor = '';
+  let updateNotifyGate = false;
+  let updateNotifyTimer = null;
 
   const $ = (id) => document.getElementById(id);
   const el = {
@@ -8604,11 +8609,66 @@ a { color: #176b87; }
     try {
       const status = await api('/api/update/status');
       renderUpdateStatus(status);
+      maybeShowUpdateNotify(status);
       return status;
     } catch (e) {
       if (!silent) toast('读取更新状态失败：' + e.message, 'error');
       return null;
     }
+  }
+
+  // ---------- 新版本提醒卡片 ----------
+  // 弹出与否由主进程决定（status.pendingPrompt），页面只负责「弹一次 + 回执」：
+  //   · 主进程在窗口前台时把 pendingPrompt 置位并主动叫醒页面；
+  //   · 页面弹出后无论「查看更新」还是「以后再说」都回执 ackPrompt，主进程把版本号落盘；
+  //   · 因此同一个版本只会弹一次，下一个新版本才会再弹。
+  function showUpdateNotify(version, status) {
+    if (updateNotifyShownFor === version) return;
+    updateNotifyShownFor = version;
+    updateNotifyVersion = version;
+    $('updateNotifyVersion').textContent = `v${version}`;
+    const name = String(status?.releaseName || '').trim();
+    $('updateNotifyText').textContent = name && name !== `v${version}`
+      ? `${name} 已发布，可查看更新内容并升级。`
+      : '一站式科研终端（经管版）有新版本可用，建议升级。';
+    $('updateNotify').classList.remove('hidden');
+  }
+
+  function maybeShowUpdateNotify(status) {
+    if (!status || !status.supported) return;
+    if (status.phase !== 'available' || !status.availableVersion) return;
+    if (!status.pendingPrompt) return; // 已提醒过该版本，或由系统通知负责
+    if (updateNotifyShownFor === status.availableVersion) return;
+    // 首屏先让位给页面渲染与新手引导，2.5s 后再浮出
+    if (!updateNotifyGate) {
+      updateNotifyGate = true;
+      updateNotifyTimer = setTimeout(() => showUpdateNotify(status.availableVersion, status), 2500);
+      return;
+    }
+    showUpdateNotify(status.availableVersion, status);
+  }
+
+  async function ackUpdatePrompt(version) {
+    const v = version || updateNotifyVersion;
+    if (!v) return;
+    try {
+      renderUpdateStatus(await api('/api/update/prompt-ack', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version: v }),
+      }));
+    } catch (_) { /* 回执失败只影响「下次不再弹」的判定，不影响使用 */ }
+  }
+
+  function closeUpdateNotify(openModal = false) {
+    $('updateNotify').classList.add('hidden');
+    ackUpdatePrompt(updateNotifyVersion);
+    if (openModal) openUpdateModal();
+  }
+
+  async function openUpdateModal() {
+    $('updateModal').classList.remove('hidden');
+    await loadUpdateStatus();
+    if (['checking', 'downloading'].includes(updateStatus?.phase)) beginUpdatePolling();
   }
 
   function beginUpdatePolling() {
@@ -8645,17 +8705,20 @@ a { color: #176b87; }
   }
 
   function bindUpdater() {
-    const open = async () => {
-      $('updateModal').classList.remove('hidden');
-      await loadUpdateStatus();
-      if (['checking', 'downloading'].includes(updateStatus?.phase)) beginUpdatePolling();
-    };
     const close = () => $('updateModal').classList.add('hidden');
-    $('btnCheckUpdate').addEventListener('click', open);
+    $('btnCheckUpdate').addEventListener('click', openUpdateModal);
     $('btnUpdateClose').addEventListener('click', close);
     $('btnUpdateCancel').addEventListener('click', close);
     $('updateModal').querySelector('.modal-mask').addEventListener('click', close);
     $('btnUpdateAction').addEventListener('click', runUpdateAction);
+    // 新版本提醒卡片：三个入口（查看更新 / 以后再说 / ×）都算「已提醒」，一律回执一次
+    $('updateNotify').addEventListener('click', (e) => {
+      const action = e.target.closest('[data-update-notify]')?.dataset.updateNotify;
+      if (action) closeUpdateNotify(action === 'open');
+    });
+    // 主进程发现新版本后会直接调用这个钩子，让页面立刻刷新状态，
+    // 不必等下一次轮询（本地 HTTP，无跨进程通道也可实现「推送」效果）。
+    window.__updateStatusTick = () => loadUpdateStatus(true);
     loadUpdateStatus(true);
   }
 

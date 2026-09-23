@@ -725,6 +725,27 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .update-caution { margin: 0; padding-top: 10px; border-top: 1px solid var(--border-soft); color: var(--text-3); font-size: 11.5px; line-height: 1.6; }
 .modal-foot > a.btn { text-decoration: none; }
 
+/* 新版本提醒卡片（右上角浮出，同一版本只弹一次） */
+.update-notify {
+  position: fixed; top: 68px; right: 20px; z-index: 90; width: 330px; max-width: calc(100vw - 32px);
+  padding: 13px 14px 12px 15px; background: var(--surface); border: 1px solid var(--border);
+  border-left: 4px solid var(--primary); border-radius: 10px; box-shadow: var(--shadow-lg);
+  animation: updateNotifyIn .22s ease;
+}
+.update-notify.hidden { display: none; }
+@keyframes updateNotifyIn { from { opacity: 0; transform: translateY(-10px) scale(.98); } to { opacity: 1; transform: none; } }
+.update-notify-head { display: flex; align-items: center; gap: 8px; }
+.update-notify-icon { font-size: 17px; line-height: 1; }
+.update-notify-title { margin: 0; flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700; color: var(--text); }
+.update-notify-title b { color: var(--primary); }
+.update-notify-close {
+  flex: none; width: 22px; height: 22px; padding: 0; border: none; border-radius: 5px; background: none;
+  color: var(--text-3); font-size: 15px; line-height: 1; cursor: pointer;
+}
+.update-notify-close:hover { background: var(--gray-soft); color: var(--text); }
+.update-notify-text { margin: 7px 0 11px; color: var(--text-2); font-size: 12px; line-height: 1.6; }
+.update-notify-actions { display: flex; gap: 8px; }
+
 /* 行高模式（4 档：紧凑 / 标准 / 宽松 / 特大），缩略图随行高同步缩放 */
 .grid-wrap.rh-s { --rh-lines: 1; }
 .grid-wrap.rh-m { --rh-lines: 3; }

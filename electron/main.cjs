@@ -1,6 +1,7 @@
 // electron/main.cjs —— Electron 主进程：启动内嵌 Express 后端 + 桌面窗口
 const { app, BrowserWindow, shell, Notification, dialog } = require('electron');
 const { autoUpdater } = require('electron-updater');
+const { shouldPrompt, PROMPT_SKIP, PROMPT_IN_APP } = require('./update-prompt.cjs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const fs = require('fs');
@@ -60,8 +61,21 @@ const updateState = {
   total: 0,
   bytesPerSecond: 0,
   error: '',
+  // ---- 更新提醒（「同一版本只提醒一次」的闸门）----
+  // promptedVersion：已经向用户提醒过的版本号，持久化在 userData/app-config.json。
+  //   为什么不放 localStorage：后端端口是随机分配的（port: 0），页面 origin 每次启动
+  //   都会变，localStorage 实际留不住；放主进程侧最可靠，也不会污染用户数据目录。
+  promptedVersion: '',
+  // pendingPrompt：提醒应该由「页面内卡片」呈现（窗口可见时走这条路），
+  // 页面取到后弹一次并回执 ackPrompt，随即落盘。
+  pendingPrompt: false,
 };
 let updaterReady = false;
+
+// 后台自动检查：启动后延迟一小会儿查一次（不打扰首屏加载），之后每 6 小时查一次。
+// 只在安装后的 Windows 桌面版有意义。
+const UPDATE_AUTO_CHECK_DELAY_MS = 4 * 1000;
+const UPDATE_AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 function normalizeReleaseNotes(notes) {
   if (Array.isArray(notes)) {
@@ -74,6 +88,103 @@ function updaterSnapshot() {
   return { ...updateState };
 }
 
+// ---------- 新版本提醒 ----------
+// 规则：**同一个版本只提醒一次**，提醒过就把版本号写进 app-config.json，
+// 之后无论重启多少次、查多少次都不会再弹。出现更新的版本号时才重新提醒。
+function readPromptedVersion() {
+  const value = readAppConfig().updatePromptedVersion;
+  return typeof value === 'string' ? value : '';
+}
+
+function markPrompted(version) {
+  const v = String(version || '');
+  if (!v) return;
+  updateState.promptedVersion = v;
+  updateState.pendingPrompt = false;
+  writeAppConfig({ updatePromptedVersion: v });
+}
+
+// 页面是否「正睁着眼」：可见且未最小化时，用页面内卡片提醒（能直接看更新说明），
+// 只有在后台（最小化 / 隐藏）时才发系统通知 —— 避免同一件事被提醒两遍。
+function pageIsVisible() {
+  try {
+    return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized());
+  } catch (_) {
+    return false;
+  }
+}
+
+// 把「有新版本」这件事推给页面：让页面立刻刷新一次更新状态。页面暴露了
+// window.__updateStatusTick（见 public/app.js），主进程直接调用即可，无需 IPC 通道。
+function pokeRenderer() {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents
+        .executeJavaScript('window.__updateStatusTick && window.__updateStatusTick();', true)
+        .catch(() => { /* 页面还没加载完就算了，页面启动时自己会查一次 */ });
+    }
+  } catch (_) { /* ignore */ }
+}
+
+function showUpdateNotification(info) {
+  const version = String(info?.version || updateState.availableVersion || '');
+  try {
+    if (!Notification.isSupported()) return false;
+    const notification = new Notification({
+      title: version ? `发现新版本 v${version}` : '发现新版本',
+      body: '一站式科研终端（经管版）有新版本可用，点击查看更新内容。',
+      icon: path.join(__dirname, 'icon.png'),
+    });
+    notification.on('click', () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    });
+    notification.show();
+    return true;
+  } catch (e) {
+    console.warn('[更新] 发送系统通知失败：', e.message);
+    return false;
+  }
+}
+
+// 发现新版本时决定「怎么提醒、要不要提醒」。只在没提醒过这个版本时动作。
+// 判定表在 update-prompt.cjs 里（纯函数，有单测），这里只执行副作用。
+function deliverUpdatePrompt(info) {
+  const version = String(info?.version || updateState.availableVersion || '');
+  const decision = shouldPrompt({
+    version,
+    promptedVersion: updateState.promptedVersion,
+    pageVisible: pageIsVisible(),
+  });
+  if (decision === PROMPT_SKIP) return;
+  if (decision === PROMPT_IN_APP) {
+    // 窗口在前台：弹页面内卡片，用户看完关闭时回执 —— 回执才是真正的「已提醒」
+    updateState.pendingPrompt = true;
+    pokeRenderer();
+    return;
+  }
+  // 窗口在后台：立刻发系统通知，并记为已提醒（否则回到前台还会再弹一次）
+  if (showUpdateNotification(info)) markPrompted(version);
+}
+
+// 后台静默检查：失败不打扰用户，也不把状态留成 error 影响页面显示。
+async function runAutoUpdateCheck() {
+  if (!updateSupported) return;
+  try {
+    await updateService.check();
+  } catch (_) { /* 离线 / 代理不通等，静默忽略 */ }
+  if (updateState.phase === 'error') Object.assign(updateState, { phase: 'idle', error: '' });
+}
+
+function scheduleAutoUpdateChecks() {
+  if (!updateSupported) return;
+  setTimeout(() => { runAutoUpdateCheck(); }, UPDATE_AUTO_CHECK_DELAY_MS);
+  const timer = setInterval(() => { runAutoUpdateCheck(); }, UPDATE_AUTO_CHECK_INTERVAL_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+}
+
 function setupUpdater() {
   if (updaterReady) return;
   updaterReady = true;
@@ -83,6 +194,8 @@ function setupUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.allowPrerelease = false;
+  // 上次已经提醒过的版本号（跨启动保留），决定这次还要不要弹
+  updateState.promptedVersion = readPromptedVersion();
   autoUpdater.on('checking-for-update', () => {
     Object.assign(updateState, { phase: 'checking', error: '', percent: 0 });
   });
@@ -94,6 +207,7 @@ function setupUpdater() {
       releaseNotes: normalizeReleaseNotes(info?.releaseNotes),
       error: '',
     });
+    deliverUpdatePrompt(info);
   });
   autoUpdater.on('update-not-available', () => {
     Object.assign(updateState, {
@@ -117,6 +231,7 @@ function setupUpdater() {
       percent: 100,
       error: '',
     });
+    pokeRenderer(); // 让导航里的「待安装」立刻显示，不必等页面下次轮询
   });
   autoUpdater.on('error', (error) => {
     Object.assign(updateState, {
@@ -149,6 +264,14 @@ const updateService = {
     if (!updateSupported) throw new Error('自动更新仅在安装后的 Windows 桌面版中可用');
     if (updateState.phase !== 'downloaded') throw new Error('更新尚未下载完成');
     setTimeout(() => autoUpdater.quitAndInstall(false, true), 500);
+    return updaterSnapshot();
+  },
+  // 页面弹过「发现新版本」卡片（用户点了「查看更新」或「以后再说」）后的回执。
+  // 记下版本号即视为已提醒 —— 同一个版本之后不再弹，换新版本才会再弹一次。
+  ackPrompt(version) {
+    const v = String(version || updateState.availableVersion || '');
+    if (!v) return updaterSnapshot();
+    markPrompted(v);
     return updaterSnapshot();
   },
 };
@@ -428,6 +551,9 @@ app.whenReady().then(async () => {
     return;
   }
   createWindow();
+  // 窗口建好后再启动后台检查：启动时查一次，之后每 6 小时查一次，
+  // 发现新版本时按「窗口是否在前台」决定弹页面卡片还是发系统通知。
+  scheduleAutoUpdateChecks();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

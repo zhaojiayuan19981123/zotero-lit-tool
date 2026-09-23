@@ -1,3 +1,49 @@
+## v1.16.3：更新消息推送（后台自动检查 + 发现新版本时提醒，同一版本只弹一次）（2026-09-23）
+
+本版新增：应用在后台定期检查 GitHub 上的新版本，发现更新后主动提醒，且**同一个版本只提醒一次**。
+
+### 一、提醒的触发与方式
+
+- **启动后 4 秒**查一次，之后**每 6 小时**查一次（`electron/main.cjs` 的 `scheduleAutoUpdateChecks` / `runAutoUpdateCheck`），全程静默，失败不打扰用户；
+  后台检查失败时会把 `phase` 复位为 `idle`，避免用户在弹窗里看到一条来路不明的「检查失败」。
+- 发现新版本时，按窗口状态**二选一**提醒，不会两种一起弹：
+  - 窗口可见且未最小化 → 置 `pendingPrompt` 并**主动叫醒页面**，右上角浮出提醒卡片；
+  - 窗口在后台 → 发**系统通知**（点击把窗口叫到前台），并立即记为已提醒。
+
+### 二、为什么「只弹一次」放在主进程
+
+- 判定抽成纯函数 `electron/update-prompt.cjs`：`shouldPrompt({ version, promptedVersion, pageVisible })` → `skip | in-app | system`。抽出来的目的就是**能单测**（判定表见 `test/update-notification.test.mjs`）。
+- 「已提醒版本」持久化在 `userData/app-config.json` 的 `updatePromptedVersion`：
+  **不用 `localStorage`** —— 后端端口是随机分配的（`startServer({ port: 0 })`），页面 origin 每次启动都变，`localStorage` 实际留不住；放主进程侧也不会污染用户数据目录与备份。
+- 提醒过才算数：前台走「页面弹卡片 → 用户关闭 → `POST /api/update/prompt-ack` → `markPrompted()` 落盘」，保证**真的弹到了**才记账；后台走系统通知，发出即记账。
+
+### 三、页面侧
+
+- `public/index.html` 新增 `#updateNotify` 卡片（右上角，`z-index: 90`，低于弹窗 100）：显示新版本号 + 「查看更新」/「以后再说」/「×」。
+- `public/app.js`：
+  - `maybeShowUpdateNotify(status)` 的三重闸门：必须 `status.supported`、`phase === 'available'` 且**主进程置位 `pendingPrompt`**、并且本次运行没弹过该版本；
+  - 首屏让位 2.5s 再浮出，避免和新手引导、首屏渲染抢注意力；
+  - `closeUpdateNotify(openModal)`：三条关闭路径都回执一次；点「查看更新」额外打开原更新弹窗（含 Release 正文与「下载更新」）；
+  - 暴露 `window.__updateStatusTick()`：主进程发现新版本后直接调用它让页面刷新状态，无需刷新页面 —— 没有 preload/IPC 通道也能做到「推送」。
+
+### 四、服务端
+
+`server.js` 新增 `POST /api/update/prompt-ack`：只接受字符串版本号（其余收敛为空串），转交 `updateService.ackPrompt(version)`；浏览器模式下返回 409（与其它 `/api/update/*` 动作一致）。
+
+### 五、测试
+
+- 单元测试 **171 项全绿**（新增 14 项）：
+  - 判定表 4 项（同版本不重复弹、更高版本再弹一次、版本号缺失不提醒、前台/后台分流）；
+  - 回执接口 2 项（带版本号转发、浏览器模式 409、非法类型收敛为空串）；
+  - 接线断言 8 项（后台定时、落盘键名、系统通知与 `focus()`、叫醒钩子、卡片存在与层级、页面三重闸门）。
+- **变异验证**：拆掉判定函数里的同版本闸门 → 2 条失败；拆掉页面侧 `pendingPrompt` 判断 → 1 条失败；拆掉主进程的 `scheduleAutoUpdateChecks()` → 1 条失败。恢复后 171/171。
+- 真实浏览器端到端 **22 项断言全绿**（`~/.workbuddy/zotero-lit-e2e/verify-update-notify.mjs`）：用代理扮演主进程（返回真实字段、记录回执），验证首次弹出、查看更新、重开不再弹、运行中被叫醒即弹、出现 v1.16.4 再弹、无更新不弹，全程无 JS 报错。
+
+### 六、边界
+
+- 仅安装后的 Windows 桌面版具备自动更新与提醒（`updateSupported = app.isPackaged && process.platform === 'win32'`）；macOS 自动更新需 Apple 签名，仍走手动下载 DMG。
+- 浏览器开发模式下 `/api/update/status` 返回 `supported:false`，页面不弹卡片。
+
 ## v1.16.2：应用图标背景改为透明（修掉深色任务栏上的白方块）（2026-09-23）
 
 本版只修一处：图标的背景本来是**不透明白**，在深色表面上（Windows 任务栏 / 开始菜单 / 桌面快捷方式、macOS Dock、安装程序界面）会显出一块白方块。

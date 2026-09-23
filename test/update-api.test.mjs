@@ -90,3 +90,44 @@ test('update action failures are returned as conflict responses', async () => {
     assert.deepEqual(await response.json(), { error: 'GitHub 暂时不可用' });
   });
 });
+
+test('prompt acknowledgement is forwarded to the update service with the version', async () => {
+  const acked = [];
+  const snapshot = { supported: true, currentVersion: '1.16.2', phase: 'available', availableVersion: '1.16.3' };
+  const updateService = {
+    getStatus: () => snapshot,
+    ackPrompt: async (version) => {
+      acked.push(version);
+      return { ...snapshot, promptedVersion: version, pendingPrompt: false };
+    },
+  };
+
+  await withServer(updateService, async (baseUrl) => {
+    const post = (body) => fetch(`${baseUrl}/api/update/prompt-ack`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+
+    const ok = await post({ version: '1.16.3' });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), {
+      ...snapshot, promptedVersion: '1.16.3', pendingPrompt: false,
+    });
+
+    // 不带版本号：交给主进程用「当前可用版本」兜底
+    assert.equal((await post({})).status, 200);
+    // 版本号类型不对：必须被收敛成空串，不能把对象透传进主进程
+    assert.equal((await post({ version: { evil: true } })).status, 200);
+  });
+
+  assert.deepEqual(acked, ['1.16.3', '', '']);
+});
+
+test('prompt acknowledgement is rejected in browser mode', async () => {
+  await withServer(null, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/update/prompt-ack`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: '1.16.3' }),
+    });
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).error, /桌面版/);
+  });
+});

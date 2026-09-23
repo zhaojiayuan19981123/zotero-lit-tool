@@ -1166,6 +1166,20 @@
     </div>
   </div>
 
+  <!-- 新版本提醒卡片：由主进程的 pendingPrompt 驱动，同一版本只弹一次 -->
+  <aside id="updateNotify" class="update-notify hidden" role="status" aria-live="polite">
+    <div class="update-notify-head">
+      <span class="update-notify-icon">🎉</span>
+      <p class="update-notify-title">发现新版本 <b id="updateNotifyVersion">--</b></p>
+      <button class="update-notify-close" id="btnUpdateNotifyClose" data-update-notify="dismiss" title="关闭">×</button>
+    </div>
+    <p class="update-notify-text" id="updateNotifyText">一站式科研终端（经管版）有新版本可用，建议升级。</p>
+    <div class="update-notify-actions">
+      <button class="btn btn-primary btn-sm" id="btnUpdateNotifyOpen" data-update-notify="open">查看更新</button>
+      <button class="btn btn-sm" id="btnUpdateNotifyLater" data-update-notify="dismiss">以后再说</button>
+    </div>
+  </aside>
+
   <!-- 编辑弹窗 -->
   <div id="editModal" class="modal hidden">
     <div class="modal-mask"></div>
