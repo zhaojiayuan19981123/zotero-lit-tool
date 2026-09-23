@@ -595,6 +595,48 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .modal-body { padding: 20px; overflow-y: auto; }
 .modal-desc { font-size: 13px; color: var(--text-2); margin: 0 0 16px; background: var(--primary-soft); padding: 10px 12px; border-radius: 8px; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--border); }
+
+/* ---------- 导出 DOI 弹窗 ---------- */
+.doi-modal { width: 460px; max-width: 94vw; }
+.doi-modal-sub { margin: 0 0 14px; font-size: 13px; color: var(--text-2); }
+.doi-modal-options { display: flex; flex-direction: column; gap: 8px; }
+.doi-opt {
+  display: flex; flex-direction: column; gap: 3px; text-align: left; cursor: pointer;
+  padding: 11px 13px; border-radius: 9px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-1); font: inherit;
+  transition: border-color .15s, background .15s;
+}
+.doi-opt:hover, .doi-opt:focus { border-color: var(--accent); background: var(--accent-soft, rgba(43,127,212,.06)); outline: none; }
+.doi-opt b { font-size: 13px; font-weight: 700; }
+.doi-opt span { font-size: 11.5px; color: var(--text-3); line-height: 1.5; }
+.doi-modal-note { margin: 12px 0 0; font-size: 11.5px; color: var(--text-3); }
+
+/* ---------- AI 回答 → 导入笔记 ---------- */
+.pr-msg-actions { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.pr-msg-act {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 9px; border-radius: 6px; cursor: pointer;
+  font-size: 11.5px; line-height: 1.5;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  transition: border-color .15s, color .15s, background .15s;
+}
+.pr-msg-act:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft, rgba(43,127,212,.06)); }
+.chat-bubble-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+/* 选择导入目标文献 */
+.note-pick-modal { width: 520px; max-width: 94vw; }
+.note-pick-search { width: 100%; margin-bottom: 10px; }
+.note-pick-list { max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; }
+.note-pick-item {
+  display: flex; flex-direction: column; gap: 2px; text-align: left; cursor: pointer;
+  padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border-soft);
+  background: var(--surface); color: var(--text-1); font: inherit;
+  transition: border-color .15s, background .15s;
+}
+.note-pick-item:hover { border-color: var(--accent); background: var(--accent-soft, rgba(43,127,212,.06)); }
+.note-pick-item b { font-size: 12.5px; font-weight: 600; line-height: 1.4; }
+.note-pick-item span { font-size: 11px; color: var(--text-3); }
+.note-pick-empty { padding: 18px; text-align: center; font-size: 12px; color: var(--text-3); }
 .field { display: block; margin-bottom: 14px; }
 .field > span { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--text-2); }
 .field-sep { height: 1px; background: var(--border); margin: 16px 0; }
@@ -1878,6 +1920,25 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .mail-body { flex: 1; min-height: 0; display: flex; }
 .mail-frame { flex: 1; width: 100%; border: 0; background: #fff; }
 .mail-text { flex: 1; margin: 0; padding: 14px 16px; overflow: auto; font-size: 13px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; font-family: inherit; color: var(--text); }
+
+/* ---------- 邮件一键翻译 ---------- */
+.mail-trans {
+  flex-shrink: 0; max-height: 42%; overflow-y: auto;
+  margin: 10px 14px 0; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--panel-soft);
+}
+.mail-trans-head {
+  display: flex; align-items: center; gap: 8px; position: sticky; top: 0; z-index: 1;
+  padding: 8px 12px; border-bottom: 1px solid var(--border-soft);
+  background: var(--panel-soft);
+}
+.mail-trans-head b { font-size: 12.5px; color: var(--text-1); }
+.mail-trans-head .tb-btn { padding: 2px 8px; font-size: 11.5px; }
+.mail-trans-head .tb-btn:last-child { margin-left: auto; }
+.mail-trans-body { padding: 10px 12px; font-size: 13px; line-height: 1.75; color: var(--text-1); }
+.mail-trans-body .md { font-size: 13px; }
+.mail-trans-err { color: var(--red); font-size: 12.5px; }
+.mail-trans-note { padding: 0 12px 9px; font-size: 11px; color: var(--text-3); }
 .tb-btn.danger { color: var(--red); }
 .tb-btn.danger:hover { background: var(--red-soft); color: var(--red); }
 
@@ -2350,17 +2411,159 @@ body.pn-resizing * { cursor: col-resize !important; }
 .pn-md-preview img, #pnMdContent img { max-width: 100%; border-radius: 6px; cursor: zoom-in; display: block; margin: 8px 0; }
 
 /* ---------- 右栏：思维导图视图 ---------- */
-.pn-note-mind { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+.pn-note-mind { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; position: relative; }
 .pn-mind-bar {
   display: flex; align-items: center; gap: 5px; flex-shrink: 0; flex-wrap: wrap;
   padding: 7px 10px; border-bottom: 1px solid var(--border-soft); background: var(--panel-soft);
 }
 .pn-mind-sep { width: 1px; height: 16px; background: var(--border); margin: 0 2px; }
+.pn-mind-spacer { flex: 1; min-width: 4px; }
 .pn-mind-host { flex: 1; min-height: 0; position: relative; overflow: hidden; background: var(--surface); }
+
+/* ---------- 样式面板（对标 XMind 右侧样式栏） ---------- */
+.pn-mind-style {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 288px; max-width: 82%;
+  display: flex; flex-direction: column; z-index: 30;
+  background: var(--surface); border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(15, 23, 42, .10);
+}
+.pn-mind-style.hidden { display: none; }
+.pn-ms-head {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  padding: 10px 12px; border-bottom: 1px solid var(--border-soft);
+}
+.pn-ms-title { font-size: 13px; font-weight: 700; color: var(--text-1); }
+.pn-ms-close {
+  margin-left: auto; width: 22px; height: 22px; border-radius: 5px; border: none;
+  background: transparent; color: var(--text-3); cursor: pointer; font-size: 12px; line-height: 1;
+}
+.pn-ms-close:hover { background: var(--panel-soft); color: var(--text-1); }
+.pn-ms-body { flex: 1; overflow-y: auto; padding: 4px 12px 16px; }
+.pn-ms-group { padding: 11px 0; border-bottom: 1px dashed var(--border-soft); }
+.pn-ms-group:last-child { border-bottom: none; }
+.pn-ms-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-2); margin-bottom: 8px; font-weight: 600;
+}
+.pn-ms-add {
+  margin-left: auto; width: 20px; height: 20px; border-radius: 5px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  cursor: pointer; font-size: 12px; line-height: 1;
+}
+.pn-ms-add:hover { border-color: var(--accent); color: var(--accent); }
+.pn-ms-select {
+  width: 100%; padding: 6px 8px; border-radius: 6px; font-size: 12px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-1);
+}
+.pn-ms-select:focus { outline: none; border-color: var(--accent); }
+
+/* 结构：小图标网格 */
+.pn-ms-layouts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+.pn-ms-layout {
+  position: relative; padding: 7px 4px 6px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface);
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  transition: border-color .15s, background .15s;
+}
+.pn-ms-layout:hover { border-color: var(--accent); }
+.pn-ms-layout.active { border-color: var(--accent); background: var(--accent-soft, rgba(43,127,212,.08)); }
+.pn-ms-layout svg { width: 100%; height: 30px; display: block; }
+.pn-ms-layout svg .lo-line { stroke: var(--text-3); stroke-width: 1.2; fill: none; }
+.pn-ms-layout svg .lo-box { fill: var(--surface); stroke: var(--text-3); stroke-width: 1.2; }
+.pn-ms-layout svg .lo-root { fill: var(--text-3); stroke: none; }
+.pn-ms-layout.active svg .lo-line,
+.pn-ms-layout.active svg .lo-box { stroke: var(--accent); }
+.pn-ms-layout.active svg .lo-root { fill: var(--accent); }
+.pn-ms-layout-name {
+  font-size: 10px; color: var(--text-3); line-height: 1.2; text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.pn-ms-layout.active .pn-ms-layout-name { color: var(--accent); font-weight: 600; }
+
+/* 配色方案：色卡网格 */
+.pn-ms-schemes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+.pn-ms-scheme {
+  cursor: pointer; border-radius: 7px; overflow: hidden; padding: 0;
+  border: 1px solid var(--border); background: var(--surface);
+  display: flex; flex-direction: column; transition: border-color .15s;
+}
+.pn-ms-scheme:hover { border-color: var(--accent); }
+.pn-ms-scheme.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft, rgba(43,127,212,.18)); }
+.pn-ms-scheme-bars { display: flex; flex-direction: column; gap: 2px; padding: 5px 5px 3px; }
+.pn-ms-scheme-bars i { display: block; height: 5px; border-radius: 2px; }
+.pn-ms-scheme-bars i:first-child { height: 7px; }
+.pn-ms-scheme-name {
+  font-size: 10px; color: var(--text-3); padding: 0 4px 5px; text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pn-ms-scheme.active .pn-ms-scheme-name { color: var(--accent); font-weight: 600; }
+
+/* 背景颜色 */
+.pn-ms-bg { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.pn-ms-bg-swatches { display: flex; gap: 5px; flex-wrap: wrap; }
+.pn-ms-bg-dot {
+  width: 22px; height: 22px; border-radius: 5px; cursor: pointer; padding: 0;
+  border: 1px solid var(--border);
+}
+.pn-ms-bg-dot.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft, rgba(43,127,212,.18)); }
+.pn-ms-bg-custom {
+  display: flex; align-items: center; gap: 5px; margin-left: auto;
+  font-size: 11px; color: var(--text-3);
+}
+.pn-ms-bg-custom input[type="color"] {
+  width: 26px; height: 22px; padding: 0; border: 1px solid var(--border);
+  border-radius: 5px; background: var(--surface); cursor: pointer;
+}
+
+/* 勾选项 */
+.pn-ms-check {
+  display: flex; align-items: center; gap: 7px; padding: 5px 0;
+  font-size: 12px; color: var(--text-2); cursor: pointer;
+}
+.pn-ms-check input { cursor: pointer; }
+.pn-ms-actions { display: flex; gap: 8px; }
+.pn-ms-actions .pn-mini-btn { flex: 1; justify-content: center; }
 .pn-mind-hint {
   flex-shrink: 0; padding: 6px 10px; border-top: 1px solid var(--border-soft);
   font-size: 11px; color: var(--text-3); line-height: 1.6; background: var(--panel-soft);
 }
+
+/* ★★ 关键修复：节点文字被 foreignObject 裁掉 ★★
+ *
+ * simple-mind-map 把节点文字渲染在 <foreignObject> 里，结构是：
+ *   <foreignObject width=W height=H style="overflow:hidden">
+ *     <div class="smm-richtext-node-wrap"><p>文字</p></div>
+ *   </foreignObject>
+ * 而 H 是库**测量出来的文字高度**（把 innerHTML 塞进一个游离 div 再量 getBoundingClientRect）。
+ * 测量时 <p> 的上下 margin 与父 div 发生了**外边距合并**，所以没被计入 H；
+ * 但真正塞进 <foreignObject> 后，foreignObject 会成为新的块级格式化上下文，
+ * <p> 的 UA 默认 margin（1em = 16px）**不再合并**，直接把文字往下推 16px，
+ * 而 foreignObject 是 overflow:hidden 且高度只按「不含 margin」算，
+ * 结果 20px 高的框里只露出文字顶部 4px —— 表现为「节点框里几乎没有字 / 只剩几道短线」。
+ *
+ * 库自身只在 .ql-editor 下重置了 p 的 margin，没有覆盖 .smm-richtext-node-wrap，
+ * 所以必须由我们补上。这同时也让「测量高度 == 实际渲染高度」，换行与框高才准。
+ * 注意：不要给 .smm-richtext-node-wrap 本身加 padding，库是按内容宽高算框的。 */
+.pn-mind-host .smm-richtext-node-wrap,
+.pn-mind-host .smm-richtext-node-wrap p,
+.pn-mind-host .smm-richtext-node-wrap div,
+.pn-mind-host .smm-richtext-node-wrap ul,
+.pn-mind-host .smm-richtext-node-wrap ol,
+.pn-mind-host .smm-richtext-node-wrap li,
+.pn-mind-host .smm-richtext-node-wrap h1,
+.pn-mind-host .smm-richtext-node-wrap h2,
+.pn-mind-host .smm-richtext-node-wrap h3,
+.pn-mind-host .smm-richtext-node-wrap blockquote,
+.pn-mind-host .smm-richtext-node-wrap pre {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+/* 列表项保留缩进，否则项目符号会跑到框外 */
+.pn-mind-host .smm-richtext-node-wrap ul,
+.pn-mind-host .smm-richtext-node-wrap ol { padding-left: 1.2em; }
+/* 行内代码/链接等不要撑破框 */
+.pn-mind-host .smm-richtext-node-wrap img { max-width: 100%; }
 
 /* ---------- 空态提示条 ---------- */
 .pn-empty-tip {

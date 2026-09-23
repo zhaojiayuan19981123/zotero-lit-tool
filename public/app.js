@@ -2873,6 +2873,7 @@
   //  · 思维导图用 simple-mind-map（MIT）：交互与快捷键与 XMind 一致（Tab/Enter/Shift+Tab/
   //    F2/Delete/方向键），导出 .xmind 走 doExportXMind.xmind(data, name)。
   const paperNoteUtils = window.PaperNoteUtils;
+  const doiUtils = window.DoiUtils;
   const pn = {
     on: false,          // 是否处于笔记模式
     leftTab: 'pdf',      // 'pdf' | 'md'
@@ -2881,6 +2882,8 @@
     panes: { ...(paperNoteUtils?.DEFAULT_PANES || { left: 0.4, mid: 0.2, right: 0.4 }) },
     md: '',              // 当前文献的 Markdown 笔记
     mindmap: null,       // 当前文献的导图数据
+    mindStyle: null,     // 当前文献的导图样式（结构/配色/背景/字体/分支线）
+    styleOpen: false,    // 样式面板是否展开
     mm: null,            // simple-mind-map 实例
     mmReady: false,
     mindPending: false,  // 容器不可见时暂缓建实例，等可见了再建
@@ -2979,7 +2982,7 @@
     if (pn.saveTimer) { clearTimeout(pn.saveTimer); pn.saveTimer = null; }
     const litId = pr.recordId;
     if (!litId || !pn.dirty) return;
-    const payload = { md: pn.md, mindmap: pn.mindmap };
+    const payload = { md: pn.md, mindmap: pn.mindmap, mindStyle: pn.mindStyle };
     pn.dirty = false;
     setPnSaveState('保存中…', 'saving');
     try {
@@ -3005,11 +3008,15 @@
       if (pn.loadedFor !== litId) return; // 期间已切到别的文献
       pn.md = data.md || '';
       pn.mindmap = data.mindmap || null;
+      // 样式：老笔记没有这个字段 → 用默认样式，保证向后兼容
+      pn.mindStyle = paperNoteUtils.normalizeMindStyle(data.mindStyle);
     } catch (_) {
       pn.md = '';
       pn.mindmap = null;
+      pn.mindStyle = paperNoteUtils.normalizeMindStyle(null);
     }
     renderPnMd();
+    renderPnMindStylePanel();
     // 导图视图正开着的话，用带等待的路径重建（容器可能还没量出尺寸）
     if (pn.noteTab === 'mind') { renderPnMind(); waitPnMindHost(); }
   }
@@ -3186,11 +3193,13 @@
     }
 
     host.innerHTML = '';
+    const style = pnStyle();
     try {
       pn.mm = new lib.default({
         el: host,
         data: pnPaperNoteData(data),
-        layout: 'logicalStructure',
+        // 结构与配色都跟用户设置走（默认：思维导图结构 + 经典绿配色）
+        layout: style.layout,
         theme: 'default',
         // 节点文本宽度自适应：库把它当作「达到该宽度就换行」的阈值，
         // 默认 500px 会让短文字留一大片空白、长文字又被挤到固定宽度里显示不全。
@@ -3214,8 +3223,12 @@
         enableAutoFocus: true,
         readonly: false,
         customHandleMousewheel: false,
+        // 彩虹分支初始状态（后续由样式面板调 updateRainLinesConfig 切换）
+        rainbowLinesConfig: { open: !!style.rainbow, colorsList: [] },
       });
       pn.mmReady = true;
+      // 主题配置要在实例建好之后下发（构造参数只认 theme 名，不认自定义 config）
+      applyPnMindStyle();
       // 数据变化（增删节点、改文字、拖动）→ 标记改动并落盘
       pn.mm.on('data_change', () => {
         capturePnMindmap();
@@ -3225,11 +3238,12 @@
       });
       setTimeout(() => {
         // 建实例时容器可能刚显示、宽度还没定，这里用真实宽度再校准一次换行阈值
+        applyPnMindStyle();
         applyPnWrapWidth();
         try { pn.mm.view.fit(); } catch (_) { /* ignore */ }
       }, 60);
       // 库首次渲染是异步的，渲染完成后再校一次，确保首屏就不会裁字
-      setTimeout(() => { applyPnWrapWidth(); }, 260);
+      setTimeout(() => { applyPnMindStyle(); applyPnWrapWidth(); }, 260);
     } catch (e) {
       pn.mm = null;
       host.innerHTML = `<div class="pn-md-empty">思维导图初始化失败：${esc(e.message)}</div>`;
@@ -3253,14 +3267,292 @@
     const host = pnEl('pnMindHost');
     const utils = window.PaperNoteUtils;
     const cap = utils?.MIND_WRAP_HARD_CAP || 620;
+    const style = pnStyle();
     // 右栏可用宽度扣掉左右内边距与一点滚动条余量；至少给 240 才有排版意义
     const hostW = host?.clientWidth || 640;
     const hardMax = Math.max(240, Math.min(cap, hostW - 40));
     return paperNoteUtils.fitMindmapWrapWidth(root || pn.mindmap, {
-      fontSize: 16,
+      // 字号跟用户设置走：字号越大，同样的字需要越宽的框
+      fontSize: style.fontSize,
       minWidth: 96,
       maxWidth: hardMax,
     });
+  }
+
+  /** 当前生效的导图样式（始终返回归一化对象，不会 null） */
+  function pnStyle() {
+    if (!pn.mindStyle) pn.mindStyle = paperNoteUtils.normalizeMindStyle(null);
+    return pn.mindStyle;
+  }
+
+  // ---------- 样式面板（对标 XMind 右侧样式栏） ----------
+
+  /** 背景颜色候选（前两个是「跟随配色方案」与纯白） */
+  const PN_BG_PRESETS = [
+    { value: '', name: '跟随配色' },
+    { value: '#ffffff', name: '纯白' },
+    { value: '#fafafa', name: '浅灰白' },
+    { value: '#f5f7fa', name: '雾灰' },
+    { value: '#eef4fb', name: '淡蓝' },
+    { value: '#f2f8f4', name: '淡绿' },
+    { value: '#fdf6ee', name: '淡橙' },
+    { value: '#1f2430', name: '暗夜' },
+  ];
+
+  /**
+   * 结构小图标。viewBox 统一 0 0 60 30，用 lo-line / lo-box / lo-root 三个类上色，
+   * 选中态由 CSS 改成主题色。
+   */
+  function pnLayoutIcon(value) {
+    const box = (x, y, w = 12, h = 6) => `<rect class="lo-box" x="${x}" y="${y}" width="${w}" height="${h}" rx="1.5"/>`;
+    const root = (x, y, w = 12, h = 6) => `<rect class="lo-root" x="${x}" y="${y}" width="${w}" height="${h}" rx="1.5"/>`;
+    const line = (d) => `<path class="lo-line" d="${d}"/>`;
+    const svg = (inner) => `<svg viewBox="0 0 60 30" preserveAspectRatio="xMidYMid meet">${inner}</svg>`;
+
+    switch (value) {
+      case 'mindMap':
+        return svg(
+          root(24, 12) +
+          line('M24 15 H14') + box(2, 5) + box(2, 19) +
+          line('M36 15 H46') + box(46, 5) + box(46, 19),
+        );
+      case 'logicalStructure':
+        return svg(
+          root(2, 12) +
+          line('M14 15 H22') + line('M22 6 V24') +
+          line('M22 6 H30') + box(30, 3) +
+          line('M22 15 H30') + box(30, 12) +
+          line('M22 24 H30') + box(30, 21),
+        );
+      case 'logicalStructureLeft':
+        return svg(
+          root(46, 12) +
+          line('M46 15 H38') + line('M38 6 V24') +
+          line('M38 6 H30') + box(18, 3) +
+          line('M38 15 H30') + box(18, 12) +
+          line('M38 24 H30') + box(18, 21),
+        );
+      case 'catalogOrganization':
+        return svg(
+          root(24, 2) +
+          line('M30 8 V13') + line('M12 13 H48') +
+          line('M12 13 V18') + box(6, 18) +
+          line('M30 13 V18') + box(24, 18) +
+          line('M48 13 V18') + box(42, 18),
+        );
+      case 'organizationStructure':
+        return svg(
+          root(24, 2) +
+          line('M30 8 V12') + line('M14 12 H46') +
+          line('M14 12 V16') + box(8, 16) +
+          line('M46 12 V16') + box(40, 16) +
+          line('M8 22 V25') + line('M46 22 V25'),
+        );
+      case 'timeline':
+      case 'timeline2':
+        return svg(
+          line('M4 15 H56') +
+          root(4, 12, 8, 6) +
+          line('M20 15 V8') + box(14, 2, 12, 5) +
+          line('M38 15 V22') + box(32, 23, 12, 5),
+        );
+      case 'verticalTimeline':
+      case 'verticalTimeline2':
+      case 'verticalTimeline3':
+        return svg(
+          line('M14 3 V27') +
+          root(11, 2, 6, 5) +
+          line('M14 11 H22') + box(22, 8, 24, 5) +
+          line('M14 22 H22') + box(22, 19, 24, 5),
+        );
+      case 'fishbone':
+      case 'fishbone2':
+        return svg(
+          line('M4 15 H40') + root(40, 12, 16, 6) +
+          line('M12 15 L20 6') + line('M12 15 L20 24') +
+          line('M24 15 L32 8') + line('M24 15 L32 22'),
+        );
+      case 'rightFishbone':
+      case 'rightFishbone2':
+        return svg(
+          line('M56 15 H20') + root(4, 12, 16, 6) +
+          line('M48 15 L40 6') + line('M48 15 L40 24') +
+          line('M36 15 L28 8') + line('M36 15 L28 22'),
+        );
+      default:
+        return svg(root(24, 12) + line('M36 15 H48') + box(48, 12, 8, 6));
+    }
+  }
+
+  /** 重绘样式面板的全部控件（切文献、改样式后调用） */
+  function renderPnMindStylePanel() {
+    const style = pnStyle();
+    const utils = window.PaperNoteUtils;
+
+    // 结构
+    const layouts = pnEl('pnMsLayouts');
+    if (layouts) {
+      layouts.innerHTML = utils.MIND_LAYOUTS.map((l) => `
+        <button type="button" class="pn-ms-layout${l.value === style.layout ? ' active' : ''}"
+                data-ms-layout="${esc(l.value)}" title="${esc(l.name)}">
+          ${pnLayoutIcon(l.value)}
+          <span class="pn-ms-layout-name">${esc(l.name)}</span>
+        </button>`).join('');
+    }
+
+    // 配色方案
+    const schemes = pnEl('pnMsSchemes');
+    if (schemes) {
+      schemes.innerHTML = utils.MIND_COLOR_SCHEMES.map((s) => {
+        const sw = utils.schemeSwatch(s.id);
+        return `
+        <button type="button" class="pn-ms-scheme${s.id === style.scheme ? ' active' : ''}"
+                data-ms-scheme="${esc(s.id)}" title="${esc(s.name)}">
+          <span class="pn-ms-scheme-bars">
+            <i style="background:${esc(sw[0])}"></i>
+            <i style="background:${esc(sw[2])}"></i>
+            <i style="background:${esc(sw[1])};border:1px solid rgba(0,0,0,.08)"></i>
+          </span>
+          <span class="pn-ms-scheme-name">${esc(s.name)}</span>
+        </button>`;
+      }).join('');
+    }
+
+    // 背景颜色
+    const bg = pnEl('pnMsBg');
+    if (bg) {
+      const cur = style.backgroundColor;
+      bg.innerHTML = `
+        <div class="pn-ms-bg-swatches">
+          ${PN_BG_PRESETS.map((p) => `
+            <button type="button" class="pn-ms-bg-dot${p.value === cur ? ' active' : ''}"
+                    data-ms-bg="${esc(p.value)}" title="${esc(p.name)}"
+                    style="background:${p.value ? esc(p.value) : 'repeating-linear-gradient(45deg,#fff,#fff 4px,#e3e6ea 4px,#e3e6ea 8px)'}"></button>
+          `).join('')}
+        </div>
+        <label class="pn-ms-bg-custom">
+          自定义
+          <input type="color" id="pnMsBgColor" value="${esc(cur || '#ffffff')}" />
+        </label>`;
+    }
+
+    // 下拉类控件。
+    // ★ 这里**不要**用 `extra.valueOf ? ... : it.value` 这种「可选回调」写法：
+    //   extra 缺省是 {}，而 `({}).valueOf` 是 Object.prototype 上的函数（不是 undefined），
+    //   于是每个 option 的 value 都会变成 String(整个对象) === '[object Object]'，
+    //   下拉框既显示不出当前值，用户选完也读不到真实值（已踩坑，勿再引入 extra）。
+    const fill = (id, items, value) => {
+      const el = pnEl(id);
+      if (!el) return;
+      el.innerHTML = items.map((it) => `<option value="${esc(String(it.value))}">${esc(it.name)}</option>`).join('');
+      el.value = String(value);
+    };
+    fill('pnMsFont', utils.MIND_FONTS, style.fontFamily);
+    fill('pnMsFontSize', [12, 14, 16, 18, 20, 22, 24, 28, 32].map((n) => ({ value: n, name: n + ' px' })), style.fontSize);
+    fill('pnMsLineWidth', utils.MIND_LINE_WIDTHS, style.lineWidth);
+    fill('pnMsLineStyle', utils.MIND_LINE_STYLES, style.lineStyle);
+
+    // 勾选项
+    const rainbow = pnEl('pnMsRainbow');
+    if (rainbow) rainbow.checked = !!style.rainbow;
+  }
+
+  /** 改样式并立即生效 + 标记待保存 */
+  function pnSetStyle(patch, { fit = false } = {}) {
+    pn.mindStyle = paperNoteUtils.normalizeMindStyle({ ...pnStyle(), ...patch });
+    // 换配色方案时，若背景是「跟随配色」，需要让新方案的背景色生效
+    if (patch.scheme && !patch.backgroundColor && pnStyle().backgroundColor === '') {
+      // 保持空值即可，buildMindThemeConfig 会取新方案的 background
+    }
+    applyPnMindStyle({ fit });
+    renderPnMindStylePanel();
+    markPnDirty();
+  }
+
+  function togglePnStylePanel(force) {
+    const panel = pnEl('pnMindStylePanel');
+    if (!panel) return;
+    pn.styleOpen = typeof force === 'boolean' ? force : !pn.styleOpen;
+    panel.classList.toggle('hidden', !pn.styleOpen);
+    pnEl('pnMindStyleBtn')?.classList.toggle('active', pn.styleOpen);
+    if (pn.styleOpen) {
+      renderPnMindStylePanel();
+      // 面板占位会让画布变窄 → 换行阈值要跟着收
+      setTimeout(() => { applyPnWrapWidth(); try { pn.mm?.view?.fit(); } catch (_) { /* ignore */ } }, 200);
+    } else {
+      setTimeout(() => { applyPnWrapWidth(); try { pn.mm?.view?.fit(); } catch (_) { /* ignore */ } }, 200);
+    }
+  }
+
+  /** 样式面板的事件绑定（只在初始化时绑一次，用委托处理动态生成的按钮） */
+  function initPnMindStyleEvents() {
+    pnEl('pnMindStyleBtn')?.addEventListener('click', () => togglePnStylePanel());
+    pnEl('pnMindStyleClose')?.addEventListener('click', () => togglePnStylePanel(false));
+
+    pnEl('pnMsLayouts')?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-ms-layout]');
+      if (b) pnSetStyle({ layout: b.dataset.msLayout }, { fit: true });
+    });
+    pnEl('pnMsSchemes')?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-ms-scheme]');
+      if (b) pnSetStyle({ scheme: b.dataset.msScheme });
+    });
+    pnEl('pnMsBg')?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-ms-bg]');
+      if (b) pnSetStyle({ backgroundColor: b.dataset.msBg });
+    });
+    pnEl('pnMsBg')?.addEventListener('input', (e) => {
+      if (e.target.id === 'pnMsBgColor') pnSetStyle({ backgroundColor: e.target.value });
+    });
+    pnEl('pnMsFont')?.addEventListener('change', (e) => pnSetStyle({ fontFamily: e.target.value }));
+    pnEl('pnMsFontSize')?.addEventListener('change', (e) => pnSetStyle({ fontSize: Number(e.target.value) }));
+    pnEl('pnMsLineWidth')?.addEventListener('change', (e) => pnSetStyle({ lineWidth: Number(e.target.value) }));
+    pnEl('pnMsLineStyle')?.addEventListener('change', (e) => pnSetStyle({ lineStyle: e.target.value }));
+    pnEl('pnMsRainbow')?.addEventListener('change', (e) => pnSetStyle({ rainbow: e.target.checked }));
+    pnEl('pnMsAutoBalance')?.addEventListener('change', () => {
+      // 「自动平衡布局」= 重排一次让分支上下均衡，属于视图操作，不影响数据
+      try { pn.mm?.view?.fit(); } catch (_) { /* ignore */ }
+    });
+    pnEl('pnMsReset')?.addEventListener('click', () => {
+      pn.mindStyle = paperNoteUtils.normalizeMindStyle(null);
+      applyPnMindStyle({ fit: true });
+      renderPnMindStylePanel();
+      markPnDirty();
+      toast('已恢复默认样式', 'success');
+    });
+    // 「另存为方案」当前等价于把当前配色记为自定义起点，先给出明确反馈
+    pnEl('pnMsSchemeAdd')?.addEventListener('click', () => {
+      toast('配色方案已内置 9 套；如需自定义请用「背景颜色」与「分支线」微调', 'info');
+    });
+  }
+
+  /**
+   * 把当前样式应用到导图实例。
+   * 结构用 setLayout、其余（配色/背景/字体/分支线）走 setThemeConfig。
+   * 都是库的公开 API，改完会自动重排；收尾再补一次换行宽度与适应画布。
+   */
+  function applyPnMindStyle({ fit = false } = {}) {
+    if (!pn.mm) return;
+    const style = pnStyle();
+    try {
+      if (pn.mm.getLayout && pn.mm.getLayout() !== style.layout) pn.mm.setLayout(style.layout);
+    } catch (e) { console.warn('设置导图结构失败', e); }
+    try {
+      const cfg = paperNoteUtils.buildMindThemeConfig(style);
+      pn.mm.setThemeConfig(cfg);
+    } catch (e) { console.warn('设置导图样式失败', e); }
+    try {
+      // 彩虹分支由 RainbowLines 插件提供。
+      // 注意：不是 show()/hide()，插件只暴露 updateRainLinesConfig({ open, colorsList })。
+      if (pn.mm.rainbowLines) {
+        pn.mm.rainbowLines.updateRainLinesConfig({ open: !!style.rainbow, colorsList: [] });
+      }
+    } catch (e) { console.warn('切换彩虹分支失败', e); }
+    // 样式变了 → 字号/内边距变了 → 换行阈值要跟着重算
+    setTimeout(() => {
+      applyPnWrapWidth();
+      if (fit) { try { pn.mm?.view?.fit(); } catch (_) { /* ignore */ } }
+    }, 40);
   }
 
   /** 把重算后的换行宽度应用到实例（值没变就跳过，避免不必要的重排） */
@@ -3525,6 +3817,7 @@
   async function resetPnForRecord(litId) {
     pn.md = '';
     pn.mindmap = null;
+    pn.mindStyle = paperNoteUtils.normalizeMindStyle(null);
     pn.loadedFor = null;
     pn.dirty = false;
     if (pn.mm) { try { pn.mm.destroy(); } catch (_) { /* ignore */ } pn.mm = null; pn.mmReady = false; }
@@ -3539,6 +3832,7 @@
     loadPnPanes();
     applyPnPanes();
     initPnResizers();
+    initPnMindStyleEvents();
 
     $('prToggleNote')?.addEventListener('click', () => { togglePnNoteMode().catch(() => {}); });
 
@@ -3681,9 +3975,173 @@
         ${imgs}
         ${vnote}
         <div class="pr-msg-bubble">${body}</div>
-        ${m.error ? `<button class="btn btn-sm md-retry" data-pr-retry="${index}">重试回答</button>` : ''}
+        <div class="pr-msg-actions">
+          ${m.role === 'assistant' && !m.pending && String(m.content || '').trim()
+            ? `<button class="pr-msg-act" data-pr-to-note="${index}" title="把这段回答追加到这篇论文的 Markdown 笔记">📥 导入笔记</button>` : ''}
+          ${m.error ? `<button class="btn btn-sm md-retry" data-pr-retry="${index}">重试回答</button>` : ''}
+        </div>
       </div>
     </div>`;
+  }
+
+  // ============================================================
+  // AI 回答 → 导入 Markdown 笔记
+  // ============================================================
+
+  /**
+   * 追加一段 Markdown 到某篇文献的笔记。
+   * 直接走 API 读写（而不是复用 pn.md），这样在「没进笔记模式」时也能用，
+   * 也不会因为 pn 里缓存的是别的文献而写错地方。
+   */
+  async function appendToPaperNote(litId, markdown) {
+    const id = String(litId || '').trim();
+    if (!id) throw new Error('缺少文献标识');
+    const text = String(markdown || '').trim();
+    if (!text) throw new Error('没有可导入的内容');
+
+    const data = await api('/api/paper-notes/' + encodeURIComponent(id));
+    const prev = String(data?.md || '');
+    // 保持段落整洁：非空旧内容与新增内容之间留一个空行
+    const next = prev.trim() ? `${prev.replace(/\s+$/, '')}\n\n${text}\n` : `${text}\n`;
+
+    await api('/api/paper-notes/' + encodeURIComponent(id), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ md: next }),
+    });
+
+    // 若当前笔记模式正打开这篇文献，把内存态与编辑器一起更新，避免用户看到旧内容
+    if (pn.loadedFor === id) {
+      pn.md = next;
+      pn.dirty = false;
+      const editor = pnEl('pnMdEditor');
+      if (editor) editor.value = next;
+      renderPnMdPreview();
+      setPnSaveState('已保存', 'saved');
+    }
+    return next;
+  }
+
+  /** 组装要写入笔记的片段：带来源标注，便于日后回看时知道出处 */
+  function buildChatNoteSnippet(content, { source, question } = {}) {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const head = source ? `## AI 回答 · ${source}` : '## AI 回答';
+    const lines = [`${head}`, '', `> 时间：${stamp}`];
+    if (question) lines.push(`> 提问：${String(question).replace(/\s+/g, ' ').trim().slice(0, 200)}`);
+    lines.push('', String(content).trim(), '');
+    return lines.join('\n');
+  }
+
+  /** 论文 AI 对话：把某条回答导入本篇论文的笔记 */
+  async function prImportToNote(index) {
+    const m = pr.chat[index];
+    if (!m || m.role !== 'assistant' || !String(m.content || '').trim()) return;
+    const litId = pr.recordId;
+    if (!litId) { toast('没有找到当前论文，无法导入笔记', 'error'); return; }
+    // 往前找最近的一条用户提问，作为笔记里的上下文
+    let question = '';
+    for (let i = index - 1; i >= 0; i -= 1) {
+      if (pr.chat[i]?.role === 'user') { question = pr.chat[i].content || ''; break; }
+    }
+    const title = paperRecord(litId)?.title || '本论文';
+    try {
+      await appendToPaperNote(litId, buildChatNoteSnippet(m.content, { source: title, question }));
+      toast('已导入到这篇论文的 Markdown 笔记', 'success');
+    } catch (e) {
+      toast('导入失败：' + e.message, 'error');
+    }
+  }
+
+  /** 主 AI 助手：选择一篇文献，把回答导入它的笔记 */
+  async function chatImportToNote(index) {
+    const m = chatMsgs[index];
+    if (!m || m.role !== 'assistant' || !String(m.content || '').trim()) return;
+    const list = await ensureLiteratureLoaded();
+    if (!list.length) { toast('文献库还是空的，请先添加一篇文献', 'error'); return; }
+
+    let question = '';
+    for (let i = index - 1; i >= 0; i -= 1) {
+      if (chatMsgs[i]?.role === 'user') { question = chatMsgs[i].content || ''; break; }
+    }
+    // 只有一篇文献时不必打扰用户，直接导入
+    if (list.length === 1) {
+      try {
+        await appendToPaperNote(list[0].id, buildChatNoteSnippet(m.content, { source: list[0].title || '未命名文献', question }));
+        toast(`已导入到《${(list[0].title || '未命名文献').slice(0, 18)}》的笔记`, 'success');
+      } catch (e) { toast('导入失败：' + e.message, 'error'); }
+      return;
+    }
+    const picked = await askPaperForNote(list);
+    if (!picked) return;
+    try {
+      await appendToPaperNote(picked.id, buildChatNoteSnippet(m.content, { source: picked.title || '未命名文献', question }));
+      toast(`已导入到《${(picked.title || '未命名文献').slice(0, 18)}》的笔记`, 'success');
+    } catch (e) {
+      toast('导入失败：' + e.message, 'error');
+    }
+  }
+
+  /** 文献列表（带缓存），供导入笔记选择用 */
+  let literatureCache = null;
+  async function ensureLiteratureLoaded() {
+    if (Array.isArray(literatureCache) && literatureCache.length) return literatureCache;
+    try {
+      const data = await api('/api/literature');
+      literatureCache = Array.isArray(data) ? data : (data?.items || []);
+    } catch (_) { literatureCache = []; }
+    return literatureCache;
+  }
+
+  /** 选择「导入到哪篇文献的笔记」 */
+  function askPaperForNote(list) {
+    return new Promise((resolve) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'modal';
+      wrap.innerHTML = `
+        <div class="modal-mask"></div>
+        <div class="modal-dialog note-pick-modal" role="dialog" aria-label="选择要导入的文献">
+          <div class="modal-head">
+            <h3>导入到哪篇文献的笔记？</h3>
+            <button class="modal-close" data-np-cancel aria-label="关闭">×</button>
+          </div>
+          <div class="modal-body">
+            <input class="tb-input note-pick-search" id="npSearch" placeholder="搜索标题 / 作者…" />
+            <div class="note-pick-list" id="npList"></div>
+          </div>
+          <div class="modal-foot"><button class="tb-btn" data-np-cancel>取消</button></div>
+        </div>`;
+      const close = (v) => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+      const onKey = (e) => { if (e.key === 'Escape') close(null); };
+
+      const renderList = (keyword) => {
+        const kw = String(keyword || '').trim().toLowerCase();
+        const filtered = kw
+          ? list.filter((it) => `${it.title || ''} ${it.authors || ''} ${it.journal || ''}`.toLowerCase().includes(kw))
+          : list;
+        const box = wrap.querySelector('#npList');
+        box.innerHTML = filtered.length
+          ? filtered.slice(0, 200).map((it) => `
+              <button class="note-pick-item" data-np-pick="${esc(it.id)}">
+                <b>${esc(it.title || '未命名文献')}</b>
+                <span>${esc([it.authors, it.journal, it.year].filter(Boolean).join(' · ') || '—')}</span>
+              </button>`).join('')
+          : '<div class="note-pick-empty">没有匹配的文献</div>';
+      };
+
+      wrap.addEventListener('click', (e) => {
+        if (e.target.classList?.contains('modal-mask')) return close(null);
+        const pick = e.target.closest('[data-np-pick]');
+        if (pick) return close(list.find((it) => it.id === pick.dataset.npPick) || null);
+        if (e.target.closest('[data-np-cancel]')) close(null);
+      });
+      wrap.querySelector('#npSearch')?.addEventListener('input', (e) => renderList(e.target.value));
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(wrap);
+      renderList('');
+      wrap.querySelector('#npSearch')?.focus();
+    });
   }
 
   function renderPrChat() {
@@ -4625,6 +5083,9 @@
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!pr.chatBusy) sendPrChat(); }
     });
     $('prChatMsgs').addEventListener('click', (e) => {
+      // 导入笔记（不受 chatBusy 限制）
+      const toNote = e.target.closest('[data-pr-to-note]');
+      if (toNote) return prImportToNote(Number(toNote.dataset.prToNote));
       const retry = e.target.closest('[data-pr-retry]');
       if (!retry || pr.chatBusy) return;
       const index = Number(retry.dataset.prRetry);
@@ -5374,6 +5835,7 @@
       <div class="tj-card-actions">
         <button class="tb-btn" data-tj-favorite="${esc(article.id)}" data-tj-favorite-value="${favorite ? 'false' : 'true'}">${favorite ? '★ 已收藏' : '☆ 收藏'}</button>
         <button class="tb-btn" data-tj-translate="${esc(article.id)}">🈯 ${translated.title || translated.abstract ? '查看中文翻译' : '翻译题目与摘要'}</button>
+        ${article.doi ? `<button class="tb-btn" data-tj-copy-doi="${esc(article.id)}" title="复制 DOI 号到剪贴板">📋 复制 DOI</button>` : ''}
         ${originalUrl ? `<a class="tb-btn tj-link" href="${esc(originalUrl)}" target="_blank" rel="noopener noreferrer" data-tj-opened="${esc(article.id)}">↗ 原文链接</a>` : ''}
         ${!originalUrl && publisherUrl ? `<a class="tb-btn tj-link" href="${esc(publisherUrl)}" target="_blank" rel="noopener noreferrer">↗ 期刊主页</a>` : ''}
         ${delivered ? '<span class="tj-delivered-mark">今日已投递</span>' : ''}
@@ -5427,14 +5889,28 @@
   function renderTopJournalLatest() {
     const articles = topJournalData.articles || [];
     if (!articles.length) return tjEmpty('↻', '还没有同步文章', '请点击“同步最新文章”；同步只采集公开元数据、摘要、DOI 与出版社链接。');
-    return `<div class="tj-section-note">按公开发表日期排序。部分出版社会延迟向 Crossref 补充摘要、机构或正式卷期信息。</div><div class="tj-article-list">${articles.map((article) => tjArticleCard(article)).join('')}</div>`;
+    // 也挂上批量工具条：这里才是最常需要「导出 DOI」的列表，卡片因此可选
+    return `${tjBulkToolbar('latest', articles)}<div class="tj-section-note">按公开发表日期排序。部分出版社会延迟向 Crossref 补充摘要、机构或正式卷期信息。</div><div class="tj-article-list">${articles.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
   }
   function tjBulkToolbar(kind, articles) {
     const count = topJournalSelection.size;
+    // 只有「收藏 / 历史记录」这两个列表有各自的破坏性批量操作；最新文章只做选择与导出
     const action = kind === 'favorites'
       ? `<button class="tb-btn" data-tj-remove-favorites ${count ? '' : 'disabled'}>取消收藏</button>`
-      : `<button class="tb-btn danger" data-tj-delete-history ${count ? '' : 'disabled'}>从历史记录删除</button>`;
-    return `<div class="tj-bulk-toolbar"><label><input type="checkbox" data-tj-select-visible ${articles.length && articles.every((article) => topJournalSelection.has(article.id)) ? 'checked' : ''}> 全选当前列表</label><span>已选 <b>${count}</b> 篇</span><button class="tb-btn accent" data-tj-analyze ${count ? '' : 'disabled'}>✨ AI 分析已选</button>${action}</div>`;
+      : kind === 'history'
+        ? `<button class="tb-btn danger" data-tj-delete-history ${count ? '' : 'disabled'}>从历史记录删除</button>`
+        : '';
+    // DOI 导出：优先导出「已选」，没选就导出当前列表全部
+    const doiTargets = count ? articles.filter((a) => topJournalSelection.has(a.id)) : articles;
+    const stats = doiUtils.doiStats(doiTargets);
+    const doiLabel = count ? `导出 DOI（已选 ${stats.withDoi}）` : `导出 DOI（全部 ${stats.withDoi}）`;
+    const doiBtn = stats.withDoi
+      ? `<button class="tb-btn accent" data-tj-export-doi title="把 DOI 号导出为文件；也可选择 RIS / BibTeX 供 Zotero 或 LaTeX 使用">⤓ ${doiLabel}</button>`
+      : '';
+    const copyBtn = stats.withDoi
+      ? `<button class="tb-btn" data-tj-copy-doi-list title="把 DOI 号按行复制到剪贴板">📋 复制 DOI</button>`
+      : '';
+    return `<div class="tj-bulk-toolbar"><label><input type="checkbox" data-tj-select-visible ${articles.length && articles.every((article) => topJournalSelection.has(article.id)) ? 'checked' : ''}> 全选当前列表</label><span>已选 <b>${count}</b> 篇</span><button class="tb-btn accent" data-tj-analyze ${count ? '' : 'disabled'}>✨ AI 分析已选</button>${doiBtn}${copyBtn}${action}</div>`;
   }
   function renderTopJournalFavorites() {
     if (!topJournalFavorites.length) return tjEmpty('☆', '还没有收藏文章', '在今日推送、最新文章或历史记录中点击“收藏”，它将进入 AI 助手的本地知识库。');
@@ -5521,8 +5997,144 @@
     topJournalLibrary = topJournalLibrary.map(replace);
     topJournalFavorites = topJournalFavorites.map(replace);
   }
-  async function topJournalFavorite(id, favorite) {
+
+  // ---------- DOI 一键导出 ----------
+
+  /**
+   * 取「当前列表里所有文章」的并集，用于按 id 找记录。
+   * 卡片可能出现在今日推送/最新/收藏/历史四个视图里，来源不同。
+   */
+  function tjFindArticle(id) {
+    const pools = [
+      topJournalDelivery?.articles || [],
+      topJournalData.articles || [],
+      topJournalFavorites,
+      topJournalLibrary,
+    ];
+    for (const pool of pools) {
+      const hit = pool.find((a) => a?.id === id);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  /** 当前标签页正在显示的文章列表（DOI 批量操作的范围） */
+  function topJournalCurrentList() {
+    if (topJournalTab === 'today') return topJournalDelivery?.articles || [];
+    if (topJournalTab === 'latest') return topJournalData.articles || [];
+    if (topJournalTab === 'favorites') return topJournalFavorites;
+    if (topJournalTab === 'library') return topJournalLibrary;
+    return [];
+  }
+
+  /** 当前列表「要被导出的那批」文章：有选中就用选中的，否则用整个列表 */
+  function tjDoiTargets(fallbackList) {
+    const list = Array.isArray(fallbackList) ? fallbackList : [];
+    if (!topJournalSelection.size) return list;
+    const picked = list.filter((a) => topJournalSelection.has(a.id));
+    return picked.length ? picked : list;
+  }
+
+  /** 复制单个 DOI 到剪贴板 */
+  async function tjCopyDoi(id) {
+    const article = tjFindArticle(id);
+    const doi = doiUtils.normalizeDoi(article?.doi);
+    if (!doi) { toast('这篇文章没有 DOI 号', 'error'); return; }
     try {
+      await navigator.clipboard.writeText(doi);
+      toast(`已复制 DOI：${doi}`, 'success');
+    } catch (_) {
+      toast('复制失败，请检查剪贴板权限', 'error');
+    }
+  }
+
+  /** 把一批 DOI 按行复制到剪贴板 */
+  async function tjCopyDoiList(list) {
+    const targets = tjDoiTargets(list);
+    const stats = doiUtils.doiStats(targets);
+    const text = doiUtils.buildDoiList(targets);
+    if (!text) { toast('所选文章都没有 DOI 号', 'error'); return; }
+    try {
+      await navigator.clipboard.writeText(text);
+      const extra = stats.missing ? `（${stats.missing} 篇无 DOI 已跳过）` : '';
+      toast(`已复制 ${stats.withDoi} 个 DOI${extra}`, 'success');
+    } catch (_) {
+      toast('复制失败，请检查剪贴板权限', 'error');
+    }
+  }
+
+  /**
+   * 导出 DOI 文件。默认先给 txt（纯 DOI 列表），
+   * 用户若需要导入文献管理软件或 LaTeX，可再选 RIS / BibTeX。
+   */
+  async function tjExportDoi(list) {
+    const targets = tjDoiTargets(list);
+    const stats = doiUtils.doiStats(targets);
+    if (!stats.withDoi) { toast('所选文章都没有 DOI 号', 'error'); return; }
+
+    const format = await askDoiFormat(stats);
+    if (!format) return;
+    const { content, ext } = doiUtils.buildExport(targets, format);
+    if (!content) { toast('没有可导出的内容', 'error'); return; }
+
+    const stamp = todayStr().replace(/-/g, '');
+    downloadBlob(new Blob([content], { type: 'text/plain;charset=utf-8' }), `顶刊DOI-${stamp}.${ext}`);
+    toast(`已导出 ${stats.withDoi} 条记录（${ext.toUpperCase()}）`, 'success');
+  }
+
+  /**
+   * 询问导出格式。用轻量自建弹窗（项目里没有通用 modal 组件，这里保持一致的视觉）。
+   * 返回 'txt' | 'ris' | 'bib'，用户取消返回 null。
+   */
+  function askDoiFormat(stats) {
+    return new Promise((resolve) => {
+      // 沿用项目既有的 modal 结构：.modal（fixed 遮罩层）> .modal-mask + .modal-dialog
+      const wrap = document.createElement('div');
+      wrap.className = 'modal';
+      const missingNote = stats.missing ? `<p class="doi-modal-note">另有 ${stats.missing} 篇没有 DOI，将在纯 DOI 列表中被跳过。</p>` : '';
+      wrap.innerHTML = `
+        <div class="modal-mask"></div>
+        <div class="modal-dialog doi-modal" role="dialog" aria-label="导出 DOI">
+          <div class="modal-head">
+            <h3>导出 DOI</h3>
+            <button class="modal-close" data-doi-cancel aria-label="关闭">×</button>
+          </div>
+          <div class="modal-body">
+            <p class="doi-modal-sub">将导出 <b>${stats.withDoi}</b> 条记录。选择文件格式：</p>
+            <div class="doi-modal-options">
+              <button class="doi-opt" data-doi-format="txt">
+                <b>纯 DOI 列表（.txt）</b>
+                <span>每行一个 DOI，方便粘贴到出版社或 Crossref 查询</span>
+              </button>
+              <button class="doi-opt" data-doi-format="ris">
+                <b>RIS（.ris）</b>
+                <span>Zotero / EndNote / NoteExpress 可直接导入</span>
+              </button>
+              <button class="doi-opt" data-doi-format="bib">
+                <b>BibTeX（.bib）</b>
+                <span>LaTeX 用户可直接 \\cite</span>
+              </button>
+            </div>
+            ${missingNote}
+          </div>
+          <div class="modal-foot">
+            <button class="tb-btn" data-doi-cancel>取消</button>
+          </div>
+        </div>`;
+      const close = (value) => { wrap.remove(); document.removeEventListener('keydown', onKey); resolve(value); };
+      const onKey = (e) => { if (e.key === 'Escape') close(null); };
+      wrap.addEventListener('click', (e) => {
+        if (e.target.classList?.contains('modal-mask')) return close(null);
+        const opt = e.target.closest('[data-doi-format]');
+        if (opt) return close(opt.dataset.doiFormat);
+        if (e.target.closest('[data-doi-cancel]')) close(null);
+      });
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(wrap);
+      wrap.querySelector('.doi-opt')?.focus();
+    });
+  }
+  async function topJournalFavorite(id, favorite) {    try {
       const result = await api(`/api/top-journals/articles/${encodeURIComponent(id)}/favorite`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ favorite }) });
       topJournalData.favoriteArticleIds = result.favoriteArticleIds || [];
       topJournalData.summary = result.summary || topJournalData.summary;
@@ -5614,6 +6226,10 @@
       const checkin = event.target.closest('[data-tj-checkin]'); if (checkin) return topJournalCheckin();
       const translateButton = event.target.closest('[data-tj-translate]'); if (translateButton) return translateTopJournalArticle(translateButton.dataset.tjTranslate);
       const favorite = event.target.closest('[data-tj-favorite]'); if (favorite) return topJournalFavorite(favorite.dataset.tjFavorite, favorite.dataset.tjFavoriteValue === 'true');
+      // DOI：单个复制 / 列表复制 / 导出文件
+      const copyDoi = event.target.closest('[data-tj-copy-doi]'); if (copyDoi) return tjCopyDoi(copyDoi.dataset.tjCopyDoi);
+      const copyDoiList = event.target.closest('[data-tj-copy-doi-list]'); if (copyDoiList) return tjCopyDoiList(topJournalCurrentList());
+      const exportDoi = event.target.closest('[data-tj-export-doi]'); if (exportDoi) return tjExportDoi(topJournalCurrentList());
       const removeFavorites = event.target.closest('[data-tj-remove-favorites]'); if (removeFavorites) return topJournalRemoveFavorites();
       const deleteHistory = event.target.closest('[data-tj-delete-history]'); if (deleteHistory) return topJournalDeleteHistory();
       const analyze = event.target.closest('[data-tj-analyze]'); if (analyze) return topJournalAnalyze();
@@ -6923,7 +7539,7 @@
     box.innerHTML = summaryHint + chatMsgs.map((m, index) =>
       `<div class="chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}${m.error ? ' error' : ''}">${m.role === 'user'
         ? esc(m.content).replace(/\n/g, '<br />')
-        : `<div class="md md-render">${m.content ? chatMd(m.content) : ''}${m.pending ? '<span class="chat-cursor"></span>' : ''}</div>${m.error ? `<button class="btn btn-sm md-retry" data-chat-retry="${index}">重试回答</button>` : ''}`}</div>`).join('');
+        : `<div class="md md-render">${m.content ? chatMd(m.content) : ''}${m.pending ? '<span class="chat-cursor"></span>' : ''}</div>${(m.content && !m.pending) ? `<div class="chat-bubble-actions"><button class="pr-msg-act" data-chat-to-note="${index}" title="把这段回答追加到某篇文献的 Markdown 笔记">📥 导入笔记</button></div>` : ''}${m.error ? `<button class="btn btn-sm md-retry" data-chat-retry="${index}">重试回答</button>` : ''}`}</div>`).join('');
     box.scrollTop = box.scrollHeight;
   }
   async function sendChat(text, { retry = false } = {}) {
@@ -7294,7 +7910,22 @@ a { color: #176b87; }
     const d = mailDetail;
     const accId = mailCur.accountId;
     const folderQ = encodeURIComponent(mailCur.folder);
-    const atts = (d.attachments || []).filter((a) => !a.inline);    box.innerHTML = `
+    const atts = (d.attachments || []).filter((a) => !a.inline);
+    // 译文只对「当前这封」生效，切换邮件就自动失效
+    const trans = mailTrans && mailTrans.uid === d.uid ? mailTrans : null;
+    const transBlock = trans ? `
+      <div class="mail-trans" id="mailTrans">
+        <div class="mail-trans-head">
+          <b>🈯 中文翻译</b>
+          <button class="tb-btn" data-mail-trans-copy="1" title="复制译文">📋 复制</button>
+          <button class="tb-btn" data-mail-trans-close="1" title="关闭译文">✕</button>
+        </div>
+        <div class="mail-trans-body">${trans.pending
+          ? '<div class="mail-loading">翻译中…请稍候</div>'
+          : (trans.error ? `<div class="mail-trans-err">⚠ ${esc(trans.error)}</div>` : renderMarkdown(trans.text || ''))}</div>
+        ${trans.truncated ? '<div class="mail-trans-note">正文较长，本次只翻译了前一部分内容。</div>' : ''}
+      </div>` : '';
+    box.innerHTML = `
       <div class="mail-detail-head">
         <div class="mail-detail-subject">${esc(d.subject)}</div>
         <div class="mail-detail-meta">
@@ -7306,6 +7937,7 @@ a { color: #176b87; }
         <div class="mail-detail-to">收件人：${esc(d.to || '')}${d.cc ? `　抄送：${esc(d.cc)}` : ''}</div>
         <div class="mail-detail-ops">
           <button class="tb-btn" data-mail-reply="1">↩ 回复</button>
+          <button class="tb-btn accent" data-mail-translate="1" ${trans && trans.pending ? 'disabled' : ''}>🈯 ${trans ? '重新翻译' : '一键翻译'}</button>
           <button class="tb-btn" data-mail-unread="1">标记未读</button>
           <button class="tb-btn" data-mail-del="1">🗑 删除</button>
         </div>
@@ -7316,9 +7948,67 @@ a { color: #176b87; }
             <span class="mail-att-size">${fmtSize(a.size)}</span>
           </a>`).join('')}</div>` : ''}
       </div>
+      ${transBlock}
       <div class="mail-body">${d.html
         ? `<iframe class="mail-frame" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" srcdoc="${esc(mailFrameDoc(d.html))}"></iframe>`
         : `<pre class="mail-text">${esc(d.text || '(无正文)')}</pre>`}</div>`;
+  }
+
+  // ---------- 邮件一键翻译 ----------
+
+  /** 译文缓存。只保留当前这一封，切换邮件即失效（见 renderMailDetail） */
+  let mailTrans = null;
+  /** 单次翻译的字符上限，避免超长邮件把翻译接口拖垮 */
+  const MAIL_TRANS_MAX = 6000;
+
+  /**
+   * 取邮件正文的纯文本用于翻译。
+   * 优先用服务端给的 text；只有 HTML 时剥标签（邮件 HTML 常带 <style>/<script>，先删掉）。
+   */
+  function mailPlainBody(d) {
+    const text = String(d?.text || '').trim();
+    if (text) return text;
+    const html = String(d?.html || '');
+    if (!html) return '';
+    const cleaned = html
+      .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ');
+    return String(paperNoteUtils.stripHtml(cleaned) || '').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  /** 一键翻译当前邮件正文 */
+  async function mailTranslateBody() {
+    if (!mailDetail) return;
+    const uid = mailDetail.uid;
+    const plain = mailPlainBody(mailDetail);
+    if (!plain) { toast('这封邮件没有可翻译的正文', 'error'); return; }
+
+    const truncated = plain.length > MAIL_TRANS_MAX;
+    const text = truncated ? plain.slice(0, MAIL_TRANS_MAX) : plain;
+    mailTrans = { uid, pending: true, text: '', truncated };
+    renderMailDetail();
+
+    const target = $('prLangTo')?.value || 'zh';
+    let provider;
+    let profileId;
+    const src = $('prTranslateSource')?.value || 'auto';
+    if (src.startsWith('llm:')) { provider = 'siliconflow'; profileId = src.slice(4); }
+    else if (src !== 'auto') provider = src;
+
+    try {
+      const data = await api('/api/translate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, target, provider, profileId }),
+      });
+      // 期间用户可能已经切到别的邮件，避免把结果串到错的地方
+      if (!mailTrans || mailTrans.uid !== uid) return;
+      mailTrans = { uid, text: data.translation || '(未返回译文)', truncated };
+      toast('邮件翻译完成', 'success');
+    } catch (e) {
+      if (!mailTrans || mailTrans.uid !== uid) return;
+      mailTrans = { uid, error: e.message, truncated };
+    }
+    renderMailDetail();
   }
 
   // ---------- 数据加载 ----------
@@ -7702,6 +8392,14 @@ a { color: #176b87; }
     });
     $('mailDetail').addEventListener('click', (e) => {
       if (!mailDetail) return;
+      if (e.target.closest('[data-mail-translate]')) return mailTranslateBody();
+      if (e.target.closest('[data-mail-trans-close]')) { mailTrans = null; renderMailDetail(); return; }
+      if (e.target.closest('[data-mail-trans-copy]')) {
+        const txt = mailTrans?.text || '';
+        if (!txt) { toast('还没有译文可复制', 'error'); return; }
+        navigator.clipboard.writeText(txt).then(() => toast('译文已复制', 'success')).catch(() => toast('复制失败', 'error'));
+        return;
+      }
       if (e.target.closest('[data-mail-reply]')) {
         const subj = /^re:/i.test(mailDetail.subject) ? mailDetail.subject : 'Re: ' + mailDetail.subject;
         openMailCompose(mailDetail.fromAddress, subj);
@@ -8231,6 +8929,9 @@ a { color: #176b87; }
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const v = $('chatInput').value; $('chatInput').value = ''; sendChat(v); }
     });
     $('chatMsgs').addEventListener('click', (e) => {
+      // 导入笔记（不受 chatBusy 限制：回答已经生成，随时可以保存）
+      const toNote = e.target.closest('[data-chat-to-note]');
+      if (toNote) return chatImportToNote(Number(toNote.dataset.chatToNote));
       const button = e.target.closest('[data-chat-retry]');
       if (!button || chatBusy) return;
       const index = Number(button.dataset.chatRetry);

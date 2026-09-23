@@ -75,15 +75,22 @@ sudo xattr -rd com.apple.quarantine /Applications/一站式科研终端.app
 
 ## 五、图标说明
 
-- `build/icon.icns`：macOS 专用图标（已生成，含 16~1024 全尺寸）
-- `build/icon.ico`：Windows 专用图标
-- `build/icon.svg`：源矢量图
+- `build/icon.png`：1024×1024，electron-builder 生成各平台图标的通用源图
+- `build/icon.icns`：macOS 专用图标（含 16~1024 全尺寸）
+- `build/icon.ico`：Windows 专用图标（多尺寸：16/24/32/48/64/128/256）
+- `public/favicon.png`：浏览器标签页 / 侧边栏 logo（64×64）
+- `electron/icon.png`：运行时窗口与任务栏图标（256×256）
 
-如需重新生成 icns（改了图标后）：
+换了图标后，用一条命令重新生成上面**全部**产物：
 
 ```bash
-python build/make-icns.py   # 需要 pip install pillow
+python build/make-icons.py                  # 用默认设计稿
+python build/make-icons.py "D:\path\to.png" # 指定设计稿
+# 需要 pip install pillow
 ```
+
+脚本会自动裁掉设计稿四周的大片白底、补成正方形再缩放，
+所以直接丢一张「带留白的设计稿」进去即可，不必先手工裁剪。
 
 ## 六、技术栈 / 架构速览
 

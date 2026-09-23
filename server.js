@@ -2658,6 +2658,8 @@ export function createApp({
       litId: String(req.params.litId || ''),
       md: note?.md || '',
       mindmap: note?.mindmap || null,
+      // 导图样式（配色/结构/字体/分支线）。老笔记没有这个字段 → 返回 null 由前端回落默认值
+      mindStyle: note?.mindStyle || null,
       updatedAt: note?.updatedAt || '',
     });
   });
@@ -2667,6 +2669,10 @@ export function createApp({
     const patch = {};
     if (typeof body.md === 'string') patch.md = body.md.slice(0, 500000);
     if (body.mindmap && typeof body.mindmap === 'object') patch.mindmap = body.mindmap;
+    // 导图样式：只接受普通对象（数组/字符串等脏值一律忽略，避免写坏记录）
+    if (body.mindStyle && typeof body.mindStyle === 'object' && !Array.isArray(body.mindStyle)) {
+      patch.mindStyle = body.mindStyle;
+    }
     if (!Object.keys(patch).length) return res.status(400).json({ error: '没有要保存的内容' });
     try {
       const saved = store.savePaperNote({ litId: req.params.litId, ...patch });

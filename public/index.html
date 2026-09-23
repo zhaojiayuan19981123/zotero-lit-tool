@@ -1327,10 +1327,76 @@
                 <button id="pnMindZoomIn" class="pn-mini-btn" title="放大">＋</button>
                 <button id="pnMindZoomOut" class="pn-mini-btn" title="缩小">－</button>
                 <span class="pn-mind-sep"></span>
-                <button id="pnMindExportXmind" class="pn-mini-btn pn-mini-primary" title="导出为 .xmind 文件（可用 XMind 打开继续编辑）">⤓ 导出 .xmind</button>
+                <button id="pnMindStyleBtn" class="pn-mini-btn" title="打开样式面板：结构、配色方案、背景、字体、分支线">🎨 样式</button>
+                <span class="pn-mind-spacer"></span>
+                <button id="pnMindExportXmind" class="pn-mini-btn pn-mini-primary" title="导出为 .xmind 文件（可用 XMind 打开继续编辑）">⤓ .xmind</button>
                 <button id="pnMindExportPng" class="pn-mini-btn" title="导出为 PNG 图片">⤓ PNG</button>
               </div>
               <div class="pn-mind-host" id="pnMindHost"></div>
+
+              <!-- 样式面板：对标 XMind 的右侧样式栏 -->
+              <aside class="pn-mind-style hidden" id="pnMindStylePanel" aria-label="思维导图样式">
+                <div class="pn-ms-head">
+                  <span class="pn-ms-title">样式</span>
+                  <button class="pn-ms-close" id="pnMindStyleClose" title="关闭样式面板" aria-label="关闭">✕</button>
+                </div>
+                <div class="pn-ms-body">
+                  <div class="pn-ms-group">
+                    <div class="pn-ms-label">结构</div>
+                    <div class="pn-ms-layouts" id="pnMsLayouts"></div>
+                  </div>
+
+                  <div class="pn-ms-group">
+                    <div class="pn-ms-label">
+                      配色方案
+                      <button class="pn-ms-add" id="pnMsSchemeAdd" title="另存当前配色为新方案">＋</button>
+                    </div>
+                    <div class="pn-ms-schemes" id="pnMsSchemes"></div>
+                  </div>
+
+                  <div class="pn-ms-group">
+                    <div class="pn-ms-label">背景颜色</div>
+                    <div class="pn-ms-bg" id="pnMsBg"></div>
+                  </div>
+
+                  <div class="pn-ms-group">
+                    <div class="pn-ms-label">全局字体</div>
+                    <select class="pn-ms-select" id="pnMsFont"></select>
+                  </div>
+
+                  <div class="pn-ms-group">
+                    <div class="pn-ms-label">字号</div>
+                    <select class="pn-ms-select" id="pnMsFontSize"></select>
+                  </div>
+
+                  <div class="pn-ms-group">
+                    <div class="pn-ms-label">分支线粗细</div>
+                    <select class="pn-ms-select" id="pnMsLineWidth"></select>
+                  </div>
+
+                  <div class="pn-ms-group">
+                    <div class="pn-ms-label">分支线样式</div>
+                    <select class="pn-ms-select" id="pnMsLineStyle"></select>
+                  </div>
+
+                  <div class="pn-ms-group">
+                    <div class="pn-ms-label">导图样式</div>
+                    <label class="pn-ms-check">
+                      <input type="checkbox" id="pnMsRainbow" />
+                      <span>🌈 彩虹分支</span>
+                    </label>
+                    <label class="pn-ms-check">
+                      <input type="checkbox" id="pnMsAutoBalance" checked />
+                      <span>自动平衡布局</span>
+                    </label>
+                  </div>
+
+                  <div class="pn-ms-group pn-ms-actions">
+                    <button class="pn-mini-btn" id="pnMsReset">恢复默认样式</button>
+                  </div>
+                </div>
+              </aside>
+
               <div class="pn-mind-hint">
                 Tab 子主题 ｜ Enter 同级 ｜ Shift+Tab 父主题 ｜ F2 或双击改文字 ｜ Delete 删除 ｜ 方向键切换 ｜ Ctrl+V 粘贴图片 ｜ 滚轮上下平移，Ctrl+滚轮缩放
               </div>
@@ -1573,6 +1639,7 @@
   <script src="vendor/simple-mind-map/simpleMindMap.umd.min.js"></script>
   <script src="pdf-reader-utils.js"></script>
   <script src="paper-note-utils.js"></script>
+  <script src="doi-utils.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

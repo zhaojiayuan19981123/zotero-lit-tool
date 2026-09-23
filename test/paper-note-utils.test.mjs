@@ -368,3 +368,158 @@ test('多子树时取全局最长行（不只根节点）', () => {
   const rootOnly = U.fitMindmapWrapWidth({ data: { text: '根' }, children: [] }, { fontSize: 16, minWidth: 96, maxWidth: 620 });
   assert.ok(w > rootOnly, '子节点的长文案必须参与计算');
 });
+
+// ---------- 导图样式系统（对标 XMind）----------
+
+test('defaultMindStyle 给出可用的默认值', () => {
+  const s = U.defaultMindStyle();
+  assert.equal(s.layout, 'mindMap');
+  assert.equal(s.scheme, 'classic');
+  assert.equal(s.lineStyle, 'curve');
+  assert.equal(s.rainbow, false);
+  assert.ok(Number.isFinite(s.fontSize) && s.fontSize > 0);
+});
+
+test('MIND_LAYOUTS 的值与 simple-mind-map 的 layout 名一致', () => {
+  // 这些是库 MindMap.constants.layoutList 里的 value，写错会导致 setLayout 静默失效
+  const values = U.MIND_LAYOUTS.map((l) => l.value);
+  for (const expected of ['mindMap', 'logicalStructure', 'catalogOrganization',
+    'organizationStructure', 'timeline', 'fishbone', 'rightFishbone']) {
+    assert.ok(values.includes(expected), `缺少布局 ${expected}`);
+  }
+  // 不应有重复项
+  assert.equal(new Set(values).size, values.length);
+});
+
+test('normalizeMindStyle 归一化任意输入并补齐缺省', () => {
+  const s = U.normalizeMindStyle(null);
+  assert.equal(s.layout, 'mindMap');
+  assert.equal(s.scheme, 'classic');
+
+  // 非法值被丢弃、回落到默认，而不是把脏值传给库
+  const bad = U.normalizeMindStyle({ layout: 'nope', scheme: 'nope', fontSize: 999, lineWidth: -3, lineStyle: 'x', rainbow: 'yes' });
+  assert.equal(bad.layout, 'mindMap');
+  assert.equal(bad.scheme, 'classic');
+  assert.equal(bad.fontSize, 16, '越界字号应回落默认');
+  assert.equal(bad.lineWidth, 2, '越界线宽应回落默认');
+  assert.equal(bad.lineStyle, 'curve');
+  assert.equal(bad.rainbow, true, 'truthy 值应转成布尔');
+});
+
+test('normalizeMindStyle 保留合法值', () => {
+  const s = U.normalizeMindStyle({ layout: 'fishbone', scheme: 'ocean', fontSize: 22, lineWidth: 4, lineStyle: 'straight', rainbow: true, backgroundColor: '#123456' });
+  assert.equal(s.layout, 'fishbone');
+  assert.equal(s.scheme, 'ocean');
+  assert.equal(s.fontSize, 22);
+  assert.equal(s.lineWidth, 4);
+  assert.equal(s.lineStyle, 'straight');
+  assert.equal(s.rainbow, true);
+  assert.equal(s.backgroundColor, '#123456');
+});
+
+test('mindScheme 找不到时回落第一个方案', () => {
+  assert.equal(U.mindScheme('ocean').id, 'ocean');
+  assert.equal(U.mindScheme('nope').id, U.MIND_COLOR_SCHEMES[0].id);
+  assert.equal(U.mindScheme(undefined).id, U.MIND_COLOR_SCHEMES[0].id);
+});
+
+test('每个配色方案都有 id/name/swatch 与三级节点样式', () => {
+  for (const s of U.MIND_COLOR_SCHEMES) {
+    assert.ok(s.id && s.name, `方案缺少 id/name: ${JSON.stringify(s)}`);
+    assert.equal(s.swatch.length, 3, `${s.id} 的 swatch 应为 3 色`);
+    assert.ok(s.lineColor, `${s.id} 缺少 lineColor`);
+    for (const level of ['root', 'second', 'node']) {
+      assert.ok(s[level]?.fillColor !== undefined, `${s.id} 缺少 ${level}.fillColor`);
+      assert.ok(s[level]?.color, `${s.id} 缺少 ${level}.color`);
+    }
+  }
+  // id 不能重复，否则 UI 选中态会串
+  const ids = U.MIND_COLOR_SCHEMES.map((s) => s.id);
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test('buildMindThemeConfig 产出库认识的字段，且节点样式是普通对象', () => {
+  const cfg = U.buildMindThemeConfig({ scheme: 'classic', fontSize: 18, lineWidth: 3, lineStyle: 'straight', fontFamily: '微软雅黑, Microsoft YaHei' });
+  assert.equal(cfg.lineWidth, 3);
+  assert.equal(cfg.lineStyle, 'straight');
+  assert.equal(cfg.lineColor, U.mindScheme('classic').lineColor);
+  // ★ root/second/node 必须是**普通对象**：库的默认主题里它们就是对象，
+  //   setThemeConfig 会与默认主题做深度合并；一旦传成 JSON 字符串，
+  //   整级样式会被替换成字符串，渲染器取 fillColor/fontSize 全得 undefined，
+  //   分支线坐标算出 NaN、子节点直接渲染不出来（真实浏览器里已复现过）。
+  for (const k of ['root', 'second', 'node']) {
+    assert.equal(typeof cfg[k], 'object', `${k} 必须是对象而非字符串`);
+    assert.ok(!Array.isArray(cfg[k]), `${k} 不能是数组`);
+    assert.equal(typeof cfg[k].fillColor, 'string', `${k} 应有 fillColor`);
+    assert.equal(cfg[k].fontSize, 18, `${k} 的字号应跟随设置`);
+    assert.equal(cfg[k].fontFamily, '微软雅黑, Microsoft YaHei');
+  }
+  // 对象必须先能被 JSON 序列化（样式要随笔记落盘），且内容与对象一致
+  assert.equal(JSON.parse(JSON.stringify(cfg.root)).fillColor, cfg.root.fillColor);
+});
+
+test('buildMindThemeConfig 不强行改动字重等未指定的样式', () => {
+  const cfg = U.buildMindThemeConfig({ scheme: 'classic' });
+  // 默认主题里根节点是粗体、其余不是；我们不该把这个差异抹平
+  assert.equal(cfg.root.fontWeight, undefined);
+  assert.equal(cfg.node.fontWeight, undefined);
+});
+
+test('buildMindThemeConfig 的背景色：用户显式设置优先，否则用方案自带', () => {
+  // 经典绿没有自带背景 → 不给 backgroundColor，交回库默认
+  const a = U.buildMindThemeConfig({ scheme: 'classic', backgroundColor: '' });
+  assert.equal(a.backgroundColor, undefined);
+
+  // 暗夜方案自带深色背景
+  const b = U.buildMindThemeConfig({ scheme: 'dark', backgroundColor: '' });
+  assert.equal(b.backgroundColor, U.mindScheme('dark').background);
+
+  // 用户显式设了背景 → 覆盖方案自带
+  const c = U.buildMindThemeConfig({ scheme: 'dark', backgroundColor: '#ffffff' });
+  assert.equal(c.backgroundColor, '#ffffff');
+});
+
+test('buildMindThemeConfig 对未归一化的输入也能工作', () => {
+  const cfg = U.buildMindThemeConfig(null);
+  assert.equal(cfg.lineStyle, 'curve'); // 默认结构是 mindMap，支持曲线
+  assert.ok(cfg.root.color);
+  assert.equal(typeof cfg.root, 'object');
+});
+
+// ---------- 分支线线型的结构限制 ----------
+
+test('effectiveLineStyle：结构不支持曲线时回落为直线', () => {
+  // 支持曲线的三种结构，原样保留
+  for (const l of ['mindMap', 'logicalStructure', 'verticalTimeline']) {
+    assert.equal(U.effectiveLineStyle(l, 'curve'), 'curve', `${l} 应支持曲线`);
+  }
+  // 不支持曲线的结构（如鱼骨图/组织结构图/时间轴），回落成直线，避免连线算出 NaN
+  for (const l of ['fishbone', 'organizationStructure', 'timeline', 'catalogOrganization', 'rightFishbone']) {
+    assert.equal(U.effectiveLineStyle(l, 'curve'), 'straight', `${l} 应回落为直线`);
+  }
+  // straight 全结构可用，永远原样返回
+  for (const l of ['fishbone', 'mindMap', 'timeline']) {
+    assert.equal(U.effectiveLineStyle(l, 'straight'), 'straight');
+  }
+});
+
+test('buildMindThemeConfig：切到鱼骨图后 lineStyle 自动回落，不再下发 curve', () => {
+  const cfg = U.buildMindThemeConfig({ layout: 'fishbone', lineStyle: 'curve' });
+  assert.equal(cfg.lineStyle, 'straight');
+  // 换回支持曲线的结构，用户的曲线选择要恢复
+  const back = U.buildMindThemeConfig({ layout: 'mindMap', lineStyle: 'curve' });
+  assert.equal(back.lineStyle, 'curve');
+});
+
+test('schemeSwatch 返回三项，未知方案回落第一套', () => {
+  assert.equal(U.schemeSwatch('ocean').length, 3);
+  // 跨 realm 数组不能直接 deepEqual，转成字符串比
+  assert.equal(U.schemeSwatch('nope').join(','), U.MIND_COLOR_SCHEMES[0].swatch.join(','));
+});
+
+test('MIND_FONTS / MIND_LINE_WIDTHS / MIND_LINE_STYLES 结构完整', () => {
+  for (const f of U.MIND_FONTS) assert.ok(f.value && f.name, `字体项不完整: ${JSON.stringify(f)}`);
+  for (const w of U.MIND_LINE_WIDTHS) assert.ok(Number.isFinite(w.value) && w.name);
+  // 跨 realm：用 join 比较，避免原型不同导致 deepStrictEqual 失败
+  assert.equal(U.MIND_LINE_STYLES.map((s) => s.value).join(','), 'curve,straight');
+});

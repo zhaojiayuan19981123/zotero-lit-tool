@@ -363,12 +363,252 @@
     return Math.min(Math.max(Math.ceil(longest), min), max);
   }
 
+  // ============================================================
+  // 导图样式系统（对齐 XMind：结构 / 配色方案 / 背景 / 字体 / 分支线 / 彩虹分支）
+  // 参考实现来自 simple-mind-map 的 theme config，字段名与库一致，
+  // 由 app.js 转成 mm.setThemeConfig() 的入参。
+  // ============================================================
+
+  /** 结构（布局）。value 直接用库的 layout 名，已核对 MindMap.constants.layoutList。 */
+  const MIND_LAYOUTS = [
+    { value: 'mindMap', name: '思维导图', group: '思维导图' },
+    { value: 'logicalStructure', name: '逻辑结构图', group: '逻辑图' },
+    { value: 'logicalStructureLeft', name: '向左逻辑结构图', group: '逻辑图' },
+    { value: 'catalogOrganization', name: '目录组织图', group: '逻辑图' },
+    { value: 'organizationStructure', name: '组织结构图', group: '逻辑图' },
+    { value: 'timeline', name: '时间轴', group: '时间轴' },
+    { value: 'timeline2', name: '时间轴 2', group: '时间轴' },
+    { value: 'verticalTimeline', name: '竖向时间轴', group: '时间轴' },
+    { value: 'verticalTimeline2', name: '竖向时间轴 2', group: '时间轴' },
+    { value: 'verticalTimeline3', name: '竖向时间轴 3', group: '时间轴' },
+    { value: 'fishbone', name: '鱼骨图', group: '鱼骨图' },
+    { value: 'fishbone2', name: '鱼骨图 2', group: '鱼骨图' },
+    { value: 'rightFishbone', name: '向右鱼骨图', group: '鱼骨图' },
+    { value: 'rightFishbone2', name: '向右鱼骨图 2', group: '鱼骨图' },
+  ];
+
+  /** 全局字体候选（前两项是 Windows/macOS 都稳妥的中文字体） */
+  const MIND_FONTS = [
+    { value: '微软雅黑, Microsoft YaHei', name: '微软雅黑' },
+    { value: '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif', name: '苹方 / 黑体' },
+    { value: 'SimSun, "宋体", serif', name: '宋体' },
+    { value: 'KaiTi, "楷体", serif', name: '楷体' },
+    { value: 'Arial, Helvetica, sans-serif', name: 'Arial' },
+    { value: '"Times New Roman", Times, serif', name: 'Times New Roman' },
+    { value: 'Consolas, "Courier New", monospace', name: '等宽 Consolas' },
+  ];
+
+  /** 分支线粗细候选 */
+  const MIND_LINE_WIDTHS = [
+    { value: 1, name: '细' },
+    { value: 2, name: '默认' },
+    { value: 3, name: '中' },
+    { value: 4, name: '粗' },
+    { value: 6, name: '特粗' },
+  ];
+
+  /** 分支线走线方式 */
+  const MIND_LINE_STYLES = [
+    { value: 'curve', name: '曲线' },
+    { value: 'straight', name: '直线' },
+  ];
+
+  /**
+   * 配色方案（对标 XMind 的「配色方案」）。
+   * 每个方案给出：主色（分支线/根节点）、各级节点底色与字色。
+   * 字段与库的 themeConfig 一致，便于直接下发。
+   */
+  const MIND_COLOR_SCHEMES = [
+    {
+      id: 'classic', name: '经典绿', swatch: ['#549688', '#ffffff', '#8ac6bb'],
+      lineColor: '#549688',
+      root: { fillColor: '#549688', color: '#ffffff' },
+      second: { fillColor: '#ffffff', color: '#565656' },
+      node: { fillColor: 'transparent', color: '#6b6b6b' },
+    },
+    {
+      id: 'ocean', name: '海洋蓝', swatch: ['#2b7fd4', '#ffffff', '#7fb6ea'],
+      lineColor: '#2b7fd4',
+      root: { fillColor: '#2b7fd4', color: '#ffffff' },
+      second: { fillColor: '#eaf3fd', color: '#1b4f80' },
+      node: { fillColor: 'transparent', color: '#3c5a75' },
+    },
+    {
+      id: 'sunset', name: '活力橙', swatch: ['#e8792b', '#ffffff', '#f6b183'],
+      lineColor: '#e8792b',
+      root: { fillColor: '#e8792b', color: '#ffffff' },
+      second: { fillColor: '#fdf1e7', color: '#8a4413' },
+      node: { fillColor: 'transparent', color: '#7a5233' },
+    },
+    {
+      id: 'violet', name: '紫罗兰', swatch: ['#7a5cd6', '#ffffff', '#b8a4ec'],
+      lineColor: '#7a5cd6',
+      root: { fillColor: '#7a5cd6', color: '#ffffff' },
+      second: { fillColor: '#f1ecfd', color: '#4a2f92' },
+      node: { fillColor: 'transparent', color: '#5b4a80' },
+    },
+    {
+      id: 'forest', name: '森林', swatch: ['#2f7d54', '#ffffff', '#84bda0'],
+      lineColor: '#2f7d54',
+      root: { fillColor: '#2f7d54', color: '#ffffff' },
+      second: { fillColor: '#e9f4ee', color: '#1d5136' },
+      node: { fillColor: 'transparent', color: '#406653' },
+    },
+    {
+      id: 'rose', name: '玫瑰', swatch: ['#d64572', '#ffffff', '#ef9ab4'],
+      lineColor: '#d64572',
+      root: { fillColor: '#d64572', color: '#ffffff' },
+      second: { fillColor: '#fdecf1', color: '#8d1f42' },
+      node: { fillColor: 'transparent', color: '#7c4557' },
+    },
+    {
+      id: 'slate', name: '商务灰', swatch: ['#45526b', '#ffffff', '#93a0b8'],
+      lineColor: '#45526b',
+      root: { fillColor: '#45526b', color: '#ffffff' },
+      second: { fillColor: '#eef1f6', color: '#2b3446' },
+      node: { fillColor: 'transparent', color: '#5a6478' },
+    },
+    {
+      id: 'mono', name: '极简黑白', swatch: ['#333333', '#ffffff', '#9e9e9e'],
+      lineColor: '#333333',
+      root: { fillColor: '#333333', color: '#ffffff' },
+      second: { fillColor: '#f2f2f2', color: '#222222' },
+      node: { fillColor: 'transparent', color: '#555555' },
+    },
+    {
+      id: 'dark', name: '暗夜', swatch: ['#1f2430', '#dfe4ee', '#5b6c8a'],
+      lineColor: '#7c8ba1',
+      background: '#1f2430',
+      root: { fillColor: '#3a4250', color: '#ffffff' },
+      second: { fillColor: '#2b3242', color: '#dfe4ee' },
+      node: { fillColor: 'transparent', color: '#c3cad8' },
+    },
+  ];
+
+  /** 深色背景的方案需要配套深色画布，这里集中给出，避免每个方案都写一遍 */
+  const MIND_DARK_BG = '#1f2430';
+
+  /**
+   * 库对「分支线样式」有结构限制（见库内 defaultTheme 注释）：
+   *   curve  仅支持 logicalStructure / mindMap / verticalTimeline
+   *   direct 仅支持 logicalStructure / mindMap / organizationStructure / verticalTimeline
+   * 在不支持的结构上用了这两者，连线坐标会算不出来（表现为 path 的 d 出现 NaN）。
+   * 这里做一层回落：不支持就退成直线（straight，全结构可用）。
+   */
+  const MIND_CURVE_LAYOUTS = ['logicalStructure', 'mindMap', 'verticalTimeline'];
+  const MIND_DIRECT_LAYOUTS = ['logicalStructure', 'mindMap', 'organizationStructure', 'verticalTimeline'];
+
+  function effectiveLineStyle(layout, lineStyle) {
+    if (lineStyle === 'curve' && !MIND_CURVE_LAYOUTS.includes(layout)) return 'straight';
+    if (lineStyle === 'direct' && !MIND_DIRECT_LAYOUTS.includes(layout)) return 'straight';
+    return lineStyle;
+  }
+
+  /**
+   * 默认样式。空值表示「跟当前配色方案走」，方便用户只改其中一项。
+   */
+  function defaultMindStyle() {
+    return {
+      layout: 'mindMap',
+      scheme: 'classic',
+      backgroundColor: '',        // 空 = 用配色方案/库默认
+      fontFamily: '微软雅黑, Microsoft YaHei',
+      fontSize: 16,
+      lineWidth: 2,
+      lineStyle: 'curve',
+      rainbow: false,
+    };
+  }
+
+  /** 取配色方案（找不到时回落第一个） */
+  function mindScheme(id) {
+    return MIND_COLOR_SCHEMES.find((s) => s.id === id) || MIND_COLOR_SCHEMES[0];
+  }
+
+  /** 归一化样式对象：补齐缺省字段、丢弃非法值 */
+  function normalizeMindStyle(raw) {
+    const base = defaultMindStyle();
+    const s = raw && typeof raw === 'object' ? raw : {};
+    const out = { ...base };
+    if (MIND_LAYOUTS.some((l) => l.value === s.layout)) out.layout = s.layout;
+    if (MIND_COLOR_SCHEMES.some((c) => c.id === s.scheme)) out.scheme = s.scheme;
+    if (typeof s.backgroundColor === 'string') out.backgroundColor = s.backgroundColor;
+    if (MIND_FONTS.some((f) => f.value === s.fontFamily)) out.fontFamily = s.fontFamily;
+    const fs = Number(s.fontSize);
+    if (Number.isFinite(fs) && fs >= 10 && fs <= 40) out.fontSize = Math.round(fs);
+    const lw = Number(s.lineWidth);
+    if (Number.isFinite(lw) && lw >= 1 && lw <= 10) out.lineWidth = Math.round(lw);
+    if (MIND_LINE_STYLES.some((l) => l.value === s.lineStyle)) out.lineStyle = s.lineStyle;
+    out.rainbow = !!s.rainbow;
+    return out;
+  }
+
+  /**
+   * 把「我们的样式对象」翻译成 simple-mind-map 的 themeConfig。
+   * 注意：库只认它自己的字段名，这里做一层映射，UI 层就不用关心库的命名。
+   *
+   * ★ 为什么 root / second / node 必须是**普通对象**而不是 JSON 字符串：
+   *   库的默认主题（源码里的 `defaultTheme`）中这三项就是对象，`setThemeConfig`
+   *   会把它与默认主题做深度合并，渲染器再从 `themeConfig[节点类型]` 上读
+   *   fillColor / fontSize 等字段。
+   *   若这里传 `JSON.stringify(...)`，深度合并的结果会把整级样式替换成**字符串**，
+   *   后续 `style.fillColor` 全取到 undefined → 分支线路径算出 NaN、
+   *   子节点直接渲染不出来（已用真实浏览器复现并修复，勿再改回字符串）。
+   */
+  function buildMindThemeConfig(style) {
+    const s = normalizeMindStyle(style);
+    const scheme = mindScheme(s.scheme);
+    const font = s.fontFamily;
+
+    // 只覆盖我们真正要控制的三项：字体、字号、以及配色带来的底色/字色。
+    // 其余（内边距、圆角、边框…）一律留给库的默认主题，避免把默认观感改掉。
+    const nodeStyle = (src) => {
+      const out = {};
+      if (font) out.fontFamily = font;
+      if (Number.isFinite(s.fontSize)) out.fontSize = s.fontSize;
+      if (src.fillColor) out.fillColor = src.fillColor;
+      if (src.color) out.color = src.color;
+      return out;
+    };
+
+    const cfg = {
+      lineColor: scheme.lineColor,
+      lineWidth: s.lineWidth,
+      // 结构不支持所选线型时回落，避免连线坐标算出 NaN
+      lineStyle: effectiveLineStyle(s.layout, s.lineStyle),
+      root: nodeStyle(scheme.root || {}),
+      second: nodeStyle(scheme.second || {}),
+      node: nodeStyle(scheme.node || {}),
+    };
+    // 背景：用户显式设过就用用户的，否则用配色方案自带的（如暗夜）
+    const bg = s.backgroundColor || scheme.background || '';
+    if (bg) cfg.backgroundColor = bg;
+    return cfg;
+  }
+
+  /** 每个配色方案在按钮上的预览色（用于渲染小色卡） */
+  function schemeSwatch(id) {
+    return mindScheme(id).swatch || ['#549688', '#ffffff', '#8ac6bb'];
+  }
+
   window.PaperNoteUtils = {
     DEFAULT_PANES,
     MIN_PANE_RATIO,
     MIN_PANE_PX,
     MIND_WRAP_HARD_CAP,
     MIND_WRAP_SLACK,
+    MIND_LAYOUTS,
+    MIND_FONTS,
+    MIND_LINE_WIDTHS,
+    MIND_LINE_STYLES,
+    MIND_COLOR_SCHEMES,
+    MIND_DARK_BG,
+    defaultMindStyle,
+    normalizeMindStyle,
+    mindScheme,
+    buildMindThemeConfig,
+    effectiveLineStyle,
+    schemeSwatch,
     normalizePanes,
     resizePanes,
     paneFlex,
