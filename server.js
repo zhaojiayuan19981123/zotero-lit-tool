@@ -20,6 +20,7 @@ import { registerPdfTranslateRoutes } from './src/pdfTranslate/routes.js';
 import { DEFAULT_PDF_TRANSLATE_OPTIONS } from './src/pdfTranslate/index.js';
 import { pruneConnections } from './src/mail.js';
 import * as catalog from './src/modelCatalog.js';
+import * as modelRouter from './src/modelRouter.js';
 import { UTD_JOURNALS, JOURNAL_PRESETS, createTopJournalState, syncJournals, checkInAndCreateDelivery, deliveryArticles, recentArticles, historyArticles, deliveredArticleIds, setArticleFavorite, removeFavorites, removeHistoryArticles, calendarSummary, markArticleOpened } from './src/topJournals.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -337,20 +338,32 @@ function describeEndpointFailures(failures) {
 
 /**
  * 生成「调用失败」的提示文本。
- * 试过多个端点时，把每个端点的原因都列出来——只报最后一个会把真实原因盖掉
- * （曾经把 chat 端点的失败换成 responses 端点的参数校验错误报给用户，看着毫不相干）。
+ * - 试过多条模型配置（路由故障转移）时：把每条配置各自的原因都列出来 —— 否则用户
+ *   只会看到最后一个备用供应商的报错，完全对不上自己正在用的那个中转。
+ * - 只试过一条配置时：把该配置下每个端点的原因都列出来（见 describeEndpointFailures）。
  */
 function endpointFailureMessage(up, detail) {
+  const providers = up?._litProviderFailures;
+  if (providers && providers.length) {
+    const parts = providers.map((p) => `${p.label || '（未命名配置）'} → ${clip(p.detail || '', 160)}`);
+    return `AI 接口调用失败（已尝试 ${providers.length} 条模型配置）：${parts.join('；')}`;
+  }
   const failures = up?._litFailures;
   if (failures && failures.length > 1) return describeEndpointFailures(failures);
   return `AI 接口返回 ${up?.status}：${clip(detail, 300)}`;
 }
 
-async function fetchModelCompletion(profile, payload, { stream = false, timeoutMs = LLM_REQUEST_TIMEOUT_MS } = {}) {
+/**
+ * 对**一条**配置发起调用（单供应商版本）。多供应商的故障转移由下面的 fetchModelCompletion 负责，
+ * 这里只管「同一条配置内部的端点回退」（chat / responses、补 /v1、换 assistant 写法）。
+ */
+async function fetchModelCompletionOnce(profile, payload, { stream = false, timeoutMs = LLM_REQUEST_TIMEOUT_MS } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const attempts = buildEndpointAttempts(profile);
   const failures = [];
+  // 返回句柄：cancel 清超时定时器；abort 主动掐断上游（路由器决定「换下一家」时要用，避免留着半开的 SSE 连接）
+  const done = (up) => ({ up, cancel: () => clearTimeout(timer), abort: () => controller.abort() });
 
   // 同一端点内的一次请求（含「服务拒绝 system role」的兜底重发）
   const send = async (attempt) => {
@@ -384,7 +397,7 @@ async function fetchModelCompletion(profile, payload, { stream = false, timeoutM
       const attempt = attempts[index];
       const up = await send(attempt);
       // 正常响应：只有 content-type 不是网页，才认定「这个端点是对的」
-      if (up.ok && !isHtmlResponse(up)) return { up, cancel: () => clearTimeout(timer) };
+      if (up.ok && !isHtmlResponse(up)) return done(up);
 
       const detail = up._litErrorText || await up.text().catch(() => '');
       const html = isHtmlResponse(up);
@@ -408,10 +421,14 @@ async function fetchModelCompletion(profile, payload, { stream = false, timeoutM
     // 不在这里抛错：上层（streamModelResponse）还有「流式失败退非流式」等兜底要做。
     // 把各端点的失败明细挂在响应上，等上层真要报错时再一次性说清楚。
     last._litFailures = failures.slice();
-    return { up: last, cancel: () => clearTimeout(timer) };
+    return done(last);
   } catch (e) {
     clearTimeout(timer);
-    if (e?.name === 'AbortError') throw new Error('AI 请求超时（' + Math.round(timeoutMs / 1000) + ' 秒）。请确认本地模型服务已启动、模型已加载，或检查网关地址');
+    if (e?.name === 'AbortError') {
+      const err = new Error('AI 请求超时（' + Math.round(timeoutMs / 1000) + ' 秒）。请确认本地模型服务已启动、模型已加载，或检查网关地址');
+      err.kind = 'timeout';   // 让路由器能把「超时」和其它失败区分开
+      throw err;
+    }
     throw e;
   }
 }
@@ -480,16 +497,99 @@ async function pipeLLMStream(up, res, { onDelta } = {}) {
   return readLLMResponse(up, { onDelta: (delta) => { sseSend(res, { delta }); onDelta?.(delta); } });
 }
 
-async function streamModelResponse(profile, payload, res, { onDelta } = {}) {
+// ---------- 模型路由：把「一次调用」升级成「按优先级依次尝试多条模型配置」 ----------
+// 借鉴 cc-switch「路由服务」的做法：主供应商失败就按队列换下一家，连续失败进入熔断、
+// 冷却后半开试探。决策与记账全在 src/modelRouter.js（纯函数、可单测），这里只负责发请求。
+// 刻意不在这里读 store.getSettings()：模块导入时数据目录可能还没确定（测试会先 import 再设目录），
+// 配置统一在每次 routerPlan / 状态接口里现读现用（applyRouterConfig）。
+const routerState = modelRouter.createRouterState();
+
+function routerProfilesById(settings) {
+  const s = settings || store.getSettings();
+  const map = new Map();
+  for (const raw of (s.modelProfiles || [])) {
+    const described = catalog.resolveProfile(raw);   // 未填 Key / 已删除 → null，会被自动跳过
+    if (described) map.set(described.id, described);
+  }
+  return map;
+}
+
+/** 按当前设置为这次请求排出候选顺序（主供应商在前，然后是按序的备用队列） */
+function routerPlan(preferred, settings) {
+  const s = settings || store.getSettings();
+  modelRouter.applyRouterConfig(routerState, modelRouter.readRouterConfig(s));
+  const byId = routerProfilesById(s);
+  return modelRouter.planCandidates({
+    preferred,
+    resolveById: (id) => byId.get(id) || null,
+    state: routerState,
+  });
+}
+
+// 换到备用供应商时，模型名必须跟着换成那家自己的模型 —— 否则会把 A 的模型名发给 B，
+// 轻则报「模型不存在」，重则静默用了错误的模型。
+function bodyForCandidate(payload, candidate, preferred) {
+  if (candidate === preferred || candidate?.id === preferred?.id) return payload;
+  return { ...payload, model: candidate.model };
+}
+
+/** 对一条配置发起一次调用，并把结果记进路由统计。 */
+async function callProviderOnce(profile, payload, { stream = false, timeoutMs } = {}) {
+  const startedAt = Date.now();
+  let request = null;
+  let detail = '';
+  let html = false;
+  let timedOut = false;
+  let aborted = false;
+  try {
+    request = await fetchModelCompletionOnce(profile, payload, { stream, timeoutMs });
+    html = isHtmlResponse(request.up);
+    if (!request.up.ok || html) {
+      detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
+      request.up._litErrorText = detail;
+    }
+  } catch (e) {
+    detail = String(e?.message || e);
+    timedOut = e?.kind === 'timeout';
+    aborted = e?.name === 'AbortError' && !timedOut;
+  }
+  const latencyMs = Date.now() - startedAt;
+  const ok = !!request && !!request.up.ok && !html;
+  const status = Number(request?.up?.status) || 0;
+  if (ok) {
+    modelRouter.noteSuccess(routerState, profile.id, { latencyMs });
+    return { ok: true, request, latencyMs, detail: '', kind: '', status };
+  }
+  const kind = modelRouter.classifyFailure({ status, message: detail, html, timeout: timedOut, aborted });
+  modelRouter.noteFailure(routerState, profile.id, { status, message: detail, latencyMs, kind });
+  request?.abort?.();   // 别把上游连接挂着
+  return { ok: false, request, latencyMs, detail, kind, status, failover: modelRouter.shouldFailover({ kind, aborted }) };
+}
+
+function routerLog(entry) {
+  modelRouter.recordLog(routerState, entry);
+}
+
+/** 把所有失败原因挂到最后那份响应上，供 endpointFailureMessage 一次说清 */
+function withProviderNotes(request, tried) {
+  if (request && tried.length) request._litProviderFailures = tried.slice();
+  return request;
+}
+
+/**
+ * 流式：单条配置版本（含「流式失败退非流式」兜底）。
+ * 多供应商的故障转移在下面的 streamModelResponse 里做 —— 它需要知道「有没有已经吐字给客户端」。
+ */
+async function streamModelResponseOnce(profile, payload, res, { onDelta } = {}) {
   const preferNonStream = profile?.streamMode === 'nonstream';
-  let request = await fetchModelCompletion(profile, payload, { stream: !preferNonStream });
+  let request = await fetchModelCompletionOnce(profile, payload, { stream: !preferNonStream });
   try {
     if (!request.up.ok) {
       const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
       // auto 模式：服务不支持 stream 时改为普通 JSON；强制流式模式则直接报告问题。
       if (!preferNonStream && profile?.streamMode === 'auto') {
         request.cancel();
-        request = await fetchModelCompletion(profile, payload, { stream: false });
+        request = await fetchModelCompletionOnce(profile, payload, { stream: false });
       } else {
         throw new Error(endpointFailureMessage(request.up, detail));
       }
@@ -502,7 +602,7 @@ async function streamModelResponse(profile, payload, res, { onDelta } = {}) {
     // 非标准网关常在 stream=true 下直接断开或没有 token；auto 退回普通 JSON，前端仍能收到内容。
     if (!result.full.trim() && !result.aborted && !preferNonStream && profile?.streamMode === 'auto') {
       request.cancel();
-      request = await fetchModelCompletion(profile, payload, { stream: false });
+      request = await fetchModelCompletionOnce(profile, payload, { stream: false });
       if (!request.up.ok) {
         const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
         throw new Error(`AI 流式响应为空，非流式兜底也失败（${request.up.status}）：${clip(detail, 300)}`);
@@ -511,6 +611,135 @@ async function streamModelResponse(profile, payload, res, { onDelta } = {}) {
     }
     return result;
   } finally { request.cancel?.(); }
+}
+
+// 请求级记账：保证「活跃连接」一定会在结束时减回去（异常路径也不漏）
+function requestTracker() {
+  const ctx = modelRouter.noteRequestStart(routerState);
+  let settled = false;
+  return {
+    ctx,
+    failover() { ctx.failovers += 1; modelRouter.noteFailover(routerState); },
+    finish(ok, error) {
+      if (settled) return;
+      settled = true;
+      modelRouter.noteRequestEnd(routerState, ctx, { ok, error });
+    },
+  };
+}
+
+// 全部候选都失败、且连一份上游响应都没拿到时的占位响应对象。
+// 调用方一律按 { up, cancel, abort } 的契约使用，这里补一个 ok:false 的壳，
+// 让错误照原路（endpointFailureMessage）呈现，而不是抛 TypeError。
+function syntheticFailureResponse(detail) {
+  const text = String(detail || 'AI 接口调用失败');
+  return {
+    ok: false, status: 0, _litErrorText: text, _litFailures: [], headers: { get: () => '' }, body: null,
+    text: async () => text,
+  };
+}
+
+/**
+ * 非流式路由入口。签名与原来的单供应商版本一致，全站调用点零改动即获得故障转移能力。
+ * 成功 → 返回那家的 { up, cancel, abort }；全失败 → 返回最后一份响应，并把
+ * 「每条配置各自的原因」挂到 up._litProviderFailures（见 endpointFailureMessage）。
+ */
+async function fetchModelCompletion(preferred, payload, opts = {}) {
+  const plan = routerPlan(preferred, opts.settings);
+  if (!plan.candidates.length) throw new Error(noModelError());
+  const tracker = requestTracker();
+  const tried = [];
+  let last = null;
+  try {
+    for (let index = 0; index < plan.candidates.length; index += 1) {
+      const candidate = plan.candidates[index];
+      const attempt = await callProviderOnce(candidate, bodyForCandidate(payload, candidate, preferred), {
+        stream: !!opts.stream, timeoutMs: opts.timeoutMs,
+      });
+      if (attempt.ok) {
+        if (index > 0) tracker.failover();
+        routerLog({
+          profileId: candidate.id, label: candidate.label, model: candidate.model,
+          ok: true, stream: !!opts.stream, attempts: index + 1, latencyMs: attempt.latencyMs,
+          failoverFrom: index > 0 ? (plan.candidates[0].label || '') : '', forced: plan.forced,
+        });
+        tracker.finish(true, '');
+        return withProviderNotes(attempt.request, tried);
+      }
+      last = attempt.request || last;
+      tried.push({ label: candidate.label || candidate.id, detail: attempt.detail, kind: attempt.kind });
+      if (!attempt.failover) break;
+    }
+    const reason = tried.length ? tried[tried.length - 1].detail : '没有可用的模型配置';
+    routerLog({
+      profileId: preferred?.id || '', label: preferred?.label || '', model: preferred?.model || '',
+      ok: false, stream: !!opts.stream, attempts: tried.length, error: reason, forced: plan.forced,
+    });
+    tracker.finish(false, reason);
+    return withProviderNotes(last || syntheticFailureResponse(reason), tried);
+  } finally {
+    tracker.finish(false, '未完成');   // 兜底：异常路径也不让「活跃连接」漏减
+  }
+}
+
+/**
+ * 流式路由入口。
+ * 关键约束：**一旦已经往客户端写过 token 就不能再换供应商** —— 响应体已经开始输出，
+ * 换一家会把两家的内容拼在一起。所以只在「还没吐字」时切换，其余情况如实报错。
+ */
+async function streamModelResponse(preferred, payload, res, { onDelta, settings } = {}) {
+  const plan = routerPlan(preferred, settings);
+  if (!plan.candidates.length) throw new Error(noModelError());
+  const tracker = requestTracker();
+  const tried = [];
+  let emitted = false;
+  let failure = null;
+  try {
+    for (let index = 0; index < plan.candidates.length; index += 1) {
+      const candidate = plan.candidates[index];
+      const startedAt = Date.now();
+      try {
+        const result = await streamModelResponseOnce(candidate, bodyForCandidate(payload, candidate, preferred), res, {
+          onDelta: (delta) => { emitted = true; onDelta?.(delta); },
+        });
+        const latencyMs = Date.now() - startedAt;
+        if (result.full.trim() || result.aborted) {
+          if (index > 0) tracker.failover();
+          modelRouter.noteSuccess(routerState, candidate.id, { latencyMs });
+          routerLog({
+            profileId: candidate.id, label: candidate.label, model: candidate.model,
+            ok: true, stream: true, attempts: index + 1, latencyMs,
+            failoverFrom: index > 0 ? (plan.candidates[0].label || '') : '', forced: plan.forced,
+          });
+          tracker.finish(true, '');
+          return result;
+        }
+        modelRouter.noteFailure(routerState, candidate.id, { message: '流式响应为空', kind: 'empty', latencyMs });
+        tried.push({ label: candidate.label || candidate.id, detail: '流式响应为空', kind: 'empty' });
+        failure = new Error(`模型没有返回任何内容（${candidate.label || candidate.id}）`);
+      } catch (e) {
+        const latencyMs = Date.now() - startedAt;
+        const kind = modelRouter.classifyFailure({ message: e.message, timeout: e?.kind === 'timeout' });
+        modelRouter.noteFailure(routerState, candidate.id, { message: e.message, latencyMs, kind });
+        tried.push({ label: candidate.label || candidate.id, detail: e.message, kind });
+        failure = e;
+      }
+      if (emitted) break;   // 已经吐过字，换人只会把两家的内容混在一起
+      const lastKind = tried[tried.length - 1]?.kind || '';
+      if (!modelRouter.shouldFailover({ kind: lastKind, aborted: lastKind === 'aborted' })) break;
+    }
+    const err = tried.length > 1
+      ? new Error(`AI 接口调用失败（已尝试 ${tried.length} 条模型配置）：${tried.map((t) => `${t.label} → ${clip(t.detail, 160)}`).join('；')}`)
+      : (failure || new Error('没有可用的模型配置'));
+    routerLog({
+      profileId: preferred?.id || '', label: preferred?.label || '', model: preferred?.model || '',
+      ok: false, stream: true, attempts: tried.length, error: err.message, forced: plan.forced,
+    });
+    tracker.finish(false, err.message);
+    throw err;
+  } finally {
+    tracker.finish(false, '未完成');   // 兜底：异常路径也不让「活跃连接」漏减
+  }
 }
 
 // ---------- 当前生效的模型配置 ----------
@@ -770,6 +999,106 @@ export function createApp({
       res.status(500).json({ error: e.message || '读取更新状态失败' });
     }
   });
+  // ---------- 模型路由：故障转移 / 熔断 / 用量统计 ----------
+  // 供应商清单（供「模型路由」面板选择备用队列）：包含全部配置，未填 Key 的也列出来，
+  // 但标记 hasKey=false —— 面板上禁用勾选并提示，而不是让它悄悄消失。
+  function routerProfileList(settings) {
+    return (settings.modelProfiles || []).map((p) => ({
+      id: String(p.id),
+      label: p.label || p.model || String(p.id),
+      model: p.model || '',
+      provider: p.provider,
+      providerName: catalog.providerName(p.provider),
+      hasKey: !!String(p.apiKey || '').trim() || p.provider === 'custom',
+      vision: catalog.resolveVisionCapability(p) === true,
+    }));
+  }
+
+  app.get('/api/router/status', (_req, res) => {
+    try {
+      const s = store.getSettings();
+      modelRouter.applyRouterConfig(routerState, modelRouter.readRouterConfig(s));
+      res.json({
+        ...modelRouter.snapshot(routerState, { profiles: routerProfileList(s) }),
+        activeProfileId: String(s.activeProfileId || ''),
+        profiles: routerProfileList(s),
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message || '读取路由状态失败' });
+    }
+  });
+
+  app.post('/api/router/config', (req, res) => {
+    try {
+      const s = store.getSettings();
+      const raw = req.body || {};
+      const merged = { ...modelRouter.readRouterConfig(s), ...raw };
+      if (raw.breaker && typeof raw.breaker === 'object') {
+        merged.breaker = { ...modelRouter.readRouterConfig(s).breaker, ...raw.breaker };
+      }
+      const next = modelRouter.normalizeRouterConfig(merged);
+      // 队列里只保留仍然存在的模型配置：删掉一条模型配置后，队列里别留幽灵 id
+      const ids = new Set((s.modelProfiles || []).map((p) => String(p.id)));
+      next.queue = next.queue.filter((id) => ids.has(id));
+      s.modelRouter = next;
+      store.saveSettings(s);
+      modelRouter.applyRouterConfig(routerState, next);
+      res.json({ modelRouter: next });
+    } catch (e) {
+      res.status(400).json({ error: e.message || '保存路由设置失败' });
+    }
+  });
+
+  app.post('/api/router/reset', (req, res) => {
+    try {
+      modelRouter.resetRouterState(routerState, { keepBreakers: !!req.body?.keepBreakers });
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: e.message || '重置路由统计失败' });
+    }
+  });
+
+  // 批量测速：给每条模型配置发一个极小的请求，报告可用性与耗时。
+  // 刻意直接走 fetchModelCompletionOnce（单配置），**不计入**熔断统计 ——
+  // 手动测一下不应该影响线上路由的熔断判断。
+  app.post('/api/router/probe', async (req, res) => {
+    try {
+      const s = store.getSettings();
+      const wanted = Array.isArray(req.body?.profileIds) ? req.body.profileIds.map(String) : null;
+      const list = (s.modelProfiles || []).filter((p) => !wanted || wanted.includes(String(p.id)));
+      const results = await Promise.all(list.map(async (raw) => {
+        const meta = { id: String(raw.id), label: raw.label || raw.model || String(raw.id) };
+        const profile = catalog.resolveProfile(raw);
+        if (!profile) return { ...meta, ok: false, latencyMs: 0, error: '未填写 API 密钥' };
+        const startedAt = Date.now();
+        try {
+          const request = await fetchModelCompletionOnce(profile, {
+            model: profile.model,
+            messages: [{ role: 'user', content: 'ping' }],
+            max_tokens: 8,
+          }, { stream: false, timeoutMs: 30000 });
+          const latencyMs = Date.now() - startedAt;
+          if (!request.up.ok) {
+            const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
+            request.cancel();
+            return { ...meta, ok: false, latencyMs, error: endpointFailureMessage(request.up, detail) };
+          }
+          const body = await request.up.text().catch(() => '');   // 读掉响应体，避免连接悬挂
+          request.cancel();
+          if (/^\s*</.test(body)) {
+            return { ...meta, ok: false, latencyMs, error: '返回的是网页而不是模型响应（Base URL 可能少写了 /v1）' };
+          }
+          return { ...meta, ok: true, latencyMs, error: '' };
+        } catch (e) {
+          return { ...meta, ok: false, latencyMs: Date.now() - startedAt, error: e.message || '测速失败' };
+        }
+      }));
+      res.json({ results });
+    } catch (e) {
+      res.status(500).json({ error: e.message || '测速失败' });
+    }
+  });
+
   for (const action of ['check', 'download', 'install']) {
     app.post(`/api/update/${action}`, async (_req, res) => {
       try {
@@ -3237,7 +3566,15 @@ export function createApp({
     } catch (e) {
       return res.status(400).json({ error: '切换保存目录失败：' + e.message });
     }
-    res.json(store.saveSettings(next));
+    // 路由设置从这条通用入口进来时也要归一化并立刻生效，避免存进一份越界的熔断参数
+    if (Object.prototype.hasOwnProperty.call(body, 'modelRouter')) {
+      next.modelRouter = modelRouter.normalizeRouterConfig(next.modelRouter);
+    }
+    const saved = store.saveSettings(next);
+    if (Object.prototype.hasOwnProperty.call(body, 'modelRouter')) {
+      modelRouter.applyRouterConfig(routerState, modelRouter.readRouterConfig(saved));
+    }
+    res.json(saved);
   });
 
   // ---------- 导出 ----------

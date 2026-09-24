@@ -1681,6 +1681,298 @@
     }
   }
 
+  // ==================== 模型路由（故障转移 / 熔断 / 用量） ====================
+  // 决策与记账都在后端（src/modelRouter.js + server.js），前端只做「展示 + 改配置」。
+
+  let routerStatus = null;   // 最近一次 /api/router/status 的结果
+  let routerTimer = null;    // 设置弹窗打开时的自动刷新定时器
+  const RT_REFRESH_MS = 4000;
+  const RT_HEALTH_LABEL = { ok: '正常', warn: '有失败', open: '已熔断', halfOpen: '试探中' };
+
+  function fmtUptime(ms) {
+    const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function fmtClock(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
+  function rtConfig() {
+    return (routerStatus && routerStatus.config) || {};
+  }
+  function rtQueue() {
+    return [...((rtConfig().queue) || [])];
+  }
+  function rtProfileMeta(id) {
+    return (routerStatus?.profiles || []).find((p) => p.id === id) || null;
+  }
+
+  async function loadRouterStatus() {
+    try {
+      routerStatus = await api('/api/router/status');
+    } catch (_) {
+      routerStatus = null;
+    }
+    renderRouterLive();
+    return routerStatus;
+  }
+
+  /** 把「配置类」内容填进表单（开关、队列、熔断参数）——只在打开弹窗和保存后调用，避免覆盖用户正在输入的内容 */
+  function fillRouterForm() {
+    const cfg = rtConfig();
+    const b = cfg.breaker || {};
+    if ($('rtEnabled')) $('rtEnabled').checked = cfg.enabled !== false;
+    if ($('rtFailover')) $('rtFailover').checked = cfg.failover !== false;
+    const setNum = (id, value) => {
+      const el = $(id);
+      if (el && document.activeElement !== el) el.value = value === undefined || value === null ? '' : String(value);
+    };
+    setNum('rtFailThreshold', b.failThreshold);
+    setNum('rtRecoverSuccess', b.recoverSuccess);
+    setNum('rtOpenSeconds', b.openSeconds);
+    setNum('rtErrorRate', b.errorRate);
+    setNum('rtMinRequests', b.minRequests);
+    renderRouterQueue();
+    renderRouterAddSelect();
+    updateRouterHint();
+  }
+
+  function updateRouterHint() {
+    const el = $('rtHint');
+    if (!el) return;
+    const cfg = rtConfig();
+    // 以「表单里当前的状态」为准，这样用户勾一下开关提示就会变，不必等保存
+    const enabled = $('rtEnabled') ? $('rtEnabled').checked : cfg.enabled !== false;
+    const failover = $('rtFailover') ? $('rtFailover').checked : cfg.failover !== false;
+    const n = (cfg.queue || []).length;
+    if (!enabled) {
+      el.textContent = '路由已关闭：所有请求都只用当前激活的模型。';
+    } else if (!failover) {
+      el.textContent = '只统计、不切换：失败会被记录，但请求不会转到备用模型。';
+    } else if (n) {
+      el.textContent = `已配置 ${n} 个备用模型，主模型失败时按顺序尝试。`;
+    } else {
+      el.textContent = '队列为空，暂时没有可切换的备用模型。';
+    }
+  }
+
+  function renderRouterQueue() {
+    const box = $('rtQueue');
+    if (!box) return;
+    const queue = rtQueue();
+    if (!queue.length) {
+      box.innerHTML = '<div class="rt-empty">队列为空：主模型失败时不会切换，等价于「只用主模型」。用下面的下拉框把备用模型加进来。</div>';
+      return;
+    }
+    box.innerHTML = queue.map((id, i) => {
+      const meta = rtProfileMeta(id);
+      const name = meta ? meta.label : '（已删除的模型）';
+      const sub = meta
+        ? `${meta.providerName || '自定义'} · ${meta.model || '未填模型名'}${meta.hasKey ? '' : ' · 未填密钥'}`
+        : '这条模型配置已被删除，建议移除';
+      return `<div class="rt-item">
+        <span class="rt-idx">${i + 1}</span>
+        <div class="rt-item-main">
+          <div class="rt-item-name">${esc(name)}</div>
+          <div class="rt-item-sub">${esc(sub)}</div>
+        </div>
+        <div class="rt-item-acts">
+          <button type="button" class="rt-ico" data-rtup="${esc(id)}" title="上移" ${i === 0 ? 'disabled' : ''}>↑</button>
+          <button type="button" class="rt-ico" data-rtdown="${esc(id)}" title="下移" ${i === queue.length - 1 ? 'disabled' : ''}>↓</button>
+          <button type="button" class="rt-ico" data-rtdel="${esc(id)}" title="移出队列">✕</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderRouterAddSelect() {
+    const sel = $('rtAddSelect');
+    if (!sel) return;
+    const inQueue = new Set(rtQueue());
+    const options = (routerStatus?.profiles || []).filter((p) => !inQueue.has(p.id));
+    if (!options.length) {
+      sel.innerHTML = '<option value="">没有可加入的模型了</option>';
+      return;
+    }
+    sel.innerHTML = ['<option value="">选择要加入队列的模型…</option>', ...options.map((p) => (
+      `<option value="${esc(p.id)}"${p.hasKey ? '' : ' disabled'}>${esc(p.label)}${p.hasKey ? '' : '（未填密钥，不可用）'}</option>`
+    ))].join('');
+  }
+
+  /** 实时部分：统计、健康、日志 —— 每次轮询都会刷新 */
+  function renderRouterLive() {
+    if (!routerStatus) return;
+    const s = routerStatus;
+    if ($('rtActive')) $('rtActive').textContent = String(s.activeConnections || 0);
+    if ($('rtTotal')) $('rtTotal').textContent = String(s.totalRequests || 0);
+    const rate = s.successRate;
+    const rateEl = $('rtRate');
+    if (rateEl) {
+      const has = rate !== null && rate !== undefined;
+      rateEl.textContent = has ? `${rate}%` : '—';
+      rateEl.className = 'rt-stat-v' + (has ? (rate >= 90 ? ' ok' : (rate >= 70 ? ' warn' : ' bad')) : '');
+    }
+    if ($('rtUptime')) $('rtUptime').textContent = fmtUptime(s.uptimeMs);
+    renderRouterProviders();
+    renderRouterLogs();
+  }
+
+  function renderRouterProviders() {
+    const box = $('rtProviders');
+    if (!box) return;
+    const queue = rtQueue();
+    const activeId = routerStatus?.activeProfileId || activeProfileId;
+    const rows = (routerStatus?.profiles || []).map((p) => ({
+      ...p, ...((routerStatus.providers || []).find((x) => x.id === p.id) || {}),
+    }));
+    if (!rows.length) {
+      box.innerHTML = '<div class="rt-empty">还没有配置任何模型。</div>';
+      return;
+    }
+    box.innerHTML = rows.map((p) => {
+      const health = p.health || 'ok';
+      const tags = [];
+      if (p.id === activeId) tags.push('<span class="rt-tag primary">主模型</span>');
+      const qi = queue.indexOf(p.id);
+      if (qi >= 0) tags.push(`<span class="rt-tag queue">备用 ${qi + 1}</span>`);
+      if (health === 'open') tags.push('<span class="rt-tag bad">已熔断</span>');
+      else if (health === 'warn') tags.push(`<span class="rt-tag bad">连续失败 ${p.consecutiveFailures || 0}</span>`);
+      if (!p.hasKey) tags.push('<span class="rt-tag">未填密钥</span>');
+
+      const parts = [];
+      if (p.requests) parts.push(`请求 ${p.requests}·成功 ${p.successes}·失败 ${p.failures}`);
+      if (p.successRate !== null && p.successRate !== undefined) parts.push(`成功率 ${p.successRate}%`);
+      if (p.lastLatencyMs) parts.push(`最近耗时 ${p.lastLatencyMs}ms`);
+      if (p.lastError) parts.push('最近错误：' + p.lastError);
+
+      const dim = p.id !== activeId && qi < 0;
+      return `<div class="rt-prov${dim ? ' dim' : ''}">
+        <span class="rt-dot ${health}" title="${esc(RT_HEALTH_LABEL[health] || health)}"></span>
+        <div class="rt-prov-main">
+          <div class="rt-prov-name">${esc(p.label)} ${tags.join(' ')}</div>
+          <div class="rt-prov-sub">${esc(p.model || '未填模型名')}${parts.length ? ' · ' + esc(parts.join(' · ')) : ' · 暂无请求'}</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderRouterLogs() {
+    const box = $('rtLogs');
+    if (!box) return;
+    const logs = routerStatus?.logs || [];
+    if (!logs.length) {
+      box.innerHTML = '<div class="rt-empty">还没有请求记录。用一次 AI 功能后这里就会出现。</div>';
+      return;
+    }
+    box.innerHTML = logs.slice(0, 200).map((l) => {
+      const switched = l.failoverFrom ? `<span class="rt-log-fo">← 由「${esc(l.failoverFrom)}」切换</span>` : '';
+      const detail = l.ok
+        ? `成功 · ${l.latencyMs || 0}ms${l.attempts > 1 ? ` · 第 ${l.attempts} 次尝试` : ''}`
+        : esc(l.error || '失败');
+      return `<div class="rt-log${l.ok ? '' : ' bad'}">
+        <span class="rt-log-time">${esc(fmtClock(l.at))}</span>
+        <span class="rt-log-name">${esc(l.label || l.profileId || '—')}</span>
+        ${switched}
+        <span class="rt-log-msg">${detail}</span>
+      </div>`;
+    }).join('');
+  }
+
+  /** 保存路由设置；overrides 用于「只改队列」这类局部保存（避免丢掉用户刚勾的开关） */
+  async function saveRouterConfig(overrides = {}) {
+    const numOrUndef = (id) => {
+      const raw = String($(id)?.value ?? '').trim();
+      if (!raw) return undefined;
+      const v = Number(raw);
+      return Number.isFinite(v) ? v : undefined;
+    };
+    const payload = {
+      enabled: !!$('rtEnabled')?.checked,
+      failover: !!$('rtFailover')?.checked,
+      queue: overrides.queue || rtQueue(),
+      breaker: {
+        failThreshold: numOrUndef('rtFailThreshold'),
+        recoverSuccess: numOrUndef('rtRecoverSuccess'),
+        openSeconds: numOrUndef('rtOpenSeconds'),
+        errorRate: numOrUndef('rtErrorRate'),
+        minRequests: numOrUndef('rtMinRequests'),
+      },
+    };
+    try {
+      await api('/api/router/config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      });
+      toast('路由设置已保存', 'success');
+      await loadRouterStatus();
+      fillRouterForm();
+    } catch (e) {
+      toast('保存路由设置失败：' + e.message, 'error');
+    }
+  }
+
+  async function probeRouter() {
+    const btn = $('btnRtProbe');
+    const box = $('rtProbeResult');
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '测速中…'; }
+    if (box) { box.className = 'ml-test-result'; box.textContent = '正在逐条测试（每条最长 30 秒）…'; }
+    try {
+      const d = await api('/api/router/probe', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+      });
+      const list = d.results || [];
+      const okCount = list.filter((x) => x.ok).length;
+      if (box) {
+        box.className = 'ml-test-result ' + (list.length && okCount === list.length ? 'ok' : 'err');
+        box.innerHTML = list.map((x) => (x.ok
+          ? `✅ ${esc(x.label)} · ${x.latencyMs}ms`
+          : `❌ ${esc(x.label)} · ${esc(x.error || '失败')}`)).join('<br />')
+          + `<br /><b>${okCount}/${list.length} 条可用</b>（测速不计入熔断与用量统计）`;
+      }
+      await loadRouterStatus();
+      fillRouterForm();
+    } catch (e) {
+      if (box) { box.className = 'ml-test-result err'; box.textContent = '测速失败：' + e.message; }
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = original || '🔌 全部测速'; }
+    }
+  }
+
+  async function resetRouterStats() {
+    if (!confirm('重置路由统计？会清空请求数、成功率、请求日志与熔断状态（模型配置不受影响）。')) return;
+    try {
+      await api('/api/router/reset', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+      });
+      toast('路由统计已重置', 'success');
+      await loadRouterStatus();
+      fillRouterForm();
+    } catch (e) {
+      toast('重置失败：' + e.message, 'error');
+    }
+  }
+
+  function startRouterRefresh() {
+    stopRouterRefresh();
+    // 弹窗被关掉（关闭按钮 / 点遮罩 / Esc）时自动停表，不必逐个出口挂钩
+    routerTimer = setInterval(() => {
+      if ($('settingsModal')?.classList.contains('hidden')) { stopRouterRefresh(); return; }
+      loadRouterStatus();
+    }, RT_REFRESH_MS);
+  }
+  function stopRouterRefresh() {
+    if (routerTimer) { clearInterval(routerTimer); routerTimer = null; }
+  }
+
   function renderProfileList() {
     const box = $('mlList');
     if (!box) return;
@@ -2090,6 +2382,32 @@
     $('btnMlSave').addEventListener('click', saveMlProfile);
     $('btnMlCancel').addEventListener('click', closeMlEditor);
     $('btnMlTest').addEventListener('click', testMlProfile);
+
+    // ---- 模型路由（故障转移） ----
+    $('btnRtSave').addEventListener('click', () => saveRouterConfig());
+    $('btnRtAdd').addEventListener('click', () => {
+      const id = $('rtAddSelect').value;
+      if (!id) { toast('先在左侧选择一个要加入队列的模型', 'error'); return; }
+      const queue = rtQueue();
+      if (!queue.includes(id)) queue.push(id);
+      saveRouterConfig({ queue });
+    });
+    $('rtQueue').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-rtup],[data-rtdown],[data-rtdel]');
+      if (!btn) return;
+      const queue = rtQueue();
+      const id = btn.dataset.rtup || btn.dataset.rtdown || btn.dataset.rtdel;
+      const i = queue.indexOf(id);
+      if (i < 0) return;
+      if (btn.dataset.rtdel) queue.splice(i, 1);
+      else if (btn.dataset.rtup && i > 0) [queue[i - 1], queue[i]] = [queue[i], queue[i - 1]];
+      else if (btn.dataset.rtdown && i < queue.length - 1) [queue[i + 1], queue[i]] = [queue[i], queue[i + 1]];
+      else return;
+      saveRouterConfig({ queue });
+    });
+    $('btnRtProbe').addEventListener('click', probeRouter);
+    $('btnRtReset').addEventListener('click', resetRouterStats);
+    ['rtEnabled', 'rtFailover'].forEach((id) => $(id).addEventListener('change', updateRouterHint));
     // 切供应商时自动带出官方 Base URL（用户手动改过则不动）
     $('mlProvider').addEventListener('change', () => {
       const p = providerById($('mlProvider').value);
@@ -9170,6 +9488,11 @@ a { color: #176b87; }
     // 先拉一次最新配置，避免用设置页改完再进设置时看到旧列表
     await loadModels();
     fillSettingsForm();
+    // 模型路由：拉状态 → 填配置 → 开自动刷新（弹窗关掉时定时器会自己停）
+    await loadRouterStatus();
+    fillRouterForm();
+    renderRouterLive();
+    startRouterRefresh();
     $('settingsModal').classList.remove('hidden');
     loadBackupList();
   }

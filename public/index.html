@@ -947,6 +947,68 @@
           <div id="setVisionHint" class="ml-vision-hint"></div>
         </div>
 
+        <!-- 模型路由：多条配置互为备份，失败自动切换 + 熔断 -->
+        <div class="ml-section" id="routerSection">
+          <div class="ml-head">
+            <span class="ml-title">🔀 模型路由</span>
+            <label class="rt-switch" title="开启后，模型调用会经过路由：失败时按队列换下一条配置">
+              <input type="checkbox" id="rtEnabled" /> 启用
+            </label>
+          </div>
+          <p class="ml-desc">
+            主模型调用失败（超时 / 限流 / 5xx / 网关返回网页）时，自动按<b>故障转移队列</b>的顺序换下一条配置重试；
+            连续失败的那条会进入<b>熔断</b>并暂时跳过，冷却过后再半开试探恢复。
+            <b>队列留空时等价于「只用主模型」</b>，不改变现有行为。
+          </p>
+
+          <div class="rt-row">
+            <label class="rt-switch"><input type="checkbox" id="rtFailover" /> 自动故障转移</label>
+            <span class="ml-hint" id="rtHint"></span>
+          </div>
+
+          <div class="rt-stats">
+            <div class="rt-stat"><span class="rt-stat-k">活跃连接</span><b class="rt-stat-v" id="rtActive">0</b></div>
+            <div class="rt-stat"><span class="rt-stat-k">总请求数</span><b class="rt-stat-v" id="rtTotal">0</b></div>
+            <div class="rt-stat"><span class="rt-stat-k">成功率</span><b class="rt-stat-v" id="rtRate">—</b></div>
+            <div class="rt-stat"><span class="rt-stat-k">运行时间</span><b class="rt-stat-v" id="rtUptime">—</b></div>
+          </div>
+
+          <div class="rt-sub">故障转移队列<span class="rt-sub-note">主模型不在此列 —— 它总是第一个被尝试</span></div>
+          <div id="rtQueue" class="rt-queue"></div>
+          <div class="rt-add-row">
+            <select id="rtAddSelect" class="tb-select"></select>
+            <button type="button" id="btnRtAdd" class="btn btn-ghost btn-sm">＋ 加入队列</button>
+          </div>
+
+          <details class="rt-details">
+            <summary>熔断与重试参数</summary>
+            <div class="prof-grid">
+              <label class="field"><span>连续失败阈值</span><input id="rtFailThreshold" class="tb-input" type="number" min="1" max="20" /></label>
+              <label class="field"><span>恢复成功阈值</span><input id="rtRecoverSuccess" class="tb-input" type="number" min="1" max="10" /></label>
+              <label class="field"><span>熔断时长（秒）</span><input id="rtOpenSeconds" class="tb-input" type="number" min="0" max="300" /></label>
+              <label class="field"><span>错误率阈值（%）</span><input id="rtErrorRate" class="tb-input" type="number" min="0" max="100" /></label>
+              <label class="field"><span>算错误率的最小请求数</span><input id="rtMinRequests" class="tb-input" type="number" min="5" max="100" /></label>
+            </div>
+            <small class="ml-field-hint">连续失败到阈值、或者错误率超过阈值，都会让这条配置进入熔断；冷却结束后半开试探，连续成功到「恢复成功阈值」就恢复正常。填 0 秒表示不冷却、下一条请求立刻再试。</small>
+          </details>
+
+          <div class="rt-sub">各模型健康状态<span class="rt-sub-note">🟢 正常 · 🟡 近期有失败 · 🔴 已熔断</span></div>
+          <div id="rtProviders" class="rt-providers"></div>
+
+          <div class="rt-actions">
+            <button type="button" id="btnRtProbe" class="btn btn-ghost btn-sm">🔌 全部测速</button>
+            <button type="button" id="btnRtReset" class="btn btn-ghost btn-sm">↺ 重置统计</button>
+            <span class="ob-spacer"></span>
+            <button type="button" id="btnRtSave" class="btn btn-primary btn-sm">保存路由设置</button>
+          </div>
+          <div id="rtProbeResult" class="ml-test-result hidden"></div>
+
+          <details class="rt-details">
+            <summary>请求日志（最近 200 条，新的在最上面）</summary>
+            <div id="rtLogs" class="rt-logs"></div>
+          </details>
+        </div>
+
         <!-- 模型编辑表单（新增 / 编辑共用） -->
         <div id="mlEditor" class="ml-editor hidden">
           <div class="ml-editor-head">

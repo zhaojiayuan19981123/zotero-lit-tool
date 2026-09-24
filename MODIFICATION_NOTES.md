@@ -1,3 +1,73 @@
+## v1.17.0：新增「模型路由」（多条模型配置互为备份 + 故障转移 + 熔断 + 用量面板）（2026-09-24）
+
+### 一、为什么做
+
+借鉴 [cc-switch](https://github.com/farion1231/cc-switch) 的「路由服务」思路。此前本应用**一个时刻只认一条模型配置**，
+那条中转一旦抽风（429 / 5xx / 超时 / 网关返回网页首页），所有 AI 功能一起挂，且用户只能手动去设置里换配置。
+本版把**已保存的多条模型配置**组织成一条优先级队列，请求失败自动往后换，把「手动救火」变成「自动兜底」。
+
+### 二、新增文件：`src/modelRouter.js`（路由内核，纯函数）
+
+只做**决策与记账**，不碰网络；**所有时间点由参数 `now` 注入**，熔断状态机才能在单测里被精确验证、不靠 sleep。
+
+- 熔断状态机三态：`closed`（正常）/ `open`（熔断中）/ `halfOpen`（半开试探）；
+  连续失败达 `failThreshold` **或** 错误率超 `errorRate`（且请求数 ≥ `minRequests`）即触发熔断；
+  冷却 `openSeconds` 后转半开，连续成功 `recoverSuccess` 次恢复 `closed`。
+- `planCandidates()`：主供应商在前，备用按 `queue` 顺序；熔断中的跳过并计 `skipped`；
+  **全部熔断时 `forced:true` 仍按序强制尝试**（宁可试一次，也不要直接对用户报「全部不可用」）。
+- 视觉对齐：主供应商需要看图（vision）时，备用里只保留支持视觉的，避免「换了一家却看不了图」。
+- `DEFAULT_ROUTER_CONFIG`：`enabled:true`、`failover:true`、`queue:[]`、`retryPerProvider:0`、`logLimit:200`、
+  `breaker:{ failThreshold:4, recoverSuccess:2, openSeconds:60, errorRate:60, minRequests:10 }`。
+  **队列为空时行为与「不开路由」完全一致**（只有主供应商一个候选），统计与健康面板立即开始工作。
+- `clampInt()`：`null / undefined / 空串 / 非数值文本` 一律**回落默认值**，而不是被 `Number()` 悄悄变成 `0`
+  （`null → 0` 会让「恢复成功阈值」变成 1，与默认不符）。这是本轮单测抓到的一个真实缺陷。
+- `ensureId()`：给「临时配置」（如 `POST /api/models/test` 传来的、没有 id 的配置）补一个稳定 id，
+  否则它会在候选规划阶段被当成「不在配置表里」而过滤掉。
+
+### 三、改动（`server.js`）
+
+1. 原 `fetchModelCompletion` / `streamModelResponse` 拆成两层：
+   - `fetchModelCompletionOnce` / `streamModelResponseOnce` —— **单条配置**版本（原逻辑原样保留）；
+   - `fetchModelCompletion` / `streamModelResponse` —— **路由**版本，先 `planCandidates()` 再逐家尝试。
+   **对外签名不变**（`streamModelResponse(am, {...}, res)`），全站调用点零改动。
+2. **换供应商时用那家自己的 model 名**（`bodyForCandidate()`），不会把 A 家的模型名发给 B 家。
+3. **流式故障转移的硬约束**：一旦已向客户端写出 token，就**不再换供应商**（SSE 响应体已经开始输出），
+   只在「还没吐字」时切换；既有的「流式失败 → 退非流式重试」兜底保持原样。
+4. 失败时报错**逐家列出原因**（`up._litProviderFailures`），而不是只抛最后一家。
+5. 新增接口：
+   - `GET  /api/router/status` —— 配置 + 实时统计（总请求 / 成功率 / 活跃连接 / 运行时间 / 每家健康 / 日志）
+   - `POST /api/router/config` —— 保存配置，**即时生效**
+   - `POST /api/router/reset` —— 重置统计（可选保留熔断状态）
+   - `POST /api/router/probe` —— 批量测速，**不计入熔断**（纯探测）
+6. `/api/settings` POST 增加 `modelRouter` 归一化；`routerProfileList` 列出全部配置（未填 Key 的标 `hasKey:false`）。
+
+### 四、改动（前端 `public/index.html` / `style.css` / `app.js`）
+
+设置面板新增「模型路由」区块：总开关、自动故障转移开关、**状态卡片**（总请求 / 成功率 / 活跃连接 / 运行时间）、
+**故障转移队列**（加 / 删 / 上移下移）、**熔断与重试参数**（折叠）、**各供应商健康列表**（标「主模型 / 备用 N」、
+请求数 / 成功 / 失败 / 成功率 / 最近耗时 / 最近错误）、**请求日志**（折叠，最近 200 条）。
+弹窗打开时自动加载并每 4 秒刷新，**关闭弹窗自动停表**。
+
+### 五、测试
+
+- 新增 `test/model-router.test.mjs`（**33 条**）：熔断三态迁移、连续失败 / 错误率两条触发路径、
+  半开恢复、`forced` 强制尝试、队列规划与视觉过滤、配置钳制（含 `null` 回落）、重置语义等。
+- 新增 `test/router-failover-http.test.mjs`（**2 条** HTTP 集成）：mock 上游验证
+  「主 500 → 自动切备用并返回备用内容」「熔断生效且失败原因逐条列出」「关掉开关退化为单供应商」。
+- 单元测试 **224/224 全绿**（189 + 35）。
+- **变异验证**：改坏 `canUse()` 捕获 **6 条**断言，改坏错误率分支捕获 **1 条** —— 确认熔断断言非空。
+- **真机端到端**（`verify-router-panel.mjs`，真实 Chromium + 真实 HTTP + mock 上游）**36/36 全绿**：
+  面板渲染 / 队列与熔断参数回填 / 主 500 自动切备用并如实返回内容 / 统计与日志反映转移 / 队列增删与落库 /
+  关闭开关后不再切换且如实报错 / 重置归零 / 全程无 JS 报错。
+- 既有浏览器功能回归 **75/75 无回退**。
+
+### 六、说明
+
+- 路由**只服务本应用**，不对外暴露本地代理端口。
+- 默认配置**不需要用户做任何事**：不填队列 = 只用主模型（与升级前一致）；想用故障转移，把备用模型加进队列即可。
+
+---
+
 ## v1.16.5：修「论文对话第二轮起报 400」（Responses 入参角色感知 + 端点失败原因不再被顶掉）（2026-09-24）
 
 ### 一、根因：assistant 消息被写成了 `input_text`
