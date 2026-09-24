@@ -284,7 +284,12 @@ test('本地端口：别的软件用 127.0.0.1:<port>/v1 就能复用本应用�
 
     const notFound = await req(`${gw}/v1/nope`);
     assert.equal(notFound.status, 404);
-    assert.match((await notFound.json()).error.message, /未知接口/);
+    const notFoundMsg = (await notFound.json()).error.message;
+    assert.match(notFoundMsg, /未知接口/);
+    // 提示语必须把**实际支持**的接口都列全：漏列 /v1/completions 会让用户以为它不支持。
+    for (const route of ['/v1/chat/completions', '/v1/completions', '/v1/models', '/health']) {
+      assert.ok(notFoundMsg.includes(route), `404 提示语里漏了 ${route}：${notFoundMsg}`);
+    }
 
     // 老式补全接口的别名也要能用（很多工具还在打这个）
     const legacy = await postJson(`${gw}/v1/completions`, {

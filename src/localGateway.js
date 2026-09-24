@@ -291,7 +291,12 @@ export function createLocalGateway({ getConfig, handleChat, listModels, onEvent 
       return;
     }
 
-    jsonError(res, 404, `未知接口 ${path}；本端口支持 POST /v1/chat/completions、GET /v1/models、GET /health`);
+    jsonError(
+      res,
+      404,
+      `未知接口 ${path}；本端口支持 POST /v1/chat/completions（别名 /v1/completions）、`
+        + 'GET /v1/models、GET /health。客户端的 Base URL 请填成本端口根地址下的 /v1。',
+    );
   }
 
   return { start, stop, sync, status, get server() { return server; } };
