@@ -35,7 +35,7 @@ function indexPayload(record, built) {
 export function registerThesisRoutes(app, ctx) {
   const {
     upload, getUploadDir, fixFileName,
-    resolveRequestModel, fetchModelCompletion, streamModelResponse, readLLMResponse,
+    resolveRequestModel, resolveVisionModel, fetchModelCompletion, streamModelResponse, readLLMResponse,
     sseStart, sseSend, sseEnd,
   } = ctx;
 
@@ -105,6 +105,8 @@ export function registerThesisRoutes(app, ctx) {
   // ==================== 论文记录 ====================
 
   app.get('/api/theses', (_req, res) => {
+    // 顺手做一次字段迁移（v1.20.0 把字段砍到 12 列），进程内只扫一次
+    try { thesisStore.pruneRemovedFields(); } catch (_) { /* ignore */ }
     const items = thesisStore.listTheses().map((it) => ({
       ...it,
       progress: thesisStore.progressOf(it),
@@ -230,56 +232,90 @@ export function registerThesisRoutes(app, ctx) {
 
   // ==================== AI 解析（读前 3 页填字段） ====================
 
-  /** 只喂前 3 页：封面 + 摘要 + 目录开头已经含全部书目字段 */
-  async function parseThesis(record, { settings, profileId } = {}) {
+  /**
+   * 解析「书目前提字段」。
+   *
+   * 两条路：
+   *   A. **看图（首选）**：前端把前 3 页渲染成 JPEG 一起传上来，交给视觉模型。
+   *      学位论文封面版式极杂（艺术字、竖排、印章、扫描件），纯文本层经常把校名读串行，
+   *      甚至整页提不到字；看图最稳。
+   *   B. **文本兜底**：没配视觉模型、或视觉调用失败时，只读前 3 页的文本层。
+   *
+   * 无论走哪条路，都**不再整本提取文本**（那是「解析慢」的根因）。
+   */
+  async function parseThesis(record, { settings, profileId, pages = null } = {}) {
     const current = record;
     thesisStore.upsertThesis({ ...current, status: 'parsing', error: '' });
     try {
       if (!current.filePath || !fs.existsSync(current.filePath)) throw new Error('还没有上传 PDF 附件');
-      const pdf = await thesisPdf.readThesisPdf(current.filePath);
-      if (!pdf.charCount || pdf.charCount < 200) {
-        throw new Error('提不到有效文字（可能是扫描件），无法自动填字段');
-      }
-      const head = pdf.pages.slice(0, 3).map((p) => p.text).join('\n\n').slice(0, 12000);
+
+      // 只读前 3 页：拿到页数/元信息，同时给文本兜底留一份正文
+      const head = await thesisPdf.readThesisHead(current.filePath, 3);
+      const headText = head.pages.map((p) => p.text).filter(Boolean).join('\n\n').slice(0, 12000);
+
+      const images = (Array.isArray(pages) ? pages : [])
+        .filter((p) => p && typeof p.image === 'string' && /^data:image\//.test(p.image))
+        .slice(0, 4)
+        .map((p) => String(p.image));
 
       const profile = pickModel({ profileId });
       const prompt = thesisFields.buildThesisParsePrompt(settings?.language === 'zh' ? '简体中文' : 'English');
-      const request = await fetchModelCompletion(profile, {
-        model: profile.model,
-        messages: [
-          { role: 'system', content: prompt },
-          { role: 'user', content: `以下是学位论文前 3 页的文本：\n\n${head}` },
-        ],
-        temperature: 0.1,
-        max_tokens: 3000,
-      }, { stream: false, settings });
 
+      // ---- A. 看图 ----
       let raw = '';
-      try {
-        const up = request.up;
-        if (!up.ok) {
-          const detail = up._litErrorText ?? await up.text().catch(() => '');
-          throw new Error(`模型返回 ${up.status}：${String(detail).slice(0, 300)}`);
+      let method = '';
+      let usedModel = profile.model;
+      const vision = images.length ? resolveVisionModel?.(settings) : null;
+      if (vision) {
+        try {
+          const content = [{ type: 'text', text: `以下依次是这篇学位论文的第 1 页起（共 ${images.length} 页）：` }];
+          for (const img of images) content.push({ type: 'image_url', image_url: { url: img } });
+          raw = await callOnce(vision, {
+            model: vision.model,
+            messages: [{ role: 'system', content: prompt }, { role: 'user', content }],
+            temperature: 0.1,
+            max_tokens: 1200,
+          }, settings);
+          method = 'vision';
+          usedModel = vision.model;
+        } catch (e) {
+          // 视觉链路失败不该让整次解析失败：退回文本，并如实记下原因
+          console.error('[thesis] 视觉解析失败，回退文本：', e.message);
+          raw = '';
         }
-        raw = (await readLLMResponse(up)).full;
-      } finally {
-        request.cancel?.();
-        request.abort?.();
+      }
+
+      // ---- B. 文本兜底 ----
+      if (!raw) {
+        if (!headText || headText.length < 60) {
+          throw new Error('这篇 PDF 提不到有效文字（可能是扫描件）。请到「AI 设置 → 图像能力」为某个视觉模型开启图片支持后重新解析。');
+        }
+        raw = await callOnce(profile, {
+          model: profile.model,
+          messages: [
+            { role: 'system', content: prompt },
+            { role: 'user', content: `以下是学位论文前 3 页的文本：\n\n${headText}` },
+          ],
+          temperature: 0.1,
+          max_tokens: 1200,
+        }, settings);
+        method = 'text';
       }
 
       const parsed = parseJsonLoose(raw);
       const fields = thesisFields.normalizeThesisFields(parsed);
       // AI 拿不到的学校/学位类型，用规则兜底，不让字段空着
-      if (!fields.school) fields.school = thesisFields.guessSchool(head);
-      if (!fields.degreeType) fields.degreeType = thesisFields.guessDegreeType(head);
+      if (!fields.school) fields.school = thesisFields.guessSchool(headText);
+      if (!fields.degreeType) fields.degreeType = thesisFields.guessDegreeType(headText);
 
       const updated = {
         ...thesisStore.getThesis(current.id),
         ...fields,
-        numPages: pdf.totalPages || current.numPages || 0,
-        charCount: pdf.charCount,
+        numPages: head.totalPages || current.numPages || 0,
+        charCount: head.charCount,
         status: 'done',
-        source: 'ai',
+        source: method,
+        parseModel: usedModel,
         parsedAt: new Date().toISOString(),
         error: '',
       };
@@ -289,6 +325,22 @@ export function registerThesisRoutes(app, ctx) {
       const failed = { ...thesisStore.getThesis(current.id), status: 'error', error: modelError(e) };
       thesisStore.upsertThesis(failed);
       return failed;
+    }
+  }
+
+  /** 非流式调一次模型，返回文本；失败抛错（不带业务语义） */
+  async function callOnce(profile, payload, settings) {
+    const request = await fetchModelCompletion(profile, payload, { stream: false, settings });
+    try {
+      const up = request.up;
+      if (!up.ok) {
+        const detail = up._litErrorText ?? await up.text().catch(() => '');
+        throw new Error(`模型返回 ${up.status}：${String(detail).slice(0, 300)}`);
+      }
+      return (await readLLMResponse(up)).full;
+    } finally {
+      request.cancel?.();
+      request.abort?.();
     }
   }
 
@@ -308,7 +360,11 @@ export function registerThesisRoutes(app, ctx) {
     if (!item) return res.status(404).json({ error: '论文不存在' });
     try {
       const settings = ctx.store.getSettings();
-      res.json(await parseThesis(item, { settings, profileId: req.body?.profileId }));
+      res.json(await parseThesis(item, {
+        settings,
+        profileId: req.body?.profileId,
+        pages: req.body?.pages,
+      }));
     } catch (e) {
       res.status(400).json({ error: modelError(e) });
     }

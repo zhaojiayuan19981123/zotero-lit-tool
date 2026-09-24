@@ -83,8 +83,13 @@
 .th-star { color: var(--gray); font-size: 15px; line-height: 1; }
 .th-star.on { color: var(--star); }
 .th-stars:hover .th-star { color: var(--star); }
-.th-star-suggest { font-size: 11px; color: var(--text-3); margin-left: 4px; }
-.th-star-suggest button { border: none; background: none; color: var(--primary); cursor: pointer; padding: 0 2px; font-size: 11px; }
+
+/* 标题格：点击打开「解析详情」（与文献中心点标题的行为一致，所以是链接样式而非可编辑框） */
+.th-title-cell {
+  color: var(--primary); cursor: pointer; font-weight: 500;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.th-title-cell:hover { text-decoration: underline; }
 
 /* 状态徽标 */
 .th-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
@@ -226,19 +231,118 @@
 .thr-send:hover { background: var(--primary-hover); }
 .thr-send:disabled { opacity: .5; cursor: default; }
 
-/* 笔记模式：三栏 */
+/* ---------- 笔记模式：左 PDF ｜ 右笔记（可拖拽分栏） ----------
+ * 参考文献中心是「PDF ｜ 划词翻译 ｜ 笔记」三栏；本模块不做翻译，所以是两栏。
+ * 关键点：进笔记模式**必须把书签栏和右侧面板收起来** —— 四栏挤在一行时，
+ * 窄屏上笔记只剩一百多像素，文字每行 9 个字还被裁掉，等于不可用。 */
+.thr.note-mode .thr-outline,
+.thr.note-mode .thr-side { display: none; }
+.thr.note-mode .thr-stage { flex: 1 1 auto; min-width: 0; }
 .thr.note-mode .thr-note { display: flex; }
-.thr-note { display: none; flex: 1; min-height: 0; }
-.thr-note-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border); }
-.thr-note-pane:first-child { border-left: none; }
-.thr-note-head { padding: 7px 10px; font-size: 12px; color: var(--text-3); border-bottom: 1px solid var(--border-soft); display: flex; gap: 8px; align-items: center; }
+.thr.note-mode .thr-note-resizer { display: block; }
+
+.thr-note { display: none; min-width: 0; min-height: 0; flex-direction: column; background: var(--surface); }
+.thr-note-body { flex: 1; min-height: 0; overflow: auto; display: flex; }
+.thr-note-head {
+  padding: 7px 10px; font-size: 12px; color: var(--text-3);
+  border-bottom: 1px solid var(--border-soft); border-left: 1px solid var(--border);
+  display: flex; gap: 8px; align-items: center; flex: none;
+}
 .thr-note-head .sp { flex: 1; }
-.thr-note-body { flex: 1; min-height: 0; overflow: auto; }
-.thr-note-cmds { display: flex; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; }
-.thr-note-cmds button { font-size: 11.5px; padding: 3px 7px; }
-.thr-md { width: 100%; height: 100%; border: none; resize: none; padding: 12px 14px; font-size: 13px; line-height: 1.7; font-family: var(--font); }
+.thr-note-state { font-size: 11.5px; color: var(--text-3); }
+
+.thr-note-resizer {
+  display: none; flex: none; width: 6px; cursor: col-resize; background: var(--border-soft);
+  border-left: 1px solid var(--border); border-right: 1px solid var(--border);
+}
+.thr-note-resizer:hover { background: var(--primary-light); }
+body.thr-resizing { cursor: col-resize; user-select: none; }
+body.thr-resizing iframe { pointer-events: none; }
+
+/* 分段控件（编辑 / 预览） */
+.thr-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.thr-seg-btn {
+  border: none; background: var(--surface); color: var(--text-2); cursor: pointer;
+  padding: 3px 10px; font-size: 11.5px; font-family: inherit;
+}
+.thr-seg-btn + .thr-seg-btn { border-left: 1px solid var(--border); }
+.thr-seg-btn:hover { background: var(--panel-soft); }
+.thr-seg-btn.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+
+/* 笔记正文：编辑器铺满，预览走 .pr-md-content 的 Markdown 样式 */
+.thr-md {
+  flex: 1; min-width: 0; min-height: 0; width: 100%; height: 100%;
+  border: none; resize: none; padding: 12px 14px; font-size: 13.5px; line-height: 1.75;
+  font-family: var(--font); background: var(--surface); color: var(--text); box-sizing: border-box;
+}
 .thr-md:focus { outline: none; }
-.thr-md-preview { padding: 12px 14px; font-size: 13px; line-height: 1.75; }
+.thr-md.hidden { display: none; }
+.thr-md-preview { flex: 1; min-width: 0; padding: 12px 16px 40px; font-size: 13.5px; line-height: 1.8; overflow-x: hidden; }
+.thr-md-preview.hidden { display: none; }
+
+/* 解析结果面板里的任务按钮排（本章速读 / 综述条目 / 答辩演练 / 重建索引） */
+.thr-note-cmds { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; flex: none; }
+.thr-note-cmds button { font-size: 11.5px; padding: 3px 7px; }
+
+/* 解析结果字段区 */
+.thr-fields-hint {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 0 10px; border-bottom: 1px dashed var(--border-soft); margin-bottom: 10px;
+  font-size: 11.5px;
+}
+.thr-fields-hint .sp { flex: 1; }
+.thr-fields-sep { font-size: 11.5px; color: var(--text-3); margin: 16px 0 8px; letter-spacing: .04em; }
+.thr-fields-err {
+  font-size: 12px; color: var(--red); background: var(--red-soft);
+  border-radius: 6px; padding: 7px 9px; margin-bottom: 10px; line-height: 1.6;
+}
+
+/* ---------- 解析详情抽屉（点标题打开，参考文献中心的交互） ---------- */
+.th-drawer { position: fixed; inset: 0; z-index: 880; }
+.th-drawer.hidden { display: none; }
+.th-drawer-mask { position: absolute; inset: 0; background: rgba(15,35,30,.32); }
+.th-drawer-panel {
+  position: absolute; right: 0; top: 0; bottom: 0; width: min(680px, 94vw);
+  background: var(--surface); border-left: 1px solid var(--border); box-shadow: var(--shadow-lg);
+  display: flex; flex-direction: column;
+}
+.th-drawer-head {
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+  border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; flex: none;
+}
+.th-drawer-head .sp { flex: 1; }
+.th-drawer-file {
+  font-size: 11.5px; color: var(--text-3); max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.th-drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 18px 22px 40px; }
+.th-drawer-title { margin: 0 0 8px; font-size: 17px; line-height: 1.5; }
+.th-drawer-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; margin-bottom: 14px; }
+.th-drawer-warn {
+  font-size: 12.5px; color: var(--red); background: var(--red-soft);
+  border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; line-height: 1.6;
+}
+.th-drawer-sec { margin-bottom: 22px; }
+.th-drawer-sec-title {
+  font-size: 12px; color: var(--text-3); letter-spacing: .04em;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border-soft); margin-bottom: 12px;
+}
+.th-drawer-two { display: flex; gap: 14px; }
+.th-drawer-two > * { flex: 1; min-width: 0; }
+.th-drawer-field { margin-bottom: 12px; }
+.th-drawer-label { font-size: 11.5px; color: var(--text-3); margin-bottom: 3px; }
+.th-drawer-val {
+  font-size: 13.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word;
+  border-radius: 6px; padding: 5px 7px; margin: -5px -7px; cursor: text; min-height: 22px;
+}
+.th-drawer-val:hover { background: var(--panel-soft); }
+.th-drawer-val:focus { outline: 2px solid var(--primary-light); background: var(--surface); }
+.th-drawer-select {
+  width: 100%; padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px;
+  font-size: 13px; font-family: inherit; background: var(--surface); color: var(--text);
+}
+.th-drawer-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.th-drawer-foot { display: flex; gap: 8px; }
 
 /* ---------- 素材库抽屉 ---------- */
 .th-quotes { position: fixed; right: 0; top: 0; bottom: 0; width: 420px; z-index: 940; background: var(--surface); border-left: 1px solid var(--border); box-shadow: var(--shadow-lg); display: flex; flex-direction: column; }
@@ -276,7 +380,7 @@
 .th-ask-hint { font-size: 12px; color: var(--text-3); margin-bottom: 8px; }
 .th-ask-input {
   width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
-  font-size: 13px; font-family: inherit; background: var(--surface); color: var(--text-1);
+  font-size: 13px; font-family: inherit; background: var(--surface); color: var(--text);
 }
 .th-ask-input:focus { outline: none; border-color: var(--primary); }
 

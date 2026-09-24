@@ -1,3 +1,78 @@
+## v1.19.1：学位论文阅读体验修正——视觉解析、字段精简、详情抽屉、阅读器提速、笔记模式（2026-09-25）
+
+针对 v1.19.0 上线后反馈的五点：解析慢且会错 / 字段太多 / 想看解析详情 / PDF 滑动卡 / 笔记模式难用。
+
+### 一、解析改走视觉模型（只读前 3 页）
+
+- **`src/thesisPdf.js` 新增 `readThesisHead(filePath, n=3)`** —— 用 pdf.js `getPage(i).getTextContent()`
+  只取前 n 页（不再整本抽），返回 `{totalPages, pages, bookmarks, meta, charCount}`。
+  内置 `joinTextItems` / `joinLine` 做**行重组**，避免「某某大学硕士学位论文2024」这类封面串行。
+  > 旧的 `readThesisPdf`（整本）保留给建索引用，解析路径不再调它。
+- **前端渲染前 3 页为 JPEG**：`public/thesis.js` 的 `collectHeadImages()` 用 pdf.js 把页面画到
+  **白底 canvas**（PDF 透明底直接画会发黑），scale 设上限、JPEG 质量 0.82，产出
+  `data:image/jpeg;base64`，随导入请求以 `pages:[{page,image}]` 送出（并发 2）。
+- **`src/thesisRoutes.js` 的 `parseThesis` 重写**：`readThesisHead` + 若 `images.length && vision`
+  则走视觉（`visionComplete`，OpenAI 兼容 `image_url`，非流式 `fetchModelCompletion`，`max_tokens:1200`），
+  否则退回**只读前 3 页的文本**方式。响应带 `source: 'vision' | 'text'` 与 `parseModel`。
+- 视觉能力经 `resolveVisionModel(settings)` 判定（`server.js`），`registerThesisRoutes` 的 ctx 新增该项；
+  前端由 `/api/models/choices` + `/api/models` 的 `activeVision` 决定标不标「视觉解析」。
+
+### 二、字段精简：22 → 5（表格 12 列）
+
+- **`src/thesisFields.js`**：`THESIS_AI_FIELDS = ['title','authors','school','degreeType','year']`；
+  新增 `THESIS_REMOVED_FIELDS`（17 个废弃：`major`/`supervisor`/`keywords`/`abstractPoints`/`summary`/
+  `researchQuestion`/`theory`/`method`/`dataSource`/`conclusion`/`innovation`/`limitation`/`value`/
+  `structure`/`dataOpen`/`suggestedRating`/`ratingReason`）。
+  `THESIS_DEFAULT_COLUMNS` 12 列（末两列 `degreeType`/`year` 可关），`THESIS_EXTRA_COLUMNS = ['degreeType','year']`。
+  `buildThesisParsePrompt` 只问 5 个字段（铁律：只填真实值、年份为 4 位字符串）；
+  新增 `sanitizeYear` / `sanitizeDegreeType`（只认硕士/博士）/ `sanitizeSchool`（剥「硕士学位论文」后缀与字段名前缀）
+  与 `normalizeThesisFields` 统一收口。
+- **`src/thesisStore.js`**：新增 `stripRemovedFields(record)` 与 `pruneRemovedFields()`（模块级 once 守卫），
+  `listTheses` 与 `upsertThesis` 都过一遍；`GET /api/theses` 触发一次清理，旧数据自动瘦身。
+- **`src/thesisContext.js`**：`buildProfileCard` 收敛到 5 行。
+- **`public/thesis.js`**：`BASE_COLS` 改 12 列、`EXTRA_COLS` 清空；删掉 `data-suggest`（AI 建议评级）相关渲染，
+  评级改为纯手点。`localStorage` 键 `thesisCols` → `thesisCols2`，强制老用户落到新默认列。
+
+### 三、点标题 → 解析详情抽屉（对齐文献中心）
+
+- `public/thesis.js` 标题格改为 `<div class="th-title-cell" data-detail=...>`，点击调 `openDetail`；
+  新增 `openDetail/closeDetail/stepDetail/reparseDetail/renderDetail` 一整块（约 600–773 行），
+  结构对齐 `app.js` 的 `openDrawer/renderDrawer`：字段行 + 分类下拉（`change` 即存）+ 评级点星 +
+  `↻ 重新解析 / 📖 阅读 PDF / 🗑 删除` + `← →` 前后翻篇。
+- `public/thesis.css` 新增 `.th-drawer*` 系列；`public/app.js` 的 `switchView` 增加
+  `if (v !== 'thesis') window.ThesisView?.close?.()`，离开视图时收起自建浮层。
+
+### 四、PDF 阅读器提速（不再越滑越卡）
+
+- 旧行为是「打开即把每页渲染成 canvas」，长论文内存爆掉导致滚动卡顿。现改为：
+  - `observePages` 挂两个 `IntersectionObserver`：`PRELOAD_MARGIN='600px'` 负责**渲染**，
+    `KEEP_MARGIN='2400px'` 负责**离屏回收**（`recyclePage` 释放 canvas、`renderTask.cancel()`）；
+  - `enqueueRender` + `pumpRenderQueue` 串行渲染，**按离当前页距离排序**（就近优先）；
+  - `renderPage` **DPR 上限从 2 降到 1.5**、`alpha:false`；页高 `Math.round` 取整避免亚像素抖动；
+  - `goPage` 先把 `R.page` 更新再滚动，保证队列优先级正确；`setScale` 重建后重新入队邻近页；
+  - `closeReader` 断开两个 observer、`clearQueue`、`R.doc.destroy()`。
+- 实测 12 页样张**只渲染 3 页**；滚到末尾时画布数仍 ≤2。
+
+### 五、笔记模式改「左原文 ｜ 右笔记」两栏
+
+- 原来是挤成多栏、笔记区仅百余像素。现改为两栏 + 可拖 `#thrNoteResizer`，
+  比例存 `localStorage`（`thesisNoteRatio`），并用 `setNoteView` 提供**编辑 / 预览**切换。
+- CSS：`.thr.note-mode .thr-outline, .thr.note-mode .thr-side { display:none }`，
+  阅读器 DOM 的笔记栏改为 `.thr-note-resizer` + `aside.thr-note#thrNotePane`。
+- `openReader` 重置 `R.noteRatio / R.noteView` 并 `setNoteView('edit')`；`saveNote` 加 `R.noteLoaded` 守卫，
+  防止「刚打开就存空内容把上一篇笔记覆盖」。
+
+### 六、验证
+
+- 单元测试 **343/343**（新增 2 项：字段精简迁移、`readThesisHead`）；
+- `verify-thesis.mjs` **121/121**（重写：真实文件选择导入、抓包确认 3 张 base64 图 → 上游 `image_url`、
+  `source==='vision'`、表头 12 列、详情抽屉落库、只渲染 3 页 + 离屏回收、笔记栏比例与拖拽、Markdown 预览）；
+- 回归 `verify-features.mjs` **75/75**、`verify-router-panel.mjs` **52/52**，无回退。
+- > 重写 E2E 时发现原「重开阅读器笔记还在」是**假通过**：v1.19.0 的 `openReader` 没清 `<textarea>`，
+  断言读到的是上一篇的残留值。产品行为本身对（进笔记模式会从后端拉回），已把断言改成三向验证
+  （后端落库 → 重开为空框不串笔记 → 进笔记模式内容回来）。这条教训已写进
+  `playwright-verify-no-build-webapp` skill。
+
 ## v1.19.0：新增「学位论文阅读」——长文档检索增强问答 + 章节书签栏（2026-09-24）
 
 方案文档见 `docs/学位论文阅读-方案.md`（含用户拍板的四个决定：进度自动算 / 评级手点 /

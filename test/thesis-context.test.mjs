@@ -113,13 +113,17 @@ test('normalizeBudget 兜住异常值', () => {
   assert.equal(CONTEXT_PRESETS.length, 3);
 });
 
-test('buildProfileCard 只写有值的字段，且不含用户手写字段', () => {
+test('buildProfileCard 只给 5 个硬字段，且不含用户手写字段', () => {
   const card = buildProfileCard(RECORD);
   assert.match(card, /- 标题：短视频平台对消费者购买意愿的影响研究/);
   assert.match(card, /- 学校：某某大学/);
-  assert.match(card, /- 研究方法：问卷调查/);
+  assert.match(card, /- 学位类型：硕士/);
+  assert.match(card, /- 年份：2024/);
   assert.equal(card.includes('我的思考'), false, '用户手写字段不进档案卡');
   assert.equal(card.includes('参考价值'), false);
+  // v1.20.0 起不再把「自行总结出的一段话」当真喂给模型 —— 正文内容一律靠检索命中段
+  assert.equal(card.includes('研究方法'), false, '方法/结论这类内容不再进档案卡');
+  assert.equal(card.split('\n').length, 5, '档案卡只应有 5 行');
 });
 
 test('bigPaperSection 拼出大论文的框架与阶段', () => {

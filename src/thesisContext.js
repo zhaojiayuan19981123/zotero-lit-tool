@@ -136,18 +136,18 @@ function oneLine(value) {
   return String(value || '').replace(/\s*\n+\s*/g, '；').trim();
 }
 
-/** 档案卡：让模型先掌握全局，再回答细节 */
+/**
+ * 档案卡：让模型先掌握全局，再回答细节。
+ *
+ * 只有 5 个书目字段（标题/作者/学校/学位类型/年份）—— 正文内容一律靠检索命中段提供，
+ * 不在这里摘要。曾经这里堆过 17 个字段，结果是模型拿着「自行总结出的一段话」当真，
+ * 反而更容易编造；现在宁可只给硬事实。
+ */
 export function buildProfileCard(record) {
   const g = (k) => String(record?.[k] || '').trim();
   const rows = [
     ['标题', oneLine(g('title'))], ['作者', oneLine(g('authors'))], ['学校', oneLine(g('school'))],
-    ['学位类型', oneLine(g('degreeType'))], ['专业', oneLine(g('major'))],
-    ['导师', oneLine(g('supervisor'))], ['年份', oneLine(g('year'))],
-    ['关键词', oneLine(g('keywords'))], ['一段话总结', oneLine(g('summary'))],
-    ['研究问题', oneLine(g('researchQuestion'))], ['理论框架', oneLine(g('theory'))],
-    ['研究方法', oneLine(g('method'))], ['数据来源与样本', oneLine(g('dataSource'))],
-    ['主要结论', oneLine(g('conclusion'))], ['创新点', oneLine(g('innovation'))],
-    ['局限与不足', oneLine(g('limitation'))], ['可借鉴之处', oneLine(g('value'))],
+    ['学位类型', oneLine(g('degreeType'))], ['年份', oneLine(g('year'))],
   ].filter(([, v]) => v);
   return rows.map(([k, v]) => `- ${k}：${v}`).join('\n');
 }

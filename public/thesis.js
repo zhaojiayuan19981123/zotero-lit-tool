@@ -15,11 +15,14 @@
 
   // ==================== 常量 ====================
 
+  // 默认 12 列 = 用户勾选的那 12 项（学位类型 / 年份 就在默认列里，可在「字段配置」里关掉）
   const BASE_COLS = [
     { key: 'file', label: '文献', cls: 'th-col-file' },
     { key: 'title', label: '标题', cls: 'th-col-title' },
     { key: 'authors', label: '作者' },
     { key: 'school', label: '学校' },
+    { key: 'degreeType', label: '学位类型' },
+    { key: 'year', label: '年份' },
     { key: 'collectionId', label: '分类' },
     { key: 'progress', label: '阅读进度', cls: 'th-col-num' },
     { key: 'rating', label: '评级', cls: 'th-col-num' },
@@ -28,35 +31,28 @@
     { key: 'referenceValue', label: '参考价值' },
   ];
 
-  const EXTRA_COLS = [
-    { key: 'degreeType', label: '学位类型' }, { key: 'year', label: '年份' },
-    { key: 'major', label: '专业' }, { key: 'supervisor', label: '导师' },
-    { key: 'keywords', label: '关键词' }, { key: 'summary', label: '一段话总结' },
-    { key: 'researchQuestion', label: '研究问题' }, { key: 'theory', label: '理论框架' },
-    { key: 'method', label: '研究方法' }, { key: 'dataSource', label: '数据来源与样本' },
-    { key: 'conclusion', label: '主要结论' }, { key: 'innovation', label: '创新点' },
-    { key: 'limitation', label: '局限与不足' }, { key: 'value', label: '可借鉴之处' },
-    { key: 'structure', label: '章节结构概览' }, { key: 'dataOpen', label: '数据/代码是否公开' },
-  ];
+  // 可选列全部并入默认列，这里留空以便将来再加「默认不显示」的字段
+  const EXTRA_COLS = [];
 
   const LABELS = {
     title: '标题', authors: '作者', school: '学校', degreeType: '学位类型', year: '年份',
-    major: '专业', supervisor: '导师', keywords: '关键词', abstractPoints: '摘要要点',
-    summary: '一段话总结', researchQuestion: '研究问题', theory: '理论框架', method: '研究方法',
-    dataSource: '数据来源与样本', conclusion: '主要结论', innovation: '创新点',
-    limitation: '局限与不足', value: '可借鉴之处', structure: '章节结构概览',
-    dataOpen: '数据/代码是否公开', suggestedRating: 'AI 建议评级', ratingReason: '建议理由',
     myThoughts: '我的思考', referenceValue: '参考价值',
   };
 
-  // 可以就地编辑的文本字段（其余 AI 字段在阅读器的「解析结果」里改）
-  const INLINE_EDITABLE = new Set(['title', 'authors', 'school', 'myThoughts', 'referenceValue']);
+  // 表格里可就地编辑的字段；标题改成点击打开「解析详情」（与文献中心一致）
+  const INLINE_EDITABLE = new Set(['myThoughts', 'referenceValue']);
+
+  // 「解析详情」抽屉里按这个顺序展示
+  const DETAIL_ROWS = ['title', 'authors', 'school', 'degreeType', 'year', 'myThoughts', 'referenceValue'];
 
   const LS = {
-    cols: 'thesisCols',
+    // 换过 key：字段从 22 个砍到 12 个之后，老用户 localStorage 里存的是旧的 10 列名单，
+    // 沿用会让「学位类型 / 年份」永远不出现，所以直接换 key 让默认值生效一次
+    cols: 'thesisCols2',
     model: 'aiModel:thesis',
     budget: 'thesisBudget',
     attach: 'thesisAttachSection',
+    noteRatio: 'thesisNoteRatio',
   };
 
   const BUDGETS = [
@@ -76,6 +72,8 @@
     bigPaper: null,
     quotes: [],
     modelChoices: [],
+    visionReady: false,   // 有没有可用视觉模型 —— 决定解析要不要花时间渲染页面图
+    detailId: '',
     busy: false,
   };
 
@@ -85,6 +83,10 @@
     page: 1, outline: [], outlineSource: '', chat: [], note: '', noteLoaded: false,
     tab: 'analysis', noteMode: false, busy: false, observer: null, scrollRaf: 0,
     saveTimer: 0, noteTimer: 0, renderTimer: 0, quotes: [],
+    // 渲染队列：只渲染视口附近、且**一次只跑一页**，见 pumpRenderQueue
+    queue: [], queued: new Set(), pumping: false, tasks: new Map(),
+    recycleObs: null, noteView: 'edit', noteRatio: 0.44,
+    pendingScale: 0, scaleTimer: 0,
   };
 
   // ==================== 工具 ====================
@@ -214,7 +216,7 @@
         <div class="th-chips" id="thChips"></div>
       </div>
       <div class="th-toolbar">
-        <input type="search" id="thSearch" class="tb-input th-search" placeholder="搜索标题 / 作者 / 学校 / 关键词…" />
+        <input type="search" id="thSearch" class="tb-input th-search" placeholder="搜索标题 / 作者 / 学校 / 年份…" />
         <select id="thProgressFilter" class="tb-select">
           <option value="">进度：全部</option>
           <option value="未阅读">未阅读</option>
@@ -255,7 +257,7 @@
       const p = progressOf(it);
       if (S.filter.progress && p.label !== S.filter.progress) return false;
       if (!q) return true;
-      const hay = [it.title, it.authors, it.school, it.keywords, it.major, it.originalName, it.supervisor]
+      const hay = [it.title, it.authors, it.school, it.degreeType, it.year, it.originalName, it.myThoughts]
         .join(' ').toLowerCase();
       return hay.includes(q);
     });
@@ -291,10 +293,7 @@
   function starHtml(it) {
     const rating = Number(it.rating) || 0;
     const stars = [1, 2, 3, 4, 5].map((i) => `<span class="th-star${i <= rating ? ' on' : ''}" data-v="${i}">★</span>`).join('');
-    const sug = it.suggestedRating && String(it.suggestedRating) !== String(rating)
-      ? `<span class="th-star-suggest" title="${esc(it.ratingReason || '')}">AI 建议 ${esc(it.suggestedRating)}<button data-suggest="${esc(it.suggestedRating)}">采纳</button></span>`
-      : '';
-    return `<span class="th-stars" data-id="${esc(it.id)}">${stars}</span>${sug}`;
+    return `<span class="th-stars" data-id="${esc(it.id)}" title="点击评星（再点一次同一颗取消）">${stars}</span>`;
   }
 
   function progressHtml(it) {
@@ -328,7 +327,9 @@
     if (key === 'importedAt') return `<span class="th-muted">${esc(fmtDate(it.importedAt))}</span>`;
     if (key === 'title') {
       const v = it.title || '';
-      return `<div class="th-cell-edit${v ? '' : ' th-muted'}" contenteditable="true" data-id="${esc(it.id)}" data-f="${key}">${esc(v || '（待解析）')}</div>`;
+      // 与文献中心一致：点标题看「解析详情」，而不是就地改标题
+      return `<div class="th-title-cell${v ? '' : ' th-muted'}" data-detail="${esc(it.id)}"
+        title="点击查看解析详情">${esc(v || '（待解析）')}</div>`;
     }
     const v = String(it[key] || '');
     if (INLINE_EDITABLE.has(key)) {
@@ -351,7 +352,7 @@
     if (!list.length) {
       wrap.innerHTML = `<div class="th-empty"><div class="th-empty-icon">🎓</div>
         <p>${S.items.length ? '没有符合筛选条件的论文' : '还没有学位论文'}</p>
-        <p class="th-muted">点击「⬆ 导入学位论文 PDF」；导入后会自动读取前 3 页填好标题、作者、学校等字段</p></div>`;
+        <p class="th-muted">点击「⬆ 导入学位论文 PDF」；导入后会自动读封面填好标题、作者、学校、学位类型、年份。点标题可看解析详情。</p></div>`;
       renderBulk();
       return;
     }
@@ -396,9 +397,13 @@
   async function loadModelChoices() {
     if (S.modelChoices.length) return S.modelChoices;
     try {
-      const [list, settings] = await Promise.all([api('/api/models'), api('/api/settings')]);
-      const activeId = settings?.activeProfileId || '';
-      S.modelChoices = (list || []).map((m) => ({ id: m.id, label: m.label || m.model, active: m.id === activeId }));
+      // 用 /api/models/choices（专门给「单个对话切换模型」用的接口，已按可用性过滤并置顶激活模型）；
+      // 顺带拿 /api/models 的 activeVision 判断有没有视觉模型可用
+      const [choices, models] = await Promise.all([api('/api/models/choices'), api('/api/models')]);
+      S.modelChoices = (choices?.choices || []).map((m) => ({
+        id: m.id, label: m.label, active: !!m.isActive, vision: !!m.vision,
+      }));
+      S.visionReady = !!models?.activeVision?.id;
     } catch (_) { S.modelChoices = []; }
     return S.modelChoices;
   }
@@ -432,8 +437,8 @@
       const chip = e.target.closest('.th-chip');
       if (!chip) return;
       if (chip.id === 'thAddCol') {
-        const name = prompt('分类名称');
-        if (!name || !name.trim()) return;
+        const name = await askText({ title: '新建分类', hint: '给这一批论文分个类，例如「组织行为 / 消费者行为」', placeholder: '分类名称' });
+        if (name === null || !name.trim()) return;
         try {
           const col = await api('/api/thesis-collections', { method: 'POST', body: { name: name.trim() } });
           S.collections.push(col);
@@ -448,11 +453,14 @@
 
     $('#thWrap')?.addEventListener('click', async (e) => {
       const t = e.target;
-      if (t.dataset.open || t.dataset.read) {
-        const id = t.dataset.open || t.dataset.read;
-        await openReader(id);
-        return;
-      }
+      // 标题 → 解析详情抽屉（与文献中心点标题的行为对齐）
+      const detail = t.closest('[data-detail]');
+      if (detail) { await openDetail(detail.dataset.detail); return; }
+      const read = t.closest('[data-read]');
+      if (read) { await openReader(read.dataset.read); return; }
+      const open = t.closest('[data-open]');
+      if (open) { await openReader(open.dataset.open); return; }
+
       const star = t.closest('.th-star');
       if (star) {
         const id = star.closest('.th-stars').dataset.id;
@@ -462,17 +470,14 @@
         await patchItem(id, { rating: next });
         return;
       }
-      const sug = t.closest('[data-suggest]');
-      if (sug) {
-        const id = sug.closest('[data-suggest]').dataset.suggest; // 占位，下面用 closest 行取 id
-        const row = t.closest('tr');
-        await patchItem(row.dataset.id, { rating: String(sug.dataset.suggest) });
-        return;
-      }
       const pick = t.closest('[data-col-pick]');
       if (pick) {
         const id = pick.dataset.colPick;
-        const name = prompt(`移到分类（留空=未分类）\n已有：${S.collections.map((c) => c.name).join('、') || '（无）'}`);
+        const name = await askText({
+          title: '移到分类',
+          hint: `已有：${S.collections.map((c) => c.name).join('、') || '（无）'}　留空 = 未分类`,
+          placeholder: S.collections.find((c) => c.id === S.items.find((x) => x.id === id)?.collectionId)?.name || '',
+        });
         if (name === null) return;
         const target = S.collections.find((c) => c.name === name.trim());
         if (name.trim() && !target) { toast('没有这个分类，请先用「＋ 新建分类」创建', true); return; }
@@ -516,13 +521,9 @@
     $('#thBtnBatchParse')?.addEventListener('click', async () => {
       const ids = [...S.selected];
       if (!ids.length) { toast('先勾选要解析的论文', true); return; }
-      toast(`正在解析 ${ids.length} 篇（读前 3 页填字段）…`);
-      try {
-        const r = await api('/api/theses/batch-parse', { method: 'POST', body: { ids } });
-        const bad = (r.results || []).filter((x) => x.status !== 'done');
-        toast(bad.length ? `${ids.length - bad.length} 篇成功，${bad.length} 篇失败` : `解析完成：${ids.length} 篇`, !!bad.length);
-        await refresh();
-      } catch (err) { toast(err.message, true); }
+      const recs = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
+      await parseMany(recs);
+      await refresh();
     });
 
     $('#thBtnDelete')?.addEventListener('click', async () => {
@@ -561,9 +562,215 @@
       const idx = S.items.findIndex((x) => x.id === id);
       if (idx >= 0) S.items[idx] = updated;
       renderTable();
+      if (S.detailId === id) renderDetail();
       if (R.id === id) R.record = updated;
       return updated;
     } catch (err) { toast(err.message, true); return null; }
+  }
+
+  // ==================== 解析详情（点标题打开，参考文献中心的抽屉做法） ====================
+
+  const AI_FIELD_KEYS = ['title', 'authors', 'school', 'degreeType', 'year'];
+
+  function detailDom() {
+    let el = $('#thDetail');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'thDetail';
+    el.className = 'th-drawer hidden';
+    el.innerHTML = `
+      <div class="th-drawer-mask" id="thDetailMask"></div>
+      <aside class="th-drawer-panel">
+        <div class="th-drawer-head">
+          <button class="tb-btn" id="thDetailClose">← 返回列表</button>
+          <button class="tb-btn ghost" id="thDetailPrev" title="上一篇（按当前列表顺序）">‹</button>
+          <button class="tb-btn ghost" id="thDetailNext" title="下一篇">›</button>
+          <span class="th-drawer-file" id="thDetailFile"></span>
+          <div class="sp"></div>
+          <button class="tb-btn" id="thDetailReparse" title="重读封面（有视觉模型就看图）">↻ 重新解析</button>
+          <button class="tb-btn accent" id="thDetailRead">📖 阅读 PDF</button>
+        </div>
+        <div class="th-drawer-body" id="thDetailBody"></div>
+      </aside>`;
+    document.body.appendChild(el);
+    $('#thDetailClose')?.addEventListener('click', closeDetail);
+    $('#thDetailMask')?.addEventListener('click', closeDetail);
+    $('#thDetailPrev')?.addEventListener('click', () => stepDetail(-1));
+    $('#thDetailNext')?.addEventListener('click', () => stepDetail(1));
+    $('#thDetailReparse')?.addEventListener('click', reparseDetail);
+    $('#thDetailRead')?.addEventListener('click', () => { const id = S.detailId; closeDetail(); openReader(id); });
+    // 抽屉里的字段是 contenteditable：失焦即存（与表格里的就地编辑同一套逻辑）
+    // patchItem 内部会顺带 renderDetail()，这里不用再刷一次
+    $('#thDetailBody')?.addEventListener('focusout', async (e) => {
+      const cell = e.target.closest?.('[data-df]');
+      if (!cell) return;
+      const id = cell.dataset.id;
+      const field = cell.dataset.df;
+      const value = String(cell.innerText || '').trim();
+      const it = S.items.find((x) => x.id === id);
+      if (!it || String(it[field] || '') === value) return;
+      await patchItem(id, { [field]: value });
+    });
+    $('#thDetailBody')?.addEventListener('change', async (e) => {
+      const sel = e.target.closest('[data-dfcol]');
+      if (!sel) return;
+      await patchItem(S.detailId, { collectionId: sel.value });
+    });
+    $('#thDetailBody')?.addEventListener('click', async (e) => {
+      const del = e.target.closest('[data-dfdel]');
+      if (del) {
+        const id = del.dataset.dfdel;
+        if (!confirm('删除这篇学位论文及其附图、素材摘录？此操作不可撤销。')) return;
+        await api(`/api/theses/${id}`, { method: 'DELETE' });
+        S.selected.delete(id);
+        closeDetail();
+        await refresh();
+        toast('已删除');
+        return;
+      }
+      const star = e.target.closest('.th-star');
+      if (star) {
+        const id = S.detailId;
+        const v = Number(star.dataset.v);
+        const it = S.items.find((x) => x.id === id);
+        await patchItem(id, { rating: String(Number(it?.rating) === v ? 0 : v) });
+        renderDetail();
+        return;
+      }
+      const act = e.target.closest('[data-dfact]');
+      if (act) {
+        const id = S.detailId;
+        closeDetail();
+        await openReader(id);
+        return;
+      }
+    });
+    return el;
+  }
+
+  async function openDetail(id) {
+    S.detailId = id;
+    if (!S.items.some((x) => x.id === id)) {
+      try { const one = await api(`/api/theses/${id}`); S.items.push(one); } catch (_) { /* ignore */ }
+    }
+    detailDom().classList.remove('hidden');
+    renderDetail();
+  }
+
+  function closeDetail() {
+    S.detailId = '';
+    $('#thDetail')?.classList.add('hidden');
+  }
+
+  function stepDetail(delta) {
+    const list = filtered();
+    if (!list.length) return;
+    const i = list.findIndex((x) => x.id === S.detailId);
+    const next = list[Math.min(list.length - 1, Math.max(0, (i < 0 ? 0 : i) + delta))];
+    if (next) { S.detailId = next.id; renderDetail(); }
+  }
+
+  async function reparseDetail() {
+    const it = S.items.find((x) => x.id === S.detailId);
+    if (!it) return;
+    if (!it.filename) { toast('这篇还没有上传 PDF 附件', true); return; }
+    const btn = $('#thDetailReparse');
+    if (btn) { btn.disabled = true; btn.textContent = '↻ 解析中…'; }
+    toast(S.visionReady ? '正在看图解析（视觉模型读封面）…' : '正在读前 3 页解析…');
+    try {
+      const updated = await parseOne(it);
+      const idx = S.items.findIndex((x) => x.id === updated.id);
+      if (idx >= 0) S.items[idx] = updated;
+      if (updated.status !== 'done') toast(updated.error || '解析失败', true);
+      else toast('解析完成');
+      renderDetail();
+    } catch (e) { toast(e.message, true); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = '↻ 重新解析'; } }
+  }
+
+  function renderDetail() {
+    const box = $('#thDetailBody');
+    const it = S.items.find((x) => x.id === S.detailId);
+    if (!box || !it) return;
+    const el = detailDom();
+    if (el.classList.contains('hidden')) el.classList.remove('hidden');
+    const p = progressOf(it);
+    const colName = S.collections.find((c) => c.id === it.collectionId)?.name || '未分类';
+    const st = it.status || 'pending';
+    const stLabel = { pending: '待解析', parsing: '解析中', done: '已解析', error: '解析失败' }[st] || st;
+    const methodLabel = { vision: '视觉模型看图', text: '文本前 3 页' }[it.source] || '';
+    $('#thDetailFile').textContent = it.originalName || '（未上传附件）';
+
+    const fieldRow = (key, label, hint) => {
+      const v = String(it[key] || '');
+      const ai = AI_FIELD_KEYS.includes(key);
+      return `<div class="th-drawer-field">
+        <div class="th-drawer-label">${esc(label)}${ai ? '' : ' <span class="th-muted">（我填的）</span>'}</div>
+        <div class="th-drawer-val${v ? '' : ' th-muted'}" contenteditable="true"
+          data-df="${esc(key)}" data-id="${esc(it.id)}">${esc(v || (hint || '（空，点击填写）'))}</div>
+      </div>`;
+    };
+
+    box.innerHTML = `
+      <h2 class="th-drawer-title">${esc(it.title || it.originalName || '（待解析）')}</h2>
+      <div class="th-drawer-meta">
+        <span class="th-badge ${esc(st)}">${esc(stLabel)}</span>
+        ${it.numPages ? `<span class="th-muted">${it.numPages} 页</span>` : ''}
+        <span class="th-muted">${esc(p.numPages ? `${p.readPage}/${p.numPages} 页` : '')}</span>
+        <span class="th-muted">导入于 ${esc(fmtDate(it.importedAt))}</span>
+        ${methodLabel ? `<span class="th-muted">· ${esc(methodLabel)}</span>` : ''}
+      </div>
+      ${it.status === 'error' && it.error ? `<div class="th-drawer-warn">解析失败：${esc(it.error)}</div>` : ''}
+
+      <div class="th-drawer-sec">
+        <div class="th-drawer-sec-title">书目信息（AI 读封面自动填，可直接改）</div>
+        ${fieldRow('title', '标题')}
+        <div class="th-drawer-two">
+          ${fieldRow('authors', '作者', '（空）')}
+          ${fieldRow('school', '学校', '（空）')}
+        </div>
+        <div class="th-drawer-two">
+          ${fieldRow('degreeType', '学位类型', '（空）')}
+          ${fieldRow('year', '年份', '（空）')}
+        </div>
+        <div class="th-drawer-two">
+          <div class="th-drawer-field">
+            <div class="th-drawer-label">分类</div>
+            <select class="th-drawer-select" data-dfcol>
+              <option value="" ${it.collectionId ? '' : 'selected'}>未分类</option>
+              ${S.collections.map((c) => `<option value="${esc(c.id)}" ${c.id === it.collectionId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="th-drawer-field">
+            <div class="th-drawer-label">评级 <span class="th-muted">（手点）</span></div>
+            <div>${starHtml(it)}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="th-drawer-sec">
+        <div class="th-drawer-sec-title">我的记录</div>
+        ${fieldRow('myThoughts', '我的思考', '这篇给我的启发、能用在哪儿…')}
+        ${fieldRow('referenceValue', '参考价值', '高 / 中 / 低，一句话理由')}
+      </div>
+
+      <div class="th-drawer-sec">
+        <div class="th-drawer-sec-title">阅读与写作</div>
+        <div class="th-drawer-actions">
+          <button class="tb-btn" data-dfact="read">📖 打开阅读器（章节书签 + AI 对话 + 笔记）</button>
+        </div>
+        <p class="th-muted" style="font-size:12px;line-height:1.7;margin:6px 0 0">
+          研究问题、方法、结论这类内容不在这里硬填 —— 学位论文信息密度高，靠 3 页摘要挤出来的摘要很容易失真。
+          在阅读器里用「本章速读 / 综述条目 / 答辩演练」按真实正文生成更可靠。
+        </p>
+      </div>
+
+      <div class="th-drawer-sec">
+        <div class="th-drawer-foot">
+          <button class="tb-btn danger" data-dfdel="${esc(it.id)}">🗑 删除这篇论文</button>
+        </div>
+      </div>
+    `;
   }
 
   function openColsPop() {
@@ -614,13 +821,88 @@
     }
     await refresh();
     if (!ids.length) return;
-    toast(`已导入 ${ids.length} 篇，正在读取前 3 页填字段…`);
-    try {
-      const r = await api('/api/theses/batch-parse', { method: 'POST', body: { ids } });
-      const bad = (r.results || []).filter((x) => x.status !== 'done');
-      toast(bad.length ? `导入完成，${bad.length} 篇字段识别失败（可稍后重试）` : '导入并解析完成', !!bad.length);
-    } catch (err) { toast('导入完成，但自动解析失败：' + err.message, true); }
+    const recs = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
+    await parseMany(recs);
     await refresh();
+  }
+
+  // ==================== 解析（优先看图） ====================
+
+  // 解析用的 pdf.js 文档，短时间复用，避免「批量解析」时每篇都重新打开一遍
+  let headDoc = { url: '', doc: null };
+
+  /**
+   * 把论文前 n 页渲染成 JPEG。
+   * 学位论文封面版式五花八门（艺术字、竖排、印章、扫描件），纯文本层经常把校名读串行；
+   * 交给视觉模型看图最稳。参数取舍：宽 1500px 足够认字（2200px 会让请求体大到拖慢速度），
+   * JPEG 0.82 在清晰度与体积间取平衡。
+   */
+  async function collectHeadImages(rec, n = 3) {
+    const lib = await loadPdfJs();
+    const url = `/uploads/${encodeURIComponent(rec.filename)}`;
+    if (headDoc.url !== url || !headDoc.doc) {
+      try { headDoc.doc?.destroy?.(); } catch (_) { /* ignore */ }
+      headDoc = { url, doc: await lib.getDocument({ url }).promise };
+    }
+    const doc = headDoc.doc;
+    const out = [];
+    const total = Math.min(n, doc.numPages || n);
+    for (let i = 1; i <= total; i += 1) {
+      const page = await doc.getPage(i);
+      const base = page.getViewport({ scale: 1 });
+      const scale = Math.min(2.6, 1500 / Math.max(base.width, 1));
+      const vp = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.floor(vp.width));
+      canvas.height = Math.max(1, Math.floor(vp.height));
+      const ctx = canvas.getContext('2d');
+      // 先铺白底：PDF 的透明区域在 JPEG 里会变成黑块，视觉模型会以为那是一整块墨
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      out.push({ page: i, image: canvas.toDataURL('image/jpeg', 0.82) });
+    }
+    return out;
+  }
+
+  /** 解析一篇：有视觉模型就带图，否则后端自动退回前 3 页文本 */
+  async function parseOne(rec) {
+    let pages = [];
+    if (S.visionReady && rec?.filename) {
+      try { pages = await collectHeadImages(rec, 3); }
+      catch (e) { console.warn('[thesis] 页面截图失败，改用文本解析：', e.message); }
+    }
+    return api(`/api/theses/${rec.id}/parse`, { method: 'POST', body: { pages } });
+  }
+
+  /** 批量解析：并发 2（渲染页面图是 CPU 活，开太多会让界面发卡） */
+  async function parseMany(recs) {
+    const list = (recs || []).filter((r) => r?.filename);
+    if (!list.length) { toast('这些论文还没有 PDF 附件', true); return []; }
+    const how = S.visionReady ? '视觉模型读封面' : '文本读前 3 页';
+    let done = 0;
+    toast(`正在解析 ${list.length} 篇（${how}）…`);
+    const results = new Array(list.length);
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < list.length) {
+        const i = cursor;
+        cursor += 1;
+        try { results[i] = await parseOne(list[i]); }
+        catch (e) { results[i] = { id: list[i].id, status: 'error', error: e.message }; }
+        done += 1;
+        const broken = list.length > 1 ? `（${done}/${list.length}）` : '';
+        toast(`解析中${broken}：${(results[i]?.title || list[i].originalName || '').slice(0, 28)}`);
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    const bad = results.filter((r) => r?.status !== 'done');
+    if (bad.length) {
+      toast(`${results.length - bad.length} 篇解析成功，${bad.length} 篇失败：${bad[0]?.error || '未知原因'}`, true);
+    } else {
+      toast(`解析完成：${results.length} 篇`);
+    }
+    return results;
   }
 
   // ==================== 阅读器：骨架 ====================
@@ -690,14 +972,20 @@
             </div>
           </div>
         </aside>
+        <div class="thr-note-resizer" id="thrNoteResizer" title="拖动调整笔记栏宽度"></div>
         <aside class="thr-note" id="thrNotePane">
-          <div class="thr-note-head"><span>笔记</span><span class="sp"></span>
-            <button class="tb-btn ghost" id="thrNotePreview" style="padding:1px 6px">预览</button>
-            <button class="tb-btn ghost" id="thrNoteExport" style="padding:1px 6px">导出 .md</button>
+          <div class="thr-note-head">
+            <div class="thr-seg" id="thrNoteSeg">
+              <button class="thr-seg-btn active" data-noteview="edit">编辑</button>
+              <button class="thr-seg-btn" data-noteview="preview">预览</button>
+            </div>
+            <span class="sp"></span>
+            <span class="thr-note-state" id="thrNoteState"></span>
+            <button class="tb-btn ghost" id="thrNoteExport">导出 .md</button>
           </div>
           <div class="thr-note-body" id="thrNoteBody">
             <textarea class="thr-md" id="thrMd" placeholder="读到这里想到什么就写下来。AI 生成的「本章速读 / 综述条目 / 答辩演练」也会追加到这里。"></textarea>
-            <div class="thr-md-preview hidden" id="thrMdPreview"></div>
+            <div class="thr-md-preview pr-md-content hidden" id="thrMdPreview"></div>
           </div>
         </aside>
       </div>
@@ -714,7 +1002,10 @@
   // ==================== 阅读器：打开 / 关闭 ====================
 
   async function openReader(id) {
+    closeDetail();
     buildReaderDom();
+    R.noteRatio = Number(readJson(LS.noteRatio, 0.44)) || 0.44;
+    R.noteView = 'edit';
     const rec = S.items.find((x) => x.id === id) || await api(`/api/theses/${id}`).catch(() => null);
     if (!rec) { toast('论文不存在', true); return; }
     R.id = id;
@@ -729,12 +1020,15 @@
     $('#thrName').textContent = rec.title || rec.originalName || '未命名';
     $('#thrPageTotal').textContent = String(rec.numPages || 0);
     $('#thr').classList.remove('hidden', 'note-mode');
+    $('#thrMd').value = '';
+    $('#thrMdPreview').innerHTML = '';
+    setNoteView('edit');
+    setNoteState('');
     switchTab('analysis');
     renderFields();
     renderChat();
     await loadModelChoices();
     $('#thrModelSlot').innerHTML = modelSelectHtml('thrModel');
-    S.modelChoices.find((m) => m.id === $('#thrModel')?.value)?.active;
     try { $('#thrBudget').value = String(readJson(LS.budget, 40000)); } catch (_) { /* ignore */ }
     $('#thrAttach').checked = readJson(LS.attach, true) !== false;
 
@@ -753,7 +1047,12 @@
   function closeReader() {
     R.observer?.disconnect();
     R.observer = null;
-    R.doc?.destroy?.().catch?.(() => {});
+    R.recycleObs?.disconnect();
+    R.recycleObs = null;
+    // 先把在渲的页停掉再销毁文档，否则会抛一堆「文档已销毁」的 noise
+    clearQueue();
+    R.pumping = false;
+    try { R.doc?.destroy?.(); } catch (_) { /* ignore */ }
     R.doc = null;
     $('#thr')?.classList.add('hidden');
     $('#thr')?.classList.remove('note-mode');
@@ -764,6 +1063,8 @@
       saveNote();
       saveReadPos(true);
     }
+    R.id = '';
+    R.record = null;
   }
 
   // ==================== 阅读器：PDF ====================
@@ -803,6 +1104,7 @@
 
   async function buildPages() {
     const wrap = $('#thrPages');
+    clearQueue();
     wrap.innerHTML = '';
     // 清空容器会把 scrollTop 归零并触发一次 scroll —— 那一刻 R.doc 已是新文档、
     // 但页高还是上一轮的值，按滚动位置推算会把页码算成 1 并落库（「回到上次位置」因此失效）。
@@ -813,8 +1115,9 @@
     const scroll = $('#thrScroll');
     R.scale = Math.min(2.6, Math.max(0.5, (scroll.clientWidth - 44) / base.width));
     const vp = first.getViewport({ scale: R.scale });
-    R.pageW = vp.width;
-    R.pageH = vp.height;
+    // 取整：小数高度会让每一页都产生亚像素布局，几百页叠起来就是滚动掉帧
+    R.pageW = Math.round(vp.width);
+    R.pageH = Math.round(vp.height);
     const frag = document.createDocumentFragment();
     for (let i = 1; i <= R.numPages; i += 1) {
       const el = document.createElement('div');
@@ -828,31 +1131,95 @@
     observePages();
   }
 
+  // ==================== 阅读器：PDF 渲染调度 ====================
+  //
+  // 三条约束共同决定「滑动卡不卡」，缺一条都会出事：
+  //   ① **串行渲染**：pdf.js 的 render 是 CPU 密集的，十几页同时开渲会把主线程占满 →
+  //      手感就是「滑不动 / 卡住」。改成队列 + 一次一页。
+  //   ② **就近优先**：跳页时排在队首的应该是用户要看的那一页，而不是 IO 回调的先后顺序。
+  //   ③ **离屏回收**：学位论文 100–300 页，每页一张位图常驻会让内存爆掉，GC 一跑就掉帧。
+  //      超出视口一定距离就把 canvas 扔掉、换回占位块（页高不变，所以滚动条不跳）。
+
+  const PRELOAD_MARGIN = '600px 0px';
+  const KEEP_MARGIN = '2400px 0px';
+
   function observePages() {
     R.observer?.disconnect();
+    R.recycleObs?.disconnect();
     const root = $('#thrScroll');
+    const pages = $$('.thr-page', $('#thrPages'));
     R.observer = new IntersectionObserver((entries) => {
-      for (const e of entries) if (e.isIntersecting) renderPage(Number(e.target.dataset.page));
-    }, { root, rootMargin: '900px 0px' });
-    $$('.thr-page', $('#thrPages')).forEach((el) => R.observer.observe(el));
+      for (const e of entries) if (e.isIntersecting) enqueueRender(Number(e.target.dataset.page));
+    }, { root, rootMargin: PRELOAD_MARGIN });
+    R.recycleObs = new IntersectionObserver((entries) => {
+      for (const e of entries) if (!e.isIntersecting) recyclePage(e.target);
+    }, { root, rootMargin: KEEP_MARGIN });
+    for (const el of pages) { R.observer.observe(el); R.recycleObs.observe(el); }
+  }
+
+  /** 入队（同一页只排一次；已渲好的跳过） */
+  function enqueueRender(n) {
+    if (!n) return;
+    const el = $(`.thr-page[data-page="${n}"]`);
+    if (!el || el.dataset.done === '1' || R.queued.has(n)) return;
+    R.queued.add(n);
+    R.queue.push(n);
+    pumpRenderQueue();
+  }
+
+  async function pumpRenderQueue() {
+    if (R.pumping) return;
+    R.pumping = true;
+    try {
+      while (R.queue.length) {
+        const center = R.page;
+        R.queue.sort((a, b) => Math.abs(a - center) - Math.abs(b - center));
+        const n = R.queue.shift();
+        R.queued.delete(n);
+        await renderPage(n);
+      }
+    } finally { R.pumping = false; }
+  }
+
+  /** 回收离屏页：撤掉渲染任务与 canvas，页高保持不变 */
+  function recyclePage(el) {
+    if (!el || el.dataset.done !== '1') return;
+    const n = Number(el.dataset.page);
+    try { R.tasks.get(n)?.cancel?.(); } catch (_) { /* ignore */ }
+    R.tasks.delete(n);
+    el.dataset.done = '';
+    el.innerHTML = '';
+    el.classList.add('placeholder');
+  }
+
+  function clearQueue() {
+    for (const t of R.tasks.values()) { try { t.cancel?.(); } catch (_) { /* ignore */ } }
+    R.tasks.clear();
+    R.queue.length = 0;
+    R.queued.clear();
   }
 
   async function renderPage(n) {
     const el = $(`.thr-page[data-page="${n}"]`);
-    if (!el || el.dataset.done === '1' || el.dataset.busy === '1') return;
-    el.dataset.busy = '1';
+    if (!el || el.dataset.done === '1' || !R.doc) return;
     try {
       const page = await R.doc.getPage(n);
       const vp = page.getViewport({ scale: R.scale });
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      // DPR 上限 1.5：学位论文是 A4 大页，2x 时单页位图能到 20MB 量级，
+      // 内存与绘制的代价都远超肉眼收益。1.5 在 Retina 上文字依然清晰。
+      const dpr = Math.min(1.5, window.devicePixelRatio || 1);
       const canvas = document.createElement('canvas');
       canvas.width = Math.floor(vp.width * dpr);
       canvas.height = Math.floor(vp.height * dpr);
-      canvas.style.width = `${vp.width}px`;
-      canvas.style.height = `${vp.height}px`;
-      const ctx = canvas.getContext('2d');
+      canvas.style.width = `${Math.round(vp.width)}px`;
+      canvas.style.height = `${Math.round(vp.height)}px`;
+      const ctx = canvas.getContext('2d', { alpha: false });
       ctx.scale(dpr, dpr);
-      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      const task = page.render({ canvasContext: ctx, viewport: vp });
+      R.tasks.set(n, task);
+      await task.promise;
+      R.tasks.delete(n);
+      if (!R.doc || !el.isConnected) return;
       el.innerHTML = '';
       el.appendChild(canvas);
       const no = document.createElement('div');
@@ -861,11 +1228,15 @@
       el.appendChild(no);
       el.classList.remove('placeholder');
       el.dataset.done = '1';
-    } catch (_) { /* 单页渲染失败不影响其它页 */ }
-    el.dataset.busy = '';
+    } catch (e) {
+      R.tasks.delete(n);
+      // 「取消」是正常路径（切缩放、关阅读器都会触发），不当错误刷屏
+      if (!/cancel/i.test(String(e?.message || ''))) console.warn(`[thesis] 第 ${n} 页渲染失败：`, e?.message);
+    }
   }
 
   async function rebuildPages() {
+    clearQueue();
     $$('.thr-page', $('#thrPages')).forEach((el) => {
       el.dataset.done = '';
       el.innerHTML = '';
@@ -888,9 +1259,11 @@
     const scroll = $('#thrScroll');
     const target = Math.min(R.numPages || 1, Math.max(1, Number(n) || 1));
     const top = Math.max(0, (target - 1) * (R.pageH + 14) + 14 - 8);
+    // 先更新页码再滚动：渲染队列是按「离当前页最近」排优先级的，
+    // 顺序反了会把跳转目标排在队尾（用户盯着空白页等）
+    R.page = target;
     if (smooth) scroll.scrollTo({ top, behavior: 'auto' });
     else scroll.scrollTop = top;
-    R.page = target;
     $('#thrPageInput').value = String(target);
     updateHere();
     highlightOutline();
@@ -901,10 +1274,13 @@
     R.scale = Math.min(3, Math.max(0.4, next));
     const first = await R.doc.getPage(1);
     const vp = first.getViewport({ scale: R.scale });
-    R.pageW = vp.width;
-    R.pageH = vp.height;
+    R.pageW = Math.round(vp.width);
+    R.pageH = Math.round(vp.height);
     await rebuildPages();
     goPage(R.page, false);
+    // 缩放后视口里的页要立刻重渲（IO 只在交叉状态变化时才回调，不会自己重来一次）
+    const from = Math.max(1, R.page - 1);
+    for (let i = from; i <= Math.min(R.numPages, R.page + 2); i += 1) enqueueRender(i);
   }
 
   function updateHere() {
@@ -1097,21 +1473,47 @@
     const box = $('#thrFields');
     if (!box) return;
     const it = R.record || {};
-    const rows = ['title', 'authors', 'school', 'degreeType', 'year', 'major', 'supervisor', 'keywords',
-      'abstractPoints', 'summary', 'researchQuestion', 'theory', 'method', 'dataSource', 'conclusion',
-      'innovation', 'limitation', 'value', 'structure', 'dataOpen',
-      'myThoughts', 'referenceValue'];
     const userFields = new Set(['myThoughts', 'referenceValue']);
-    box.innerHTML = rows.map((k) => {
-      const v = String(it[k] || '');
-      return `<div class="thr-field">
+    const value = (it2, k) => `<div class="thr-field">
         <div class="thr-field-label">${esc(LABELS[k] || k)}${userFields.has(k) ? ' <span class="th-muted">（我填的）</span>' : ''}</div>
-        <div class="thr-field-value${v ? '' : ' th-muted'}" contenteditable="true" data-f="${esc(k)}">${v ? esc(v) : '（空，可点击填写）'}</div>
+        <div class="thr-field-value${String(it2[k] || '') ? '' : ' th-muted'}" contenteditable="true" data-f="${esc(k)}">${String(it2[k] || '') ? esc(it2[k]) : '（空，可点击填写）'}</div>
       </div>`;
-    }).join('') + `<div class="thr-field">
-        <div class="thr-field-label">AI 建议评级</div>
-        <div>${it.suggestedRating ? `${esc(it.suggestedRating)} / 5　<span class="th-muted">${esc(it.ratingReason || '')}</span>` : '<span class="th-muted">暂无</span>'}</div>
-      </div>`;
+    box.innerHTML = `
+      <div class="thr-fields-hint">
+        <span class="th-badge ${esc(it.status || 'pending')}">${
+          { pending: '待解析', parsing: '解析中', done: '已解析', error: '解析失败' }[it.status || 'pending'] || ''
+        }</span>
+        ${it.source ? `<span class="th-muted">${{ vision: '视觉模型读封面', text: '文本读前 3 页' }[it.source] || ''}</span>` : ''}
+        ${it.numPages ? `<span class="th-muted">${it.numPages} 页</span>` : ''}
+        <span class="sp"></span>
+        <button class="tb-btn ghost" id="thrReparse" title="重读封面（配置了视觉模型就看图）">↻ 重读封面</button>
+      </div>
+      ${it.status === 'error' && it.error ? `<div class="thr-fields-err">${esc(it.error)}</div>` : ''}
+      ${['title', 'authors', 'school', 'degreeType', 'year'].map((k) => value(it, k)).join('')}
+      <div class="thr-fields-sep">我填的</div>
+      ${['myThoughts', 'referenceValue'].map((k) => value(it, k)).join('')}
+      <p class="th-muted" style="font-size:11.5px;line-height:1.7;margin:12px 0 0">
+        研究问题 / 方法 / 结论不在这里硬填：学位论文信息密度高，靠封面 3 页挤出来的摘要容易失真。
+        用上面的「本章速读 / 综述条目 / 答辩演练」，它们是基于真实正文检索生成的。
+      </p>`;
+    $('#thrReparse')?.addEventListener('click', reparseCurrent);
+  }
+
+  /** 阅读器里「重读封面」：与列表、详情抽屉走同一条解析链路 */
+  async function reparseCurrent() {
+    if (!R.record?.filename) { toast('这篇还没有上传 PDF 附件', true); return; }
+    const btn = $('#thrReparse');
+    if (btn) { btn.disabled = true; btn.textContent = '↻ 解析中…'; }
+    toast(S.visionReady ? '正在看图解析（视觉模型读封面）…' : '正在读前 3 页解析…');
+    try {
+      const updated = await parseOne(R.record);
+      R.record = updated;
+      const idx = S.items.findIndex((x) => x.id === updated.id);
+      if (idx >= 0) S.items[idx] = updated;
+      if (updated.status !== 'done') toast(updated.error || '解析失败', true);
+      else { renderFields(); toast('解析完成'); }
+    } catch (e) { toast(e.message, true); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = '↻ 重读封面'; } }
   }
 
   async function saveField(field, value) {
@@ -1133,14 +1535,93 @@
     if (name === 'chat') setTimeout(() => $('#thrInput')?.focus(), 30);
   }
 
+  /**
+   * 笔记模式：改成「左 PDF ｜ 右笔记」两栏（参考文献中心是「PDF ｜ 划词翻译 ｜ 笔记」三栏，
+   * 本模块不做翻译，所以省掉中间那栏），分栏宽度可拖。
+   *
+   * 之前是「书签栏 + PDF + 右侧面板 + 笔记」四栏硬挤在一行 —— 窄屏上笔记只剩一百多像素，
+   * 文字每行 9 个字还被裁掉，等于没法用。进笔记模式就把书签栏和右侧面板收起来（CSS 负责），
+   * 把宽度让给 PDF 和笔记。
+   */
   async function toggleNoteMode() {
     R.noteMode = !R.noteMode;
     $('#thr').classList.toggle('note-mode', R.noteMode);
     if (R.noteMode) {
-      switchTab('chat');
-      $('#thrStage').style.flex = '1';
       await ensureNote();
+      applyNoteRatio();
+      setNoteView(R.noteView || 'edit');
+      // 让出宽度后 PDF 的适宽比例变了，重新算一次缩放
+      if (R.doc) { try { await fitScale(); } catch (_) { /* ignore */ } }
+    } else if (R.doc) {
+      try { await fitScale(); } catch (_) { /* ignore */ }
     }
+  }
+
+  /** 笔记栏宽度按比例存 localStorage，下次进来还是用户调好的样子 */
+  function applyNoteRatio() {
+    const note = $('#thrNotePane');
+    if (!note) return;
+    const r = Math.min(0.7, Math.max(0.25, Number(R.noteRatio) || 0.44));
+    R.noteRatio = r;
+    note.style.flex = `0 0 ${(r * 100).toFixed(2)}%`;
+  }
+
+  function bindNoteResizer() {
+    const bar = $('#thrNoteResizer');
+    const body = $('.thr-body');
+    if (!bar || !body) return;
+    let dragging = false;
+    const onMove = (e) => {
+      if (!dragging) return;
+      const rect = body.getBoundingClientRect();
+      const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+      R.noteRatio = Math.min(0.7, Math.max(0.25, 1 - x / Math.max(1, rect.width)));
+      applyNoteRatio();
+    };
+    const stop = () => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.classList.remove('thr-resizing');
+      writeJson(LS.noteRatio, R.noteRatio);
+      // 拖完宽度变了，PDF 的适宽比例也要跟着重算
+      if (R.doc) fitScale().catch(() => {});
+    };
+    const start = (e) => {
+      dragging = true;
+      document.body.classList.add('thr-resizing');
+      e.preventDefault();
+    };
+    bar.addEventListener('mousedown', start);
+    bar.addEventListener('touchstart', start, { passive: false });
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('touchmove', onMove, { passive: true });
+    document.addEventListener('mouseup', stop);
+    document.addEventListener('touchend', stop);
+  }
+
+  function setNoteView(view) {
+    R.noteView = view === 'preview' ? 'preview' : 'edit';
+    $$('#thrNoteSeg .thr-seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.noteview === R.noteView));
+    const md = $('#thrMd');
+    const prev = $('#thrMdPreview');
+    if (!md || !prev) return;
+    const showPrev = R.noteView === 'preview';
+    md.classList.toggle('hidden', showPrev);
+    prev.classList.toggle('hidden', !showPrev);
+    if (showPrev) {
+      prev.innerHTML = md.value.trim()
+        ? markdown(md.value)
+        : '<div class="thr-out-empty">笔记还是空的。切到「编辑」写下第一句，或在阅读器里选中正文 →「追加到笔记」。</div>';
+    }
+  }
+
+  /** 把 PDF 缩放到水平铺满（笔记模式切换、窗口缩放时都要重算） */
+  async function fitScale() {
+    if (!R.doc) return;
+    const first = await R.doc.getPage(1);
+    const base = first.getViewport({ scale: 1 });
+    const w = $('#thrScroll')?.clientWidth || 0;
+    if (w > 80) await setScale((w - 44) / base.width);
   }
 
   async function ensureNote() {
@@ -1152,13 +1633,32 @@
     } catch (_) { R.note = ''; }
     const md = $('#thrMd');
     if (md && !md.value) md.value = R.note;
+    setNoteState('已保存');
   }
 
+  function setNoteState(text) {
+    const el = $('#thrNoteState');
+    if (el) el.textContent = text || '';
+  }
+
+  /**
+   * 存笔记。
+   *
+   * ⚠️ 必须等 ensureNote() 把后端内容读进来之后才允许写回。
+   * 否则会出现两种数据事故（v1.19.0 就有）：
+   *   · 打开一篇有笔记的论文、但没进笔记模式 → textarea 还是空的 → 关闭阅读器时把笔记清成空；
+   *   · 更糟的是换论文时 textarea 里留着**上一篇**的笔记 → 会被写到当前这篇名下。
+   */
   async function saveNote() {
+    if (!R.id || !R.noteLoaded) return;
     const md = $('#thrMd');
     if (!md) return;
     R.note = md.value;
-    try { await api(`/api/paper-notes/${R.id}`, { method: 'PUT', body: { md: R.note } }); } catch (_) { /* ignore */ }
+    setNoteState('保存中…');
+    try {
+      await api(`/api/paper-notes/${R.id}`, { method: 'PUT', body: { md: R.note } });
+      setNoteState('已保存');
+    } catch (_) { setNoteState('保存失败'); }
   }
 
   function appendNote(text, heading) {
@@ -1339,11 +1839,7 @@
     $('#thrQuotesBtn')?.addEventListener('click', () => openQuotesDrawer());
     $('#thrZoomIn')?.addEventListener('click', () => setScale(R.scale + 0.15));
     $('#thrZoomOut')?.addEventListener('click', () => setScale(R.scale - 0.15));
-    $('#thrFit')?.addEventListener('click', async () => {
-      const first = await R.doc.getPage(1);
-      const base = first.getViewport({ scale: 1 });
-      await setScale((($('#thrScroll').clientWidth - 44) / base.width));
-    });
+    $('#thrFit')?.addEventListener('click', () => fitScale());
 
     $('#thrPageInput')?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); goPage(Number(e.target.value)); e.target.blur(); }
@@ -1362,15 +1858,21 @@
           updateHere();
           highlightOutline();
           saveReadPos();
+          // 位置变了，队列里的优先级排序跟着变；顺手把「刚进视野但没赶上 IO」的页补上
+          enqueueRender(n);
+          pumpRenderQueue();
         }
       });
     }, { passive: true });
 
     $('#thrScroll')?.addEventListener('wheel', (e) => {
-      // Ctrl+滚轮 = 缩放，普通滚动交给浏览器
+      // Ctrl+滚轮 = 缩放，普通滚动交给浏览器。
+      // 缩放要防抖：一次滚轮能连发十几个事件，每次都重建整本页面会直接卡死。
       if (!e.ctrlKey) return;
       e.preventDefault();
-      setScale(R.scale + (e.deltaY < 0 ? 0.1 : -0.1));
+      R.pendingScale = Math.min(3, Math.max(0.4, (R.pendingScale || R.scale) + (e.deltaY < 0 ? 0.1 : -0.1)));
+      clearTimeout(R.scaleTimer);
+      R.scaleTimer = setTimeout(() => { setScale(R.pendingScale); R.pendingScale = 0; }, 180);
     }, { passive: false });
 
     // 书签栏
@@ -1430,21 +1932,16 @@
     // 笔记
     // 笔记用独立定时器：和「记录阅读位置」共用同一个槽时，滚动会把防抖中的
     // 笔记保存取消掉（字就丢了），这是真会丢数据的坑。
-    $('#thrMd')?.addEventListener('input', () => { clearTimeout(R.noteTimer); R.noteTimer = setTimeout(saveNote, 1200); });
-    $('#thrMd')?.addEventListener('blur', saveNote);
-    $('#thrNotePreview')?.addEventListener('click', () => {
-      const prev = $('#thrMdPreview');
-      const md = $('#thrMd');
-      const showPreview = prev.classList.contains('hidden');
-      if (showPreview) {
-        prev.innerHTML = markdown(md.value);
-        prev.classList.remove('hidden');
-        md.classList.add('hidden');
-      } else {
-        prev.classList.add('hidden');
-        md.classList.remove('hidden');
-      }
+    $('#thrMd')?.addEventListener('input', () => {
+      clearTimeout(R.noteTimer);
+      setNoteState('未保存');
+      R.noteTimer = setTimeout(saveNote, 1200);
     });
+    $('#thrMd')?.addEventListener('blur', saveNote);
+    $$('#thrNoteSeg .thr-seg-btn').forEach((b) => {
+      b.addEventListener('click', () => setNoteView(b.dataset.noteview));
+    });
+    bindNoteResizer();
     $('#thrNoteExport')?.addEventListener('click', () => {
       const name = (R.record?.title || '学位论文笔记').replace(/[\\/:*?"<>|]/g, '_');
       download(`${name}-笔记.md`, $('#thrMd')?.value || '');
@@ -1485,9 +1982,8 @@
       if (!text) return;
       await ensureNote();
       appendNote(`> ${text}\n\n—— 第 ${R.page} 页`, '摘录');
-      switchTab('chat');
-      $('#thr').classList.add('note-mode');
-      R.noteMode = true;
+      if (!R.noteMode) await toggleNoteMode();
+      else { applyNoteRatio(); setNoteView('edit'); }
     });
   }
 
@@ -1688,12 +2184,22 @@
 
   // ==================== 对外接口 ====================
 
+  /** 收起所有自建浮层（切到别的视图时由 app.js 调用） */
+  function closeAll() {
+    closeDetail();
+    $('#thQuotes')?.classList.add('hidden');
+    $('#thCompare')?.classList.add('hidden');
+    $('#thBig')?.classList.add('hidden');
+    if (R.id) closeReader();
+  }
+
   async function mount() {
     if (!S.mounted) {
       S.mounted = true;
       buildDom();
       bindList();
     }
+    closeAll();
     try {
       await refresh();
       await loadModelChoices();
@@ -1703,5 +2209,5 @@
     }
   }
 
-  window.ThesisView = { mount, open: (id) => openReader(id) };
+  window.ThesisView = { mount, close: closeAll, open: (id) => openReader(id) };
 })();

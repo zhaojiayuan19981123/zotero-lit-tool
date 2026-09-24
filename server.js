@@ -3884,6 +3884,8 @@ export function createApp({
     getUploadDir: () => currentUploadDir,
     fixFileName,
     resolveRequestModel,
+    // 「读封面填字段」优先走视觉模型：学位论文封面版式太杂，纯文本层经常读串行
+    resolveVisionModel,
     fetchModelCompletion,
     streamModelResponse,
     readLLMResponse,

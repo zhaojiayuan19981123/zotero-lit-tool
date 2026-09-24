@@ -13,7 +13,7 @@ import test from 'node:test';
 
 import { createApp } from '../server.js';
 import * as store from '../src/store.js';
-import { readThesisPdf } from '../src/thesisPdf.js';
+import { readThesisPdf, readThesisHead } from '../src/thesisPdf.js';
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${server.address().port}`)));
@@ -97,6 +97,31 @@ test('读取真 PDF：能得到按页文本与总页数（章节索引的基础�
   }
 });
 
+test('readThesisHead 只读前 n 页，但仍然给出总页数（解析提速的关键）', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'thesis-head-'));
+  try {
+    const { writeFile } = await import('node:fs/promises');
+    const file = path.join(root, 'sample.pdf');
+    await writeFile(file, await makePdf(PAGE_TEXTS));
+
+    const head = await readThesisHead(file, 3);
+    assert.equal(head.pages.length, 3, '只要前 3 页的正文');
+    assert.equal(head.totalPages, 12, '总页数必须照样准确（表格里的「N 页」要用）');
+    assert.match(head.pages[0].text, /Contents/);
+    // 第 4 页以后的内容不该出现在结果里 —— 不整本提取文本正是提速的来源
+    assert.equal(head.pages.some((p) => /Structural equation modeling/.test(p.text)), false);
+    // 只读 3 页 → 字符数远小于整本
+    const full = await readThesisPdf(file);
+    assert.ok(head.charCount < full.charCount, '前 3 页的字符数必然小于整本');
+
+    const one = await readThesisHead(file, 1);
+    assert.equal(one.pages.length, 1);
+    assert.equal(one.totalPages, 12);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('学位论文全链路：上传 → 解析 → 建索引 → 书签栏 → 检索增强问答 → 对比阅读', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'thesis-http-'));
   const dataDir = path.join(root, 'data');
@@ -105,26 +130,21 @@ test('学位论文全链路：上传 → 解析 → 建索引 → 书签栏 → 
   const upstreamBodies = [];
   const upstream = mockUpstream((body, res) => {
     upstreamBodies.push(body);
-    // 「读前 3 页抽字段」是非流式的 JSON 调用，用提示词特征区分
-    if (JSON.stringify(body).includes('信息提取助手')) {
+    // 「读封面抽字段」是非流式的 JSON 调用，用提示词特征区分。
+    // 走视觉链路时 messages 里会有 image_url，走文本兜底时没有 —— 两条路都返回同一份 JSON。
+    const raw = JSON.stringify(body);
+    if (raw.includes('信息提取助手')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         choices: [{
           message: {
             content: JSON.stringify({
-              title: '短视频沉浸体验对购买意愿的影响研究',
-              authors: '张三', school: '某某大学', degreeType: '硕士', year: '2024',
-              major: '企业管理', supervisor: '李四',
-              keywords: '短视频；沉浸体验；购买意愿',
-              abstractPoints: '- 检验沉浸体验对购买意愿的作用\n- 引入感知价值作为中介',
-              summary: '本文以短视频平台为对象，检验沉浸体验影响购买意愿的机制。',
-              researchQuestion: '- 沉浸体验是否提升购买意愿',
-              theory: '计划行为理论', method: '问卷调查', dataSource: '520 份有效问卷',
-              conclusion: '- 沉浸体验显著提升购买意愿',
-              innovation: '- 引入感知价值中介',
-              limitation: '单国样本', value: '可用于我的第四章',
-              structure: '- 第一章 绪论\n- 第二章 文献综述',
-              dataOpen: '未公开', suggestedRating: '4', ratingReason: '设计规范，样本量充足',
+              title: '《短视频沉浸体验对购买意愿的影响研究》',
+              authors: '作者：张三',
+              // 故意带上封面页眉，验证后端会把「硕士学位论文」这类后缀剥掉
+              school: '某某大学硕士学位论文',
+              degreeType: '硕士研究生',
+              year: '2024年',
             }),
           },
         }],
@@ -144,12 +164,23 @@ test('学位论文全链路：上传 → 解析 → 建索引 → 书签栏 → 
       aiProvider: 'custom',
       _modelMigrated: true,
       activeProfileId: 'p1',
-      modelProfiles: [{
-        id: 'p1', label: '模拟供应商', provider: 'custom',
-        baseURL: `${upstreamBase}/v1/chat/completions`, apiKey: '', model: 'mock-model',
-        streamMode: 'auto', systemPromptMode: 'auto', authMode: 'none', visionOverride: 'no',
-        createdAt: new Date().toISOString(),
-      }],
+      visionProfileId: 'p2',
+      modelProfiles: [
+        {
+          id: 'p1', label: '模拟文本供应商', provider: 'custom',
+          baseURL: `${upstreamBase}/v1/chat/completions`, apiKey: '', model: 'mock-model',
+          streamMode: 'auto', systemPromptMode: 'auto', authMode: 'none', visionOverride: 'no',
+          createdAt: new Date().toISOString(),
+        },
+        {
+          // 视觉模型：resolveVisionModel 要求「填了 Key + 被判定支持图片」，
+          // 所以这里必须给 apiKey（authMode 是 none，值本身不会被校验）
+          id: 'p2', label: '模拟视觉供应商', provider: 'custom',
+          baseURL: `${upstreamBase}/v1/chat/completions`, apiKey: 'test-key', model: 'mock-vision',
+          streamMode: 'auto', systemPromptMode: 'auto', authMode: 'none', visionOverride: 'yes',
+          createdAt: new Date().toISOString(),
+        },
+      ],
       modelRouter: { enabled: true, failover: true, queue: [], breaker: { failThreshold: 3, openSeconds: 60 } },
     });
 
@@ -175,14 +206,43 @@ test('学位论文全链路：上传 → 解析 → 建索引 → 书签栏 → 
     assert.equal(uploaded.originalName, 'thesis.pdf');
     assert.equal(uploaded.numPages, 0, '上传时还没解析，页数待索引阶段补上');
 
-    // ---------- ② AI 读前 3 页填字段 ----------
-    const parsed = await json(await post(`/api/theses/${rec.id}/parse`, {}));
-    assert.equal(parsed.status, 'done', 'parse 应成功：' + parsed.error);
-    assert.equal(parsed.title, '短视频沉浸体验对购买意愿的影响研究');
-    assert.equal(parsed.school, '某某大学');
-    assert.equal(parsed.degreeType, '硕士');
-    assert.equal(parsed.suggestedRating, '4');
-    assert.equal(parsed.numPages, 12, '解析时会顺便读到页数');
+    // ---------- ② AI 读封面填字段 ----------
+    // 2a）不带图片 → 走「文本前 3 页」兜底
+    const textOnly = await json(await post(`/api/theses/${rec.id}/parse`, {}));
+    assert.equal(textOnly.status, 'done', '文本兜底解析应成功：' + textOnly.error);
+    assert.equal(textOnly.source, 'text', '没传图片时应该走文本路径');
+    assert.equal(textOnly.numPages, 12, '解析时会顺便读到总页数');
+    // 归一化：书名号、字段名前缀、「硕士学位论文」页眉、「2024年」都要被收拾干净
+    assert.equal(textOnly.title, '短视频沉浸体验对购买意愿的影响研究');
+    assert.equal(textOnly.authors, '张三');
+    assert.equal(textOnly.school, '某某大学');
+    assert.equal(textOnly.degreeType, '硕士');
+    assert.equal(textOnly.year, '2024');
+
+    // 2b）带图片 → 优先走视觉模型，且请求体里必须真的有 image_url
+    const before2a = upstreamBodies.length;
+    const parsed = await json(await post(`/api/theses/${rec.id}/parse`, {
+      pages: [
+        { page: 1, image: 'data:image/jpeg;base64,/9j/AAAA' },
+        { page: 2, image: 'data:image/jpeg;base64,/9j/BBBB' },
+      ],
+    }));
+    assert.equal(parsed.status, 'done', '视觉解析应成功：' + parsed.error);
+    assert.equal(parsed.source, 'vision', '配了视觉模型且传了图片，就该走看图');
+    assert.equal(parsed.parseModel, 'mock-vision', '要用视觉模型，而不是普通文本模型');
+    const visionSent = upstreamBodies.slice(before2a).find((b) => JSON.stringify(b).includes('信息提取助手'));
+    assert.ok(visionSent, '要真的发出解析请求');
+    const parts = visionSent.messages[1].content;
+    assert.ok(Array.isArray(parts), '视觉请求的 user content 应该是数组（OpenAI 多模态格式）');
+    const imgParts = parts.filter((p) => p.type === 'image_url');
+    assert.equal(imgParts.length, 2, '两张页面图都要带上');
+    assert.ok(imgParts[0].image_url.url.startsWith('data:image/jpeg;base64,'), '图片要用 dataURL 直接内嵌');
+    assert.ok(parts.some((p) => p.type === 'text'), '除图片外还要有一段文字说明页码顺序');
+
+    // 2c）脏图片（不是 data:image 前缀）应被忽略而不是让解析炸掉 —— 前端截图失败时会退化成文本路径
+    const junk = await json(await post(`/api/theses/${rec.id}/parse`, { pages: [{ page: 1, image: 'oops' }] }));
+    assert.equal(junk.status, 'done', '脏图片应被忽略而不是报错');
+    assert.equal(junk.source, 'text', '图片全被忽略后只能走文本兜底');
 
     // 用户手写的两个字段必须原样保留（AI 绝不覆盖）
     const withUser = await json(await patch(`/api/theses/${rec.id}`, { myThoughts: '这个中介模型可以用', referenceValue: '高', rating: '5' }));
@@ -284,7 +344,7 @@ test('学位论文全链路：上传 → 解析 → 建索引 → 书签栏 → 
 
     // ---------- ⑨ 对比阅读 ----------
     const rec2 = await json(await post('/api/theses', { title: '第二篇学位论文' }));
-    await json(await patch(`/api/theses/${rec2.id}`, { theory: '资源基础观', method: '案例研究' }));
+    await json(await patch(`/api/theses/${rec2.id}`, { school: '另一所大学', degreeType: '博士' }));
     const cmpBody = await (await post('/api/theses/compare', { ids: [rec.id, rec2.id] })).text();
     assert.equal(firstError(cmpBody), '');
     const titles = sseFrames(cmpBody).find((f) => f.titles)?.titles;

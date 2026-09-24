@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as store from './store.js';
-import { THESIS_AI_FIELDS, THESIS_USER_FIELDS } from './thesisFields.js';
+import { THESIS_AI_FIELDS, THESIS_USER_FIELDS, THESIS_REMOVED_FIELDS } from './thesisFields.js';
 
 const THESES = 'theses.json';
 const COLLECTIONS = 'thesis-collections.json';
@@ -83,7 +83,47 @@ export function blankThesis(overrides = {}) {
 
 export function listTheses() {
   const db = load(THESES, { items: [] });
-  return Array.isArray(db?.items) ? db.items : [];
+  const items = Array.isArray(db?.items) ? db.items : [];
+  return items.map(stripRemovedFields);
+}
+
+/**
+ * 迁移：把 v1.19.x 遗留的 17 个已废弃字段从记录里剔掉。
+ *
+ * 为什么必须做：这些字段界面已经不展示，但会一直躺在 theses.json 里 ——
+ * 备份、导出、以及阅读器的「解析结果」面板都会把它们带出来，
+ * 用户会以为「字段还在，只是没显示」。读的时候顺手清一次，只写回一次。
+ */
+export function stripRemovedFields(record) {
+  if (!record || typeof record !== 'object') return record;
+  let hit = false;
+  for (const k of THESIS_REMOVED_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(record, k)) { hit = true; break; }
+  }
+  if (!hit) return record;
+  const next = { ...record };
+  for (const k of THESIS_REMOVED_FIELDS) delete next[k];
+  return next;
+}
+
+/** 一次性把数据文件里的废弃字段清干净（进程内只真正扫一次） */
+let prunedOnce = false;
+export function pruneRemovedFields() {
+  if (prunedOnce) return false;
+  prunedOnce = true;
+  const db = load(THESES, { items: [] });
+  const items = Array.isArray(db?.items) ? db.items : [];
+  let changed = false;
+  const next = items.map((it) => {
+    const clean = stripRemovedFields(it);
+    if (clean !== it) changed = true;
+    return clean;
+  });
+  if (changed) {
+    save(THESES, { items: next });
+    console.log(`[thesisStore] 已清理 ${THESIS_REMOVED_FIELDS.length} 个历史遗留字段`);
+  }
+  return changed;
 }
 
 export function getThesis(id) {
@@ -94,14 +134,15 @@ export function getThesis(id) {
 
 export function upsertThesis(record) {
   if (!record?.id) throw new Error('缺少论文 id');
+  const clean = stripRemovedFields(record);
   const db = load(THESES, { items: [] });
   const items = Array.isArray(db?.items) ? db.items : [];
-  const idx = items.findIndex((it) => it.id === record.id);
+  const idx = items.findIndex((it) => it.id === clean.id);
   const now = new Date().toISOString();
   if (idx >= 0) {
-    items[idx] = { ...items[idx], ...record, updatedAt: now };
+    items[idx] = stripRemovedFields({ ...items[idx], ...clean, updatedAt: now });
   } else {
-    items.unshift({ ...record, createdAt: record.createdAt || now, updatedAt: now });
+    items.unshift(stripRemovedFields({ ...clean, createdAt: clean.createdAt || now, updatedAt: now }));
   }
   save(THESES, { items });
   return idx >= 0 ? items[idx] : items[0];

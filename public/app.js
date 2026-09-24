@@ -6919,6 +6919,9 @@
     document.querySelector('.main-area').classList.toggle('reviewer-mode', v === 'reviewer');
     // 学位论文阅读：与文献中心同构，主区固定不滚动，表格/阅读器内部各自滚动
     document.querySelector('.main-area').classList.toggle('th-mode', v === 'thesis');
+    // 离开该视图时把自建的浮层（阅读器 / 解析详情 / 素材库）收起来，
+    // 否则它们挂在 body 上会一直盖着别的视图
+    if (v !== 'thesis') window.ThesisView?.close?.();
     $('searchInput').classList.toggle('hidden', !isLib);
     $('btnParseAll').classList.toggle('hidden', !isLib);
     $('btnRefreshRanks').classList.toggle('hidden', !isLib);

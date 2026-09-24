@@ -10,7 +10,7 @@ import path from 'node:path';
 
 import * as store from '../src/store.js';
 import * as thesisStore from '../src/thesisStore.js';
-import { THESIS_AI_FIELDS, THESIS_USER_FIELDS } from '../src/thesisFields.js';
+import { THESIS_AI_FIELDS, THESIS_USER_FIELDS, THESIS_REMOVED_FIELDS } from '../src/thesisFields.js';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'thesis-store-'));
 store.configure({ dataDir: dir });
@@ -166,4 +166,44 @@ test('书签：能通过 patchThesis 存下来，并过滤掉结构不对的项'
   assert.equal(out.bookmarks[1].page, 8, '页码取整');
   assert.equal(out.bookmarks[1].note.length, 300, '备注限长，别把数据文件撑爆');
   assert.equal(thesisStore.getThesis(rec.id).bookmarks.length, 2, '要真的落盘，而不只是返回值好看');
+});
+
+test('字段瘦身：AI 只留 5 个书目前提字段，废弃字段全部清掉', () => {
+  // 上一个用例把数据目录切走了，这里切回本文件自己的目录
+  store.configure({ dataDir: dir });
+  assert.deepEqual(THESIS_AI_FIELDS, ['title', 'authors', 'school', 'degreeType', 'year']);
+  assert.ok(THESIS_REMOVED_FIELDS.includes('summary'), '旧的总结类字段应进了废弃清单');
+  assert.ok(THESIS_REMOVED_FIELDS.includes('suggestedRating'), 'AI 建议评级不再产出');
+
+  // 模拟一份 v1.19.x 的老数据：夹带着 17 个已废弃字段
+  const legacy = {
+    ...thesisStore.blankThesis({ title: '老数据' }),
+    major: '企业管理', supervisor: '李四', keywords: '短视频；沉浸',
+    summary: '本文研究了……', theory: '计划行为理论', method: '问卷调查',
+    limitation: '单国样本', structure: '第一章 绪论', dataOpen: '未公开',
+    suggestedRating: '4', ratingReason: '设计规范',
+  };
+  // upsert 内部就会剥掉（读的时候也剥）
+  const saved = thesisStore.upsertThesis(legacy);
+  for (const f of THESIS_REMOVED_FIELDS) {
+    assert.equal(saved[f], undefined, `${f} 不该被写进记录`);
+    assert.equal(thesisStore.getThesis(saved.id)[f], undefined, `${f} 不该出现在读出来的记录里`);
+  }
+  // 用户手写的字段与 5 个 AI 字段必须原样保留
+  assert.equal(saved.title, '老数据');
+  assert.equal(saved.myThoughts, '');
+
+  // 直接改数据文件塞回废弃字段 → pruneRemovedFields 要能一次性清干净
+  const file = path.join(dir, 'theses.json');
+  const db = JSON.parse(fs.readFileSync(file, 'utf-8'));
+  const target = db.items.find((x) => x.id === saved.id);
+  target.summary = '手动塞回来的脏字段';
+  target.suggestedRating = '5';
+  fs.writeFileSync(file, JSON.stringify(db, null, 2), 'utf-8');
+  assert.equal(thesisStore.listTheses().find((x) => x.id === saved.id).summary, undefined, '读的时候就要剥掉');
+  thesisStore.pruneRemovedFields();
+  const after = JSON.parse(fs.readFileSync(file, 'utf-8')).items.find((x) => x.id === saved.id);
+  assert.equal(after.summary, undefined, 'prune 之后文件里也不该再有');
+  assert.equal(after.suggestedRating, undefined);
+  assert.equal(after.title, '老数据', '清理不能误伤正常字段');
 });
