@@ -128,12 +128,33 @@ test('学位论文全链路：上传 → 解析 → 建索引 → 书签栏 → 
   const uploadDir = path.join(root, 'uploads');
 
   const upstreamBodies = [];
+  // 让接下来的 N 次「抽字段」请求只回一个标题 —— 用来驱动「第 1 页字段不够 → 补看 2–3 页」
+  // 这条两段式路径（正常情况下封面页就够用，不会走这里）
+  let parsePartialLeft = 0;
+  // 让接下来的 N 次「文字转录」请求回一个空的代码块 —— 用来验证「没认到字」要被当成失败
+  let ocrEmptyLeft = 0;
+  const OCR_TEXT = 'The empirical results show that immersion significantly improves purchase intention.';
   const upstream = mockUpstream((body, res) => {
     upstreamBodies.push(body);
     // 「读封面抽字段」是非流式的 JSON 调用，用提示词特征区分。
     // 走视觉链路时 messages 里会有 image_url，走文本兜底时没有 —— 两条路都返回同一份 JSON。
     const raw = JSON.stringify(body);
+    if (raw.includes('文字转录助手')) {
+      let content = OCR_TEXT;
+      if (ocrEmptyLeft > 0) { ocrEmptyLeft -= 1; content = '```\n\n```'; }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+      return;
+    }
     if (raw.includes('信息提取助手')) {
+      if (parsePartialLeft > 0) {
+        parsePartialLeft -= 1;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ title: '只认出了标题' }) } }],
+        }));
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         choices: [{
@@ -206,11 +227,12 @@ test('学位论文全链路：上传 → 解析 → 建索引 → 书签栏 → 
     assert.equal(uploaded.originalName, 'thesis.pdf');
     assert.equal(uploaded.numPages, 0, '上传时还没解析，页数待索引阶段补上');
 
-    // ---------- ② AI 读封面填字段 ----------
-    // 2a）不带图片 → 走「文本前 3 页」兜底
+    // ---------- ② AI 读封面填字段（两段式：先第 1 页，不够再补 2–3 页） ----------
+    // 2a）不带图片 → 走「文本」兜底，而且只读第 1 页
     const textOnly = await json(await post(`/api/theses/${rec.id}/parse`, {}));
     assert.equal(textOnly.status, 'done', '文本兜底解析应成功：' + textOnly.error);
     assert.equal(textOnly.source, 'text', '没传图片时应该走文本路径');
+    assert.equal(textOnly.parsePages, 1, '字段够用时只该付第 1 页的 token');
     assert.equal(textOnly.numPages, 12, '解析时会顺便读到总页数');
     // 归一化：书名号、字段名前缀、「硕士学位论文」页眉、「2024年」都要被收拾干净
     assert.equal(textOnly.title, '短视频沉浸体验对购买意愿的影响研究');
@@ -219,27 +241,69 @@ test('学位论文全链路：上传 → 解析 → 建索引 → 书签栏 → 
     assert.equal(textOnly.degreeType, '硕士');
     assert.equal(textOnly.year, '2024');
 
-    // 2b）带图片 → 优先走视觉模型，且请求体里必须真的有 image_url
-    const before2a = upstreamBodies.length;
-    const parsed = await json(await post(`/api/theses/${rec.id}/parse`, {
+    // 2b）只传 1 张图 → 只发 1 张给模型（省 token 的关键），字段够用就不再多问
+    const before2b = upstreamBodies.length;
+    const oneImg = await json(await post(`/api/theses/${rec.id}/parse`, {
+      pages: [{ page: 1, image: 'data:image/jpeg;base64,/9j/AAAA' }],
+    }));
+    assert.equal(oneImg.status, 'done', '视觉解析应成功：' + oneImg.error);
+    assert.equal(oneImg.source, 'vision', '配了视觉模型且传了图片，就该走看图');
+    assert.equal(oneImg.parseModel, 'mock-vision', '要用视觉模型，而不是普通文本模型');
+    assert.equal(oneImg.parsePages, 1);
+    assert.equal(oneImg.needMorePages, undefined, '字段够用时不该要求前端补图');
+    const firstSent = upstreamBodies.slice(before2b).filter((b) => JSON.stringify(b).includes('信息提取助手'));
+    assert.equal(firstSent.length, 1, '封面页够用时只该发一次解析请求');
+    const parts = firstSent[0].messages[1].content;
+    assert.ok(Array.isArray(parts), '视觉请求的 user content 应该是数组（OpenAI 多模态格式）');
+    const imgParts = parts.filter((p) => p.type === 'image_url');
+    assert.equal(imgParts.length, 1, '只该带上第 1 页那一张图');
+    assert.ok(imgParts[0].image_url.url.startsWith('data:image/jpeg;base64,'), '图片要用 dataURL 直接内嵌');
+    assert.ok(parts.some((p) => p.type === 'text'), '除图片外还要有一段文字说明页码顺序');
+    // 只带 1 页时提示词要按「第 1 页」写，而不是含糊地说「前 3 页」
+    assert.match(String(firstSent[0].messages[0].content), /第 1 页/);
+
+    // 2c）只有第 1 页、而上游只认出了标题 → 后端不该硬撑，而是回一个「请补图」的信号
+    parsePartialLeft = 1;
+    const needMore = await json(await post(`/api/theses/${rec.id}/parse`, {
+      pages: [{ page: 1, image: 'data:image/jpeg;base64,/9j/AAAA' }],
+    }));
+    assert.equal(needMore.needMorePages, true, '字段不全且手里只有封面页时要让前端补图');
+    assert.equal(needMore.title, '只认出了标题', '这次的结果先落库，别把已有数据弄丢');
+    // 这个信号只对这一次响应用意义，不能写进记录
+    const stored = await json(await get(`/api/theses/${rec.id}`));
+    assert.equal(stored.needMorePages, undefined, 'needMorePages 不该落库');
+
+    // 2d）前端补来 3 页 → 这一次直接用 3 页重新解析，不必再跑第二趟
+    parsePartialLeft = 1; // 让「只看第 1 页」那一次只回标题，逼出补看 2–3 页
+    const before2d = upstreamBodies.length;
+    const withThree = await json(await post(`/api/theses/${rec.id}/parse`, {
       pages: [
         { page: 1, image: 'data:image/jpeg;base64,/9j/AAAA' },
         { page: 2, image: 'data:image/jpeg;base64,/9j/BBBB' },
+        { page: 3, image: 'data:image/jpeg;base64,/9j/CCCC' },
       ],
     }));
-    assert.equal(parsed.status, 'done', '视觉解析应成功：' + parsed.error);
-    assert.equal(parsed.source, 'vision', '配了视觉模型且传了图片，就该走看图');
-    assert.equal(parsed.parseModel, 'mock-vision', '要用视觉模型，而不是普通文本模型');
-    const visionSent = upstreamBodies.slice(before2a).find((b) => JSON.stringify(b).includes('信息提取助手'));
-    assert.ok(visionSent, '要真的发出解析请求');
-    const parts = visionSent.messages[1].content;
-    assert.ok(Array.isArray(parts), '视觉请求的 user content 应该是数组（OpenAI 多模态格式）');
-    const imgParts = parts.filter((p) => p.type === 'image_url');
-    assert.equal(imgParts.length, 2, '两张页面图都要带上');
-    assert.ok(imgParts[0].image_url.url.startsWith('data:image/jpeg;base64,'), '图片要用 dataURL 直接内嵌');
-    assert.ok(parts.some((p) => p.type === 'text'), '除图片外还要有一段文字说明页码顺序');
+    assert.equal(withThree.status, 'done');
+    assert.equal(withThree.source, 'vision');
+    assert.equal(withThree.needMorePages, undefined, '已经给到 3 页，不该再要');
+    assert.equal(withThree.parsePages, 3, '这一次真的用上了 3 页');
+    assert.equal(withThree.title, '短视频沉浸体验对购买意愿的影响研究', '补看后的字段要生效');
+    const threeSent = upstreamBodies.slice(before2d).filter((b) => JSON.stringify(b).includes('信息提取助手'));
+    assert.equal(threeSent.length, 2, '先只看第 1 页、不够才补看 2–3 页（正好两次请求）');
+    assert.equal(threeSent[0].messages[1].content.filter((p) => p.type === 'image_url').length, 1, '第一次只带第 1 页');
+    assert.match(String(threeSent[0].messages[0].content), /第 1 页/);
+    assert.equal(threeSent[1].messages[1].content.filter((p) => p.type === 'image_url').length, 3, '补看时三张图都要带上');
+    assert.match(String(threeSent[1].messages[0].content), /前 3 页/, '页数变了提示词也要跟着说清楚');
 
-    // 2c）脏图片（不是 data:image 前缀）应被忽略而不是让解析炸掉 —— 前端截图失败时会退化成文本路径
+    // 2e）文本路径同样两段式：第 1 页不够 → 后端自己往后读到第 3 页（不多跑一趟 HTTP）
+    parsePartialLeft = 1;
+    const textEscalated = await json(await post(`/api/theses/${rec.id}/parse`, {}));
+    assert.equal(textEscalated.status, 'done');
+    assert.equal(textEscalated.source, 'text');
+    assert.equal(textEscalated.parsePages, 3, '第 1 页不够用时要自动补读到第 3 页');
+    assert.equal(textEscalated.title, '短视频沉浸体验对购买意愿的影响研究');
+
+    // 2f）脏图片（不是 data:image 前缀）应被忽略而不是让解析炸掉 —— 前端截图失败时会退化成文本路径
     const junk = await json(await post(`/api/theses/${rec.id}/parse`, { pages: [{ page: 1, image: 'oops' }] }));
     assert.equal(junk.status, 'done', '脏图片应被忽略而不是报错');
     assert.equal(junk.source, 'text', '图片全被忽略后只能走文本兜底');
@@ -361,6 +425,41 @@ test('学位论文全链路：上传 → 解析 → 建索引 → 书签栏 → 
     const md = await (await get('/api/thesis-quotes/export')).text();
     assert.match(md, /# 学位论文摘录素材库/);
     assert.match(md, /Chapter 4 Results · p\.9/);
+
+    // ---------- ⑩′ 文字识别：扫描件页也能摘录 ----------
+    // 扫描件的 PDF 没有文字层，划词划不动，所以「加入素材库」要靠视觉模型把图上的字读出来
+    const ocr = await json(await post(`/api/theses/${rec.id}/ocr`, {
+      page: 9, image: 'data:image/jpeg;base64,/9j/OCRIMGDATA',
+    }));
+    assert.equal(ocr.text, OCR_TEXT, '转录结果要原样返回');
+    assert.equal(ocr.page, 9);
+    assert.equal(ocr.model, 'mock-vision', 'OCR 必须走视觉模型');
+    const ocrSent = upstreamBodies.filter((b) => JSON.stringify(b).includes('文字转录助手')).pop();
+    assert.ok(ocrSent, '要真的发出转录请求');
+    assert.ok(ocrSent.messages[1].content.some((p) => p.type === 'image_url'), '转录请求里要带上页面图');
+    assert.ok(!/总结|翻译/.test(String(ocrSent.messages[1].content[0].text).slice(0, 40)), '转录请求只描述这是哪一页');
+
+    // 没认到字（模型回了个空代码块）→ 422，并给出可照做的提示
+    ocrEmptyLeft = 1;
+    const emptyOcr = await post(`/api/theses/${rec.id}/ocr`, { page: 3, image: 'data:image/jpeg;base64,/9j/EMPTY' });
+    assert.equal(emptyOcr.status, 422, '空结果要如实报错，不能当成功');
+    assert.match((await json(emptyOcr)).error, /没识别出文字/);
+
+    // 没有图片 / 论文不存在 → 明确的 4xx
+    assert.equal((await post(`/api/theses/${rec.id}/ocr`, { page: 1 })).status, 400, '没有图片要拒绝');
+    assert.equal((await post('/api/theses/根本没有这条/ocr', { image: 'data:image/jpeg;base64,x' })).status, 404);
+
+    // 没配视觉模型时要给一句能照做的提示，而不是抛内部错误
+    const settingsBefore = store.getSettings();
+    store.saveSettings({
+      ...settingsBefore,
+      visionProfileId: '',
+      modelProfiles: settingsBefore.modelProfiles.map((p) => (p.id === 'p2' ? { ...p, apiKey: '' } : p)),
+    });
+    const noVision = await post(`/api/theses/${rec.id}/ocr`, { page: 1, image: 'data:image/jpeg;base64,/9j/X' });
+    assert.equal(noVision.status, 400);
+    assert.match((await json(noVision)).error, /视觉模型/, '要告诉用户去哪配视觉模型');
+    store.saveSettings(settingsBefore); // 还原，后面还要用
 
     // ---------- ⑪ 分类 ----------
     const col = await json(await post('/api/thesis-collections', { name: '消费者行为' }));

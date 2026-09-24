@@ -66,6 +66,8 @@ export function blankThesis(overrides = {}) {
     numPages: 0, charCount: 0, importedAt: now,
     // 解析状态
     status: 'pending', error: '', source: '', parsedAt: '',
+    // 这次解析实际喂给模型几页（1 = 只看封面就够了；字段不够时才会读/看 2–3 页）
+    parsePages: 0,
     // 分类
     collectionId: '',
     // 进度（自动维护；progressManual 有值时以用户手改的为准）

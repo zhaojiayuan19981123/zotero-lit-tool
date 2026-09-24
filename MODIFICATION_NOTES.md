@@ -1,3 +1,111 @@
+## v1.19.2：学位论文阅读六项体验修正——排序 / 分层解析 / 分级评级 / 笔记插图 / 扫描件识别 / 弹窗可关（2026-09-25）
+
+针对用户反馈的六条：①排序选择不够用 ②解析还是慢（每次传 3 页图）③评级看着只能标 5 星
+④笔记要能插图片（Ctrl+V）⑤扫描件没文本层、摘不到素材库 ⑥「字段配置」弹窗关不掉。
+
+### 一、排序：年份 / 导入时间 / 评级 + 升降方向 + 表头点击（`public/thesis.js` / `.css`）
+
+- 新增常量 `COL_SORT`（列 key → 排序 key，如 `year`/`importedAt`/`rating`/`title`/`progress`）、
+  `SORT_KEYS`（合法排序键集合）、`SORT_LABELS`、`SORT_DEFAULT_DIR = { title: 'asc' }`。
+  `S.sort = 'importedAt'`、新增 `S.sortDir = 'desc'`，持久化到 `localStorage.thesisSort`（`LS.sort`）。
+- `cmpDesc(a, b, key)` 统一语义为**降序**，调用方乘 ±1 换方向：`filtered()` 里
+  `sign = S.sortDir === 'asc' ? -1 : 1`，即 `list.sort((a, b) => sign * cmpDesc(a, b, sort))`。
+- `setSort(key, { toggle })`：同列再点**反转方向**，换列用该列默认方向（避免「按年份却把最老的放最前」）。
+  `syncSortUi()` 把状态同步到 `#thSort` 下拉与新增的 `#thSortDir` 方向按钮（文案 `↓ 降序` / `↑ 升序`）。
+- 表头：带 `COL_SORT` 的列渲染成 `<th class="th-sortable" data-sortkey=…>`，非当前排序列显示 `↕`、
+  当前列显示 `↑`/`↓`，`#thWrap` 上做事件委托 `setSort(dataset.sortkey, { toggle: true })`。
+- `mount()` 时从 localStorage 恢复排法。CSS 新增 `.th-sortable` / `.th-sorted` / `.th-sort-ind`。
+
+### 二、解析分层：先只送第 1 页，不够才补看 2–3 页（`src/thesisRoutes.js` / `src/thesisFields.js`）
+
+- **`src/thesisFields.js` 新增 `fieldsComplete(fields)`**：`title` 必须存在，且
+  `[authors, school, degreeType, year]` 里至少命中 2 个 —— 用来判定「封面页够不够」。
+- **`buildThesisParsePrompt(lang, pageCount)`** 按真实页数措辞（「**第 1 页（封面）**」vs「**前 N 页**」），
+  不再写死 3 页。
+- **`parseThesis` 重写为两段**：
+  - 第 1 段固定 `thesisPdf.readThesisHead(filePath, 1)`；
+    `useImages = images.length > 0 && !!vision`，视觉优先（`askWithImages(vision, images.slice(0, 1))`），
+    失败/无视觉则退文本（`askWithText(profile, head.pages)`）；`method` 记 `'vision' | 'text'`。
+  - `!fieldsComplete(fields)` 才进第 2 段，三条分支：
+    A. `useImages && images.length >= 2`（前端已补送 2–3 页）→ 直接 `askWithImages(slice(0, 3))`，
+       **不再多跑一趟 HTTP**，`pagesUsed = min(3, images.length)`；
+    B. `useImages` 但只有封面 1 张 → 后端起不了作用，返回 `needMorePages: true` 让**前端**补图后重来；
+    C. 文本路径 → 后端自己 `readThesisHead(filePath, 3)` 再解析一次（省一次往返）。
+  - 记录 `parsePages`（这次实际用了几页）落库；`needMorePages` **只在当次响应里**，不落库。
+  - 新增内部工具 `askWithImages` / `askWithText` / `joinPagesText` / `bestEffort`（补看失败不推翻第 1 段结果）。
+- **`src/thesisStore.js`**：`blankThesis` 增加 `parsePages: 0`。
+- **前端 `parseOne(rec)`**：`collectHeadImages(rec, 1)` → POST `/parse`；
+  仅当响应带 `needMorePages && S.visionReady` 才 `collectHeadImages(rec, 3)` 再 POST 一次。
+  `collectHeadImages` 增加**按页 JPEG 缓存**（`headDoc.cache`），补看时第 1 页不重渲。
+- 前端新增 `parseMethodLabel(it)`：「视觉模型看图 · 前 N 页」（`renderFields` / `renderDetail` 共用），
+  把「省了几页」变成用户看得见的证据。
+
+### 三、评级可分级：悬停只亮前 N 颗（`public/thesis.js` / `.css`）
+
+- **根因**：不是功能问题，是 CSS —— `.th-stars:hover .th-star { color: var(--star) }` 一次把 5 颗全染金，
+  观感上像「只能标 5 星」。点第几颗本来就是几星（`patchItem({ rating })`，同颗再点置 0）。
+- 删掉那条 `:hover` 规则，改为 JS 驱动的 `.th-star.preview`：`starPreview(root)` 在 `mouseover` 时
+  只给 `data-v <= 悬停星` 的星加 `.preview`（`mouseout` 离开整组时清除），CSS 里
+  `.th-star.preview { color: var(--star) }`。表格（`#thWrap`）与抽屉（`#thDetailBody`）各绑一次。
+- 星星 `title` 改为「点第几颗星就是几星（再点同一颗取消）」。
+
+### 四、笔记插图：Ctrl+V 粘贴截图（`public/thesis.js`）
+
+- `#thrMd` 上新增 `paste` 监听：从 `clipboardData.items`（`kind === 'file'` 且 `type` 以 `image/` 开头）
+  或 `clipboardData.files` 取图；没有图就**不拦截**，交回浏览器默认粘贴。
+- 新增 `#thrNoteImg`（🖼 插图）+ 隐藏 `#thrNoteFile`（`accept="image/*" multiple`）作为等价的选文件入口。
+- 新增 `noteImageFiles` / `noteFileToDataUrl` / `insertNoteImages`：转成 **data URL** 写成
+  Markdown `![名称](data:image/…;base64,…)`，插到光标处（复用 `window.PaperNoteUtils.insertSnippet`），
+  插入后立刻 `saveNote()` 落盘；单张上限 **8MB**（`NOTE_IMG_MAX`），超了明确提示并跳过。
+- `markdown()` 的 DOMPurify 配置加 **`ADD_DATA_URI_TAGS: ['img']`** —— 否则内联 data URL 会被当
+  不可信协议清掉，预览里图片是空白。
+
+### 五、扫描件也能摘录：框选 → 视觉模型转录 → 进素材库（`src/thesisRoutes.js` / `public/thesis.js`）
+
+- **问题本质**：学位论文有相当比例是**扫描件**（整页一张图，无文字层），`getSelection()` 拿不到东西，
+  「加入素材库」这条链路断在入口。
+- **`src/thesisFields.js` 新增 `buildThesisOcrPrompt(lang)`**：「你是一位文字转录助手……只转录，
+  不翻译、不总结、不解释、不补充」。
+- **后端新增 `POST /api/theses/:id/ocr`**（`src/thesisRoutes.js`）：入参 `{ page, image(data URL) }`；
+  校验 `^data:image/`（否则 400）、论文存在（404）、有视觉模型（否则 400 并给出可操作的提示语）；
+  走 `callOnce(vision, { temperature: 0, max_tokens: 2000 })`，剥掉包裹的代码块、截断 20k 字符，
+  空结果回 422；成功返回 `{ text, page, model }`。
+- **前端**（`public/thesis.js`）：阅读器顶栏新增「🈯 识别文字」按钮 → `startOcr()` 在当前页盖
+  `.thr-ocr-layer` 蒙版（`mousedown` 起点、`mousemove` 画框、`mouseup` 出区域），
+  没拖动（<14px）视为**识别整页**；Esc 走 `escOcr` → `cancelOcr()`。
+  目标页若已被离屏回收，先 `await renderPage(n)` 再允许框选。
+- `cropPageJpeg(pageNo, region)` **按 2–3 倍重渲**再裁剪（屏幕位图受 DPR 1.5 限制只有约 100DPI，
+  小字认不出），并做屏幕坐标 → 位图坐标映射、四周留 8px 余量。渲染时**先铺白底**（透明区在 JPEG 里会发黑）。
+- 结果面板 `.th-ocr`（`#thOcrText` 可编辑）四个动作：**加入素材库 / 追加到笔记 / 用这段提问 / 重新框选**，
+  分别复用 `quoteCurrent` / `appendNote(blockquoteText(...))` / 预填 `#thrInput` / 重新 `startOcr()`。
+  `closeReader` 会 `cancelOcr()` + `hideOcrPanel()`。
+
+### 六、字段配置弹窗：四条关闭途径（`public/thesis.js` / `.css`）
+
+- **根因**：旧弹层复用共用样式 `.pop`（`position: fixed` 却没给 `top/left`），且**没有写任何关闭路径**。
+- 改为专用 `.th-colspop`：`openColsPop()` 用 `#thBtnCols` 的 `getBoundingClientRect()` 把弹层
+  **锚定在按钮下方**（`style.top/right`），按钮加 `.active`。
+- 关闭途径四条：①`#thColsClose`（✕）②再点 `#thBtnCols`（`toggleColsPop`）③`document` `keydown` 的 **Esc**
+  ④`document` `mousedown` 点外部（`closest('#thColsPop') || closest('#thBtnCols')` 则忽略）。
+- `renderColsPop()` 的事件监听**只挂一次**（`pop.dataset.bound` 守卫），避免反复开合叠出重复提交。
+
+### 测试
+
+- **`test/thesis-fields.test.mjs`（新增，12 项）**：`fieldsComplete` 边界（标题缺失、5 个字段齐、
+  只命中 1 个、`null` 输入）、`buildThesisParsePrompt(pageCount)` 页数措辞、
+  `buildThesisOcrPrompt`、`normalizeThesisFields` 收口、字段契约（5 个 AI 字段 / 12 列 / 17 个废弃字段）。
+- **`test/thesis-http.test.mjs` 扩写**：mock 上游加 `parsePartialLeft`（只回标题 N 次）与
+  `ocrEmptyLeft`（回空代码块 N 次）+「文字转录助手」分支；解析段拆成
+  2a 文本路径 `parsePages === 1`、2b 只送 1 图不触发补看、2c 只给封面图 → `needMorePages: true` 且不落库、
+  2d 送 3 图 → 两次视觉调用（1 张 → 3 张）且 `parsePages === 3`、2e 文本补看 → `parsePages === 3`、
+  2f 垃圾图退回文本；新增 ⑩′ OCR 段（成功、422 空结果、400 无图、404 论文不存在、400 无视觉模型）。
+- 结果：单元测试 **355/355**（原 343 + 12）；真机 `verify-thesis.mjs` **170/170**（原 121，
+  新增排序 14 项 / 分层解析 5 项 / 分级评级 5 项 / 笔记插图 4 项 / OCR 9 项 / 弹窗关闭 6 项）；
+  回归 `verify-features.mjs` **75/75**、`verify-router-panel.mjs` **52/52**，无回退。
+- ⚠️ E2E 里的一个真坑：OCR 框选的 `mousedown` 坐标不能只按蒙版矩形钳到视口内 ——
+  页面比视口高时蒙版顶部是**负值**（被阅读器顶栏盖住），钳到 8px 会把 `mousedown` 打到顶栏上，
+  蒙版收不到 `down`、识别永远不触发。正确做法是取「**蒙版 ∩ `#thrScroll` 可读区域**」再内缩。
+
 ## v1.19.1：学位论文阅读体验修正——视觉解析、字段精简、详情抽屉、阅读器提速、笔记模式（2026-09-25）
 
 针对 v1.19.0 上线后反馈的五点：解析慢且会错 / 字段太多 / 想看解析详情 / PDF 滑动卡 / 笔记模式难用。

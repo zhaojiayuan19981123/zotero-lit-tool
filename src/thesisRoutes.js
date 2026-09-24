@@ -242,6 +242,7 @@ export function registerThesisRoutes(app, ctx) {
    *   B. **文本兜底**：没配视觉模型、或视觉调用失败时，只读前 3 页的文本层。
    *
    * 无论走哪条路，都**不再整本提取文本**（那是「解析慢」的根因）。
+   * 页数也分两段：**先只看第 1 页**，字段不够再补看 2–3 页（见下面的 B 段）。
    */
   async function parseThesis(record, { settings, profileId, pages = null } = {}) {
     const current = record;
@@ -249,33 +250,27 @@ export function registerThesisRoutes(app, ctx) {
     try {
       if (!current.filePath || !fs.existsSync(current.filePath)) throw new Error('还没有上传 PDF 附件');
 
-      // 只读前 3 页：拿到页数/元信息，同时给文本兜底留一份正文
-      const head = await thesisPdf.readThesisHead(current.filePath, 3);
-      const headText = head.pages.map((p) => p.text).filter(Boolean).join('\n\n').slice(0, 12000);
-
       const images = (Array.isArray(pages) ? pages : [])
         .filter((p) => p && typeof p.image === 'string' && /^data:image\//.test(p.image))
         .slice(0, 4)
         .map((p) => String(p.image));
 
       const profile = pickModel({ profileId });
-      const prompt = thesisFields.buildThesisParsePrompt(settings?.language === 'zh' ? '简体中文' : 'English');
+      const lang = settings?.language === 'zh' ? '简体中文' : 'English';
+      const vision = resolveVisionModel?.(settings) || null;
+      const useImages = images.length > 0 && !!vision;
 
-      // ---- A. 看图 ----
+      // 第 1 页：既拿页数/元信息，也给文本兜底留一份正文
+      let head = await thesisPdf.readThesisHead(current.filePath, 1);
+      const joinHead = (list) => list.map((p) => p.text).filter(Boolean).join('\n\n').slice(0, 12000);
+
+      // ---- A. 先只看第 1 页：视觉优先，失败退文本 ----
       let raw = '';
       let method = '';
       let usedModel = profile.model;
-      const vision = images.length ? resolveVisionModel?.(settings) : null;
-      if (vision) {
+      if (useImages) {
         try {
-          const content = [{ type: 'text', text: `以下依次是这篇学位论文的第 1 页起（共 ${images.length} 页）：` }];
-          for (const img of images) content.push({ type: 'image_url', image_url: { url: img } });
-          raw = await callOnce(vision, {
-            model: vision.model,
-            messages: [{ role: 'system', content: prompt }, { role: 'user', content }],
-            temperature: 0.1,
-            max_tokens: 1200,
-          }, settings);
+          raw = await askWithImages(vision, images.slice(0, 1), settings, lang);
           method = 'vision';
           usedModel = vision.model;
         } catch (e) {
@@ -284,29 +279,50 @@ export function registerThesisRoutes(app, ctx) {
           raw = '';
         }
       }
-
-      // ---- B. 文本兜底 ----
       if (!raw) {
-        if (!headText || headText.length < 60) {
-          throw new Error('这篇 PDF 提不到有效文字（可能是扫描件）。请到「AI 设置 → 图像能力」为某个视觉模型开启图片支持后重新解析。');
-        }
-        raw = await callOnce(profile, {
-          model: profile.model,
-          messages: [
-            { role: 'system', content: prompt },
-            { role: 'user', content: `以下是学位论文前 3 页的文本：\n\n${headText}` },
-          ],
-          temperature: 0.1,
-          max_tokens: 1200,
-        }, settings);
+        raw = await askWithText(profile, head.pages, settings, lang);
         method = 'text';
+        usedModel = profile.model;
       }
 
-      const parsed = parseJsonLoose(raw);
-      const fields = thesisFields.normalizeThesisFields(parsed);
+      let fields = thesisFields.normalizeThesisFields(parseJsonLoose(raw));
+      let pagesUsed = 1;
+      let needMorePages = false;
+
+      // ---- B. 第 1 页不够用 → 才补看后面的页（省 token 的关键：常见情况只付 1 页）----
+      if (!thesisFields.fieldsComplete(fields)) {
+        if (useImages && images.length >= 2) {
+          // 前端已经把 2–3 页的图送来了，直接用（不再多跑一趟 HTTP）
+          const again = await bestEffort(async () => thesisFields.normalizeThesisFields(
+            parseJsonLoose(await askWithImages(vision, images.slice(0, 3), settings, lang)),
+          ));
+          if (again) {
+            fields = again;
+            method = 'vision';
+            usedModel = vision.model;
+            pagesUsed = Math.min(3, images.length);
+          }
+        } else if (useImages) {
+          // 手里只有封面那一张图 → 不在后端硬撑，回个信号让前端补图后再来一次
+          needMorePages = true;
+        } else {
+          // 文本路径：后端自己往后读到第 3 页（省掉一次 HTTP 往返）
+          const more = await bestEffort(() => thesisPdf.readThesisHead(current.filePath, 3));
+          if (more && more.pages.length > 1) {
+            const again = await bestEffort(async () => thesisFields.normalizeThesisFields(
+              parseJsonLoose(await askWithText(profile, more.pages, settings, lang)),
+            ));
+            if (again) { fields = again; method = 'text'; usedModel = profile.model; }
+            pagesUsed = more.pages.length;
+            head = more;
+          }
+        }
+      }
+
+      const fullText = joinHead(head.pages);
       // AI 拿不到的学校/学位类型，用规则兜底，不让字段空着
-      if (!fields.school) fields.school = thesisFields.guessSchool(headText);
-      if (!fields.degreeType) fields.degreeType = thesisFields.guessDegreeType(headText);
+      if (!fields.school) fields.school = thesisFields.guessSchool(fullText);
+      if (!fields.degreeType) fields.degreeType = thesisFields.guessDegreeType(fullText);
 
       const updated = {
         ...thesisStore.getThesis(current.id),
@@ -316,15 +332,62 @@ export function registerThesisRoutes(app, ctx) {
         status: 'done',
         source: method,
         parseModel: usedModel,
+        parsePages: pagesUsed,
         parsedAt: new Date().toISOString(),
         error: '',
       };
       thesisStore.upsertThesis(updated);
-      return updated;
+      // needMorePages / pagesUsed 只对「这一次响应」有意义，不落库
+      return needMorePages ? { ...updated, needMorePages: true, pagesUsed } : { ...updated, pagesUsed };
     } catch (e) {
       const failed = { ...thesisStore.getThesis(current.id), status: 'error', error: modelError(e) };
       thesisStore.upsertThesis(failed);
       return failed;
+    }
+  }
+
+  /** 把一批页面图交给视觉模型抽字段，返回原始文本 */
+  async function askWithImages(vision, imgs, settings, lang) {
+    const content = [{ type: 'text', text: `以下依次是这篇学位论文的第 1 页起（共 ${imgs.length} 页）：` }];
+    for (const img of imgs) content.push({ type: 'image_url', image_url: { url: img } });
+    return callOnce(vision, {
+      model: vision.model,
+      messages: [
+        { role: 'system', content: thesisFields.buildThesisParsePrompt(lang, imgs.length) },
+        { role: 'user', content },
+      ],
+      temperature: 0.1,
+      max_tokens: 1200,
+    }, settings);
+  }
+
+  /** 把若干页的文本层交给模型抽字段，返回原始文本 */
+  async function askWithText(profile, textPages, settings, lang) {
+    const text = joinPagesText(textPages);
+    if (!text || text.length < 60) {
+      throw new Error('这篇 PDF 提不到有效文字（可能是扫描件）。请到「AI 设置 → 图像能力」为某个视觉模型开启图片支持后重新解析。');
+    }
+    return callOnce(profile, {
+      model: profile.model,
+      messages: [
+        { role: 'system', content: thesisFields.buildThesisParsePrompt(lang, textPages.length) },
+        { role: 'user', content: `以下是学位论文前 ${textPages.length} 页的文本：\n\n${text}` },
+      ],
+      temperature: 0.1,
+      max_tokens: 1200,
+    }, settings);
+  }
+
+  function joinPagesText(textPages) {
+    return (Array.isArray(textPages) ? textPages : [])
+      .map((p) => p?.text).filter(Boolean).join('\n\n').slice(0, 12000);
+  }
+
+  /** 补看后续页失败不该让整次解析失败：沿用第 1 页已经拿到的结果 */
+  async function bestEffort(fn) {
+    try { return await fn(); } catch (e) {
+      console.error('[thesis] 补看后续页失败，沿用第 1 页结果：', e.message);
+      return null;
     }
   }
 
@@ -386,6 +449,56 @@ export function registerThesisRoutes(app, ctx) {
     res.json({
       results: results.map((r) => ({ id: r.id, title: r.title, status: r.status, error: r.error })),
     });
+  });
+
+  /**
+   * 识别一页（或页面上框选的一块）的文字 —— 给「摘录素材库」用。
+   *
+   * 为什么需要：不少学位论文是扫描件，整页就是一张图、PDF 里没有文字层，
+   * 划词划不动，「加入素材库」就无从下手。唯一的出路是让视觉模型把图上的字读出来。
+   * 为什么由前端送图：后端没有 canvas，后端着渲染 PDF 页要引入原生依赖；
+   * 而 pdf.js 已经在浏览器里跑着（解析与阅读器都在用），顺手截一张图成本最低。
+   */
+  app.post('/api/theses/:id/ocr', async (req, res) => {
+    const item = thesisStore.getThesis(req.params.id);
+    if (!item) return res.status(404).json({ error: '论文不存在' });
+    try {
+      const image = typeof req.body?.image === 'string' ? req.body.image : '';
+      if (!/^data:image\//.test(image)) return res.status(400).json({ error: '没有拿到可识别的图片' });
+      const page = Math.max(1, Number(req.body?.page) || 1);
+      const settings = ctx.store.getSettings();
+      const vision = resolveVisionModel?.(settings);
+      if (!vision) {
+        return res.status(400).json({
+          error: '还没有可用的视觉模型：请到「AI 解析设置」为一条模型填好 Key，'
+            + '并在「图像能力」里开启图片支持，然后再用文字识别。',
+        });
+      }
+      const lang = settings?.language === 'zh' ? '简体中文' : 'English';
+      const raw = await callOnce(vision, {
+        model: vision.model,
+        messages: [
+          { role: 'system', content: thesisFields.buildThesisOcrPrompt(lang) },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: `这是「${item.title || item.originalName || '学位论文'}」第 ${page} 页的图片：` },
+              { type: 'image_url', image_url: { url: image } },
+            ],
+          },
+        ],
+        temperature: 0,
+        max_tokens: 2000,
+      }, settings);
+      const text = String(raw || '')
+        .replace(/^```[a-z]*\s*/i, '').replace(/```\s*$/, '').trim().slice(0, 20000);
+      if (!text) {
+        return res.status(422).json({ error: '这块范围里没识别出文字，换个范围再试（也可能这页确实没有文字）' });
+      }
+      res.json({ text, page, model: vision.model });
+    } catch (e) {
+      res.status(400).json({ error: modelError(e) });
+    }
   });
 
   // ==================== 章节索引 ====================

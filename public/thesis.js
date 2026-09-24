@@ -4,8 +4,9 @@
  * 因此文献中心的行为不受任何影响。app.js 只负责在切到本视图时调一次 ThesisView.mount()。
  *
  * 三块内容：
- *   ① 列表：以表格管理学位论文（AI 读前 3 页填字段、分类、自动进度、手点评级）
+ *   ① 列表：以表格管理学位论文（AI 读封面页填字段、分类、自动进度、手点评级、按年份/时间/评级排序）
  *   ② 阅读器：左侧章节书签栏 + 中间 PDF 连续滚动 + 右侧「解析结果 / AI 对话」，保留笔记模式
+ *      （笔记支持 Ctrl+V 粘贴截图；扫描件页可用「识别文字」把图上的文字摘出来）
  *   ③ 写作支撑：摘录素材库、章节速读、综述条目、答辩演练、对比阅读、关联我的大论文
  *
  * 长文档问答的做法见 src/thesisContext.js：不塞全文，而是「档案卡 + 当前位置 + 检索命中 + 近 8 轮」。
@@ -45,10 +46,23 @@
   // 「解析详情」抽屉里按这个顺序展示
   const DETAIL_ROWS = ['title', 'authors', 'school', 'degreeType', 'year', 'myThoughts', 'referenceValue'];
 
+  // 能参与排序的列 → 排序键（表头可点，与工具栏的下拉是同一套状态）
+  const COL_SORT = {
+    title: 'title', year: 'year', rating: 'rating', progress: 'progress', importedAt: 'importedAt',
+  };
+  const SORT_KEYS = new Set(['title', 'year', 'rating', 'progress', 'importedAt']);
+  const SORT_LABELS = {
+    importedAt: '导入时间', year: '年份', rating: '评级', progress: '阅读进度', title: '标题',
+  };
+  // 切换排序键时的默认方向：时间 / 年份 / 评级 / 进度都是「新的、高的、多的在前」更常用；
+  // 标题按拼音 A→Z 更自然
+  const SORT_DEFAULT_DIR = { title: 'asc' };
+
   const LS = {
     // 换过 key：字段从 22 个砍到 12 个之后，老用户 localStorage 里存的是旧的 10 列名单，
     // 沿用会让「学位类型 / 年份」永远不出现，所以直接换 key 让默认值生效一次
     cols: 'thesisCols2',
+    sort: 'thesisSort',
     model: 'aiModel:thesis',
     budget: 'thesisBudget',
     attach: 'thesisAttachSection',
@@ -69,6 +83,7 @@
     filter: { collectionId: '__all__', progress: '', q: '' },
     selected: new Set(),
     cols: null,
+    sort: 'importedAt', sortDir: 'desc',
     bigPaper: null,
     quotes: [],
     modelChoices: [],
@@ -87,6 +102,8 @@
     queue: [], queued: new Set(), pumping: false, tasks: new Map(),
     recycleObs: null, noteView: 'edit', noteRatio: 0.44,
     pendingScale: 0, scaleTimer: 0,
+    // 文字识别（OCR）：on = 正在页面上框选
+    ocrOn: false,
   };
 
   // ==================== 工具 ====================
@@ -177,7 +194,13 @@
     try {
       html = window.marked?.parse ? window.marked.parse(src) : esc(src).replace(/\n/g, '<br>');
     } catch { html = esc(src).replace(/\n/g, '<br>'); }
-    if (window.DOMPurify) html = window.DOMPurify.sanitize(html, { ADD_ATTR: ['data-page'] });
+    // ADD_DATA_URI_TAGS：笔记里粘贴的截图是内联 data: URL，DOMPurify 默认会把它当
+    // 不可信协议清掉 —— 那样预览里图片就是空白。img 本就该允许内联图。
+    if (window.DOMPurify) {
+      html = window.DOMPurify.sanitize(html, {
+        ADD_ATTR: ['data-page'], ADD_DATA_URI_TAGS: ['img'],
+      });
+    }
     // 把【章节 · p.12】变成可点的出处
     return html.replace(/【([^】]{1,80}?)·\s*p\.(\d+)】/g,
       (m, where, page) => `<span class="src" data-page="${page}">【${where}· p.${page}】</span>`);
@@ -223,13 +246,14 @@
           <option value="阅读中">阅读中</option>
           <option value="已阅读">已阅读</option>
         </select>
-        <select id="thSort" class="tb-select">
+        <select id="thSort" class="tb-select" title="排序依据">
           <option value="importedAt">按导入时间</option>
           <option value="progress">按阅读进度</option>
           <option value="rating">按评级</option>
           <option value="title">按标题</option>
           <option value="year">按年份</option>
         </select>
+        <button class="tb-btn" id="thSortDir" title="切换升序 / 降序">↓ 降序</button>
         <div class="tb-spacer"></div>
         <button class="tb-btn" id="thBtnCompare">⇄ 对比阅读</button>
         <button class="tb-btn" id="thBtnBatchParse">▶ 批量解析选中</button>
@@ -237,7 +261,7 @@
       </div>
       <div class="th-bulk hidden" id="thBulk"></div>
       <div class="th-table-wrap" id="thWrap"></div>
-      <div id="thColsPop" class="pop hidden"></div>
+      <div id="thColsPop" class="th-colspop hidden"></div>
     `;
   }
 
@@ -248,6 +272,46 @@
     const byKey = new Map([...BASE_COLS, ...EXTRA_COLS.map((c) => ({ ...c, extra: true }))].map((c) => [c.key, c]));
     const cols = S.cols.map((k) => byKey.get(k)).filter(Boolean);
     return cols.length ? cols : BASE_COLS;
+  }
+
+  /** 比较函数：语义为「降序」，调用方乘 ±1 换方向（表头与下拉共用） */
+  function cmpDesc(a, b, key) {
+    if (key === 'progress') return progressOf(b).percent - progressOf(a).percent;
+    if (key === 'rating') return (Number(b.rating) || 0) - (Number(a.rating) || 0);
+    if (key === 'title') return String(b.title || '').localeCompare(String(a.title || ''), 'zh');
+    if (key === 'year') return (Number(b.year) || 0) - (Number(a.year) || 0);
+    return String(b.importedAt || '').localeCompare(String(a.importedAt || ''));
+  }
+
+  /**
+   * 切换排序。同一列再点一次 = 反转方向（表头的习惯用法）。
+   *
+   * 为什么要「同列再点反转、换列用默认方向」：用户点表头时的意图是「按这列看」，
+   * 换列却沿用上列的方向会让「按年份」默认变成最老的在前，很反直觉。
+   */
+  function setSort(key, { toggle = false } = {}) {
+    if (!SORT_KEYS.has(key)) return;
+    if (toggle && S.sort === key) {
+      S.sortDir = S.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      S.sort = key;
+      S.sortDir = SORT_DEFAULT_DIR[key] || 'desc';
+    }
+    writeJson(LS.sort, { key: S.sort, dir: S.sortDir });
+    syncSortUi();
+    renderTable();
+  }
+
+  /** 把排序状态同步到工具栏的两个控件上（下拉 + 方向按钮） */
+  function syncSortUi() {
+    const sel = $('#thSort');
+    if (sel) sel.value = S.sort;
+    const btn = $('#thSortDir');
+    if (btn) {
+      const asc = S.sortDir === 'asc';
+      btn.textContent = asc ? '↑ 升序' : '↓ 降序';
+      btn.title = `当前按${SORT_LABELS[S.sort] || ''}${asc ? '升序' : '降序'}（点击切换）`;
+    }
   }
 
   function filtered() {
@@ -261,14 +325,9 @@
         .join(' ').toLowerCase();
       return hay.includes(q);
     });
-    const sort = S.sort || 'importedAt';
-    list = [...list].sort((a, b) => {
-      if (sort === 'progress') return progressOf(b).percent - progressOf(a).percent;
-      if (sort === 'rating') return (Number(b.rating) || 0) - (Number(a.rating) || 0);
-      if (sort === 'title') return String(a.title || '').localeCompare(String(b.title || ''), 'zh');
-      if (sort === 'year') return (Number(b.year) || 0) - (Number(a.year) || 0);
-      return String(b.importedAt || '').localeCompare(String(a.importedAt || ''));
-    });
+    const sort = SORT_KEYS.has(S.sort) ? S.sort : 'importedAt';
+    const sign = S.sortDir === 'asc' ? -1 : 1;
+    list = [...list].sort((a, b) => sign * cmpDesc(a, b, sort));
     return list;
   }
 
@@ -292,8 +351,29 @@
 
   function starHtml(it) {
     const rating = Number(it.rating) || 0;
-    const stars = [1, 2, 3, 4, 5].map((i) => `<span class="th-star${i <= rating ? ' on' : ''}" data-v="${i}">★</span>`).join('');
-    return `<span class="th-stars" data-id="${esc(it.id)}" title="点击评星（再点一次同一颗取消）">${stars}</span>`;
+    const stars = [1, 2, 3, 4, 5]
+      .map((i) => `<span class="th-star${i <= rating ? ' on' : ''}" data-v="${i}" title="${i} 星">★</span>`)
+      .join('');
+    return `<span class="th-stars" data-id="${esc(it.id)}" title="点第几颗星就是几星（再点同一颗取消）">${stars}</span>`;
+  }
+
+  /** 星级悬停预览：停在 3 颗上就只点亮前 3 颗，让人看清自己要打几分 */
+  function starPreview(root) {
+    if (!root) return;
+    root.addEventListener('mouseover', (e) => {
+      const star = e.target.closest?.('.th-star');
+      if (!star) return;
+      const box = star.closest('.th-stars');
+      const v = Number(star.dataset.v) || 0;
+      $$('.th-star', box).forEach((s) => s.classList.toggle('preview', Number(s.dataset.v) <= v));
+    });
+    root.addEventListener('mouseout', (e) => {
+      const star = e.target.closest?.('.th-star');
+      if (!star) return;
+      const box = star.closest('.th-stars');
+      // 只在真正离开这一组星时才清掉预览（星与星之间移动不算离开）
+      if (box && !box.contains(e.relatedTarget)) $$('.th-star', box).forEach((s) => s.classList.remove('preview'));
+    });
   }
 
   function progressHtml(it) {
@@ -304,6 +384,14 @@
         <div class="th-prog-bar"><div class="th-prog-fill" style="width:${p.percent}%"></div></div>
         <span class="th-prog-label ${cls}">${esc(p.label)}</span>
       </div>`;
+  }
+
+  /** 「这次解析是怎么做的」—— 顺便告诉用户喂给了模型几页（省 token 的可见证据） */
+  function parseMethodLabel(it) {
+    const base = { vision: '视觉模型看图', text: '文本读取' }[it?.source] || '';
+    if (!base) return '';
+    const n = Number(it?.parsePages) || 0;
+    return n ? `${base} · 前 ${n} 页` : base;
   }
 
   function cellHtml(it, key) {
@@ -358,7 +446,16 @@
     }
     const head = `<tr>
       <th class="th-col-pick"><input type="checkbox" id="thChkAll" ${list.every((it) => S.selected.has(it.id)) ? 'checked' : ''} /></th>
-      ${cols.map((c) => `<th class="${c.cls || ''}">${esc(c.label)}</th>`).join('')}
+      ${cols.map((c) => {
+        const sk = COL_SORT[c.key];
+        if (!sk) return `<th class="${c.cls || ''}">${esc(c.label)}</th>`;
+        const active = sk === S.sort;
+        const arrow = active ? (S.sortDir === 'asc' ? '↑' : '↓') : '↕';
+        const tip = active
+          ? `当前按${c.label}${S.sortDir === 'asc' ? '升序' : '降序'}，点击反转`
+          : `点击按${c.label}排序`;
+        return `<th class="${c.cls || ''} th-sortable${active ? ' th-sorted' : ''}" data-sortkey="${esc(sk)}" title="${esc(tip)}">${esc(c.label)}<span class="th-sort-ind">${arrow}</span></th>`;
+      }).join('')}
       <th></th>
     </tr>`;
     const rows = list.map((it) => `<tr data-id="${esc(it.id)}" class="${S.selected.has(it.id) ? 'sel' : ''}">
@@ -431,7 +528,8 @@
 
     $('#thSearch')?.addEventListener('input', (e) => { S.filter.q = e.target.value || ''; renderTable(); });
     $('#thProgressFilter')?.addEventListener('change', (e) => { S.filter.progress = e.target.value; renderTable(); });
-    $('#thSort')?.addEventListener('change', (e) => { S.sort = e.target.value; renderTable(); });
+    $('#thSort')?.addEventListener('change', (e) => setSort(e.target.value));
+    $('#thSortDir')?.addEventListener('click', () => setSort(S.sort, { toggle: true }));
 
     $('#thChips')?.addEventListener('click', async (e) => {
       const chip = e.target.closest('.th-chip');
@@ -450,6 +548,16 @@
       renderChips();
       renderTable();
     });
+
+    // 表头点击排序（与工具栏的下拉是同一套状态；同列再点反转方向）
+    $('#thWrap')?.addEventListener('click', async (e) => {
+      const th = e.target.closest('[data-sortkey]');
+      if (th) { setSort(th.dataset.sortkey, { toggle: true }); return; }
+    });
+    // 星级悬停预览：鼠标停在第 N 颗就只点亮前 N 颗。
+    // 以前只靠 CSS 的 `.th-stars:hover .th-star` 把 5 颗一次全染金，用户看不出自己
+    // 要打几分（也就会以为「只能标 5 星」）。抽屉里那份在 detailDom() 里单独绑。
+    starPreview($('#thWrap'));
 
     $('#thWrap')?.addEventListener('click', async (e) => {
       const t = e.target;
@@ -541,7 +649,16 @@
     $('#thBtnCompare')?.addEventListener('click', () => openCompare());
     $('#thBtnQuotes')?.addEventListener('click', () => openQuotesDrawer());
     $('#thBtnBig')?.addEventListener('click', () => openBigPaper());
-    $('#thBtnCols')?.addEventListener('click', () => openColsPop());
+    $('#thBtnCols')?.addEventListener('click', () => toggleColsPop());
+    // 点外部 / Esc 关掉「字段配置」（上一版这个弹层点哪都关不掉）
+    document.addEventListener('mousedown', (e) => {
+      if (!colsPopOpen) return;
+      if (e.target?.closest?.('#thColsPop') || e.target?.closest?.('#thBtnCols')) return;
+      closeColsPop();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && colsPopOpen) closeColsPop();
+    });
 
     // 就地编辑：blur 时保存
     $('#thWrap')?.addEventListener('focusout', async (e) => {
@@ -593,6 +710,7 @@
         <div class="th-drawer-body" id="thDetailBody"></div>
       </aside>`;
     document.body.appendChild(el);
+    starPreview($('#thDetailBody'));
     $('#thDetailClose')?.addEventListener('click', closeDetail);
     $('#thDetailMask')?.addEventListener('click', closeDetail);
     $('#thDetailPrev')?.addEventListener('click', () => stepDetail(-1));
@@ -676,7 +794,7 @@
     if (!it.filename) { toast('这篇还没有上传 PDF 附件', true); return; }
     const btn = $('#thDetailReparse');
     if (btn) { btn.disabled = true; btn.textContent = '↻ 解析中…'; }
-    toast(S.visionReady ? '正在看图解析（视觉模型读封面）…' : '正在读前 3 页解析…');
+    toast(S.visionReady ? '正在看封面页解析（不够会自动补看第 2–3 页）…' : '正在读封面页解析…');
     try {
       const updated = await parseOne(it);
       const idx = S.items.findIndex((x) => x.id === updated.id);
@@ -698,7 +816,7 @@
     const colName = S.collections.find((c) => c.id === it.collectionId)?.name || '未分类';
     const st = it.status || 'pending';
     const stLabel = { pending: '待解析', parsing: '解析中', done: '已解析', error: '解析失败' }[st] || st;
-    const methodLabel = { vision: '视觉模型看图', text: '文本前 3 页' }[it.source] || '';
+    const methodLabel = parseMethodLabel(it);
     $('#thDetailFile').textContent = it.originalName || '（未上传附件）';
 
     const fieldRow = (key, label, hint) => {
@@ -773,27 +891,79 @@
     `;
   }
 
+  // ---------- 「字段配置」弹层 ----------
+  //
+  // ⚠️ 上一版的坑：这个弹层复用了共用样式 `.pop`（`position:fixed` 但没给 top/left），
+  // 而且**没有任何关闭途径** —— 点开之后点空白、按 Esc、再点按钮都关不掉，只能刷新页面。
+  // 现在：锚定在按钮下方，并支持「再点按钮 / 点外部 / Esc / ✕」四种关闭方式。
+
+  let colsPopOpen = false;
+
+  function closeColsPop() {
+    const pop = $('#thColsPop');
+    if (!pop) return;
+    pop.classList.add('hidden');
+    colsPopOpen = false;
+    $('#thBtnCols')?.classList.remove('active');
+  }
+
+  function toggleColsPop() {
+    if (colsPopOpen) closeColsPop();
+    else openColsPop();
+  }
+
   function openColsPop() {
+    const pop = $('#thColsPop');
+    if (!pop) return;
+    renderColsPop();
+    pop.classList.remove('hidden');
+    colsPopOpen = true;
+    $('#thBtnCols')?.classList.add('active');
+    const btn = $('#thBtnCols');
+    if (btn) {
+      const r = btn.getBoundingClientRect();
+      pop.style.top = `${Math.round(r.bottom + 6)}px`;
+      pop.style.right = `${Math.round(Math.max(12, window.innerWidth - r.right))}px`;
+    }
+  }
+
+  function renderColsPop() {
     const pop = $('#thColsPop');
     if (!pop) return;
     const all = [...BASE_COLS, ...EXTRA_COLS];
     const cur = new Set(visibleCols().map((c) => c.key));
-    pop.innerHTML = `<div class="pop-title">显示哪些列</div>
-      ${all.map((c) => `<label class="pop-item"><input type="checkbox" data-col="${esc(c.key)}" ${cur.has(c.key) ? 'checked' : ''} /> ${esc(c.label)}</label>`).join('')}
-      <div class="pop-foot"><button class="btn btn-sm" id="thColsReset">恢复默认</button></div>`;
-    pop.classList.remove('hidden');
-    const commit = () => {
+    pop.innerHTML = `
+      <div class="th-colspop-head">
+        <b>显示哪些列</b>
+        <span class="th-muted">共 ${all.length} 列</span>
+        <span class="sp"></span>
+        <button class="tb-btn ghost" id="thColsReset">恢复默认</button>
+        <button class="tb-btn ghost th-colspop-x" id="thColsClose" title="关闭（Esc）">✕</button>
+      </div>
+      <div class="th-colspop-body">
+        ${all.map((c) => `<label class="th-colspop-item"><input type="checkbox" data-col="${esc(c.key)}" ${cur.has(c.key) ? 'checked' : ''} /> ${esc(c.label)}</label>`).join('')}
+      </div>
+      <div class="th-colspop-foot">勾掉不想看的列即可；至少保留一列，改完立即生效。</div>`;
+
+    // 监听只挂一次（挂在弹层自己身上做事件委托）：
+    // 每次都 addEventListener 会在反复开合后叠出一堆重复的提交，历史版本就踩过这个坑
+    if (pop.dataset.bound) return;
+    pop.dataset.bound = '1';
+    pop.addEventListener('change', (e) => {
+      if (!e.target.closest('input[data-col]')) return;
       const keys = $$('input[data-col]', pop).filter((i) => i.checked).map((i) => i.dataset.col);
       S.cols = keys.length ? keys : BASE_COLS.map((c) => c.key);
       writeJson(LS.cols, S.cols);
       renderTable();
-    };
-    pop.addEventListener('change', commit);
-    $('#thColsReset')?.addEventListener('click', () => {
-      S.cols = BASE_COLS.map((c) => c.key);
-      writeJson(LS.cols, S.cols);
-      renderTable();
-      openColsPop();
+    });
+    pop.addEventListener('click', (e) => {
+      if (e.target.closest('#thColsClose')) { closeColsPop(); return; }
+      if (e.target.closest('#thColsReset')) {
+        S.cols = BASE_COLS.map((c) => c.key);
+        writeJson(LS.cols, S.cols);
+        renderTable();
+        renderColsPop();
+      }
     });
   }
 
@@ -828,8 +998,10 @@
 
   // ==================== 解析（优先看图） ====================
 
-  // 解析用的 pdf.js 文档，短时间复用，避免「批量解析」时每篇都重新打开一遍
-  let headDoc = { url: '', doc: null };
+  // 解析用的 pdf.js 文档，短时间复用，避免「批量解析」时每篇都重新打开一遍。
+  // cache 按页缓存已渲染好的 JPEG：两段式解析（先第 1 页、不够再补 2–3 页）时
+  // 第 1 页不必重渲一遍。
+  let headDoc = { url: '', doc: null, cache: new Map() };
 
   /**
    * 把论文前 n 页渲染成 JPEG。
@@ -842,12 +1014,14 @@
     const url = `/uploads/${encodeURIComponent(rec.filename)}`;
     if (headDoc.url !== url || !headDoc.doc) {
       try { headDoc.doc?.destroy?.(); } catch (_) { /* ignore */ }
-      headDoc = { url, doc: await lib.getDocument({ url }).promise };
+      headDoc = { url, doc: await lib.getDocument({ url }).promise, cache: new Map() };
     }
     const doc = headDoc.doc;
     const out = [];
     const total = Math.min(n, doc.numPages || n);
     for (let i = 1; i <= total; i += 1) {
+      const hit = headDoc.cache.get(i);
+      if (hit) { out.push({ page: i, image: hit }); continue; }
       const page = await doc.getPage(i);
       const base = page.getViewport({ scale: 1 });
       const scale = Math.min(2.6, 1500 / Math.max(base.width, 1));
@@ -860,26 +1034,43 @@
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvasContext: ctx, viewport: vp }).promise;
-      out.push({ page: i, image: canvas.toDataURL('image/jpeg', 0.82) });
+      const image = canvas.toDataURL('image/jpeg', 0.82);
+      headDoc.cache.set(i, image);
+      out.push({ page: i, image });
     }
     return out;
   }
 
-  /** 解析一篇：有视觉模型就带图，否则后端自动退回前 3 页文本 */
+  /**
+   * 解析一篇：**先只送第 1 页**，省 token 也省渲染时间。
+   *
+   * 后端如果发现封面页认出来的字段太少（标题 + 另外 4 个里不到 2 个），
+   * 会在响应里回一个 `needMorePages` —— 这时才渲染第 2–3 页再解析一次，
+   * 并把这次的结果落库。绝大多数论文止步于第 1 页。
+   */
   async function parseOne(rec) {
     let pages = [];
     if (S.visionReady && rec?.filename) {
-      try { pages = await collectHeadImages(rec, 3); }
+      try { pages = await collectHeadImages(rec, 1); }
       catch (e) { console.warn('[thesis] 页面截图失败，改用文本解析：', e.message); }
     }
-    return api(`/api/theses/${rec.id}/parse`, { method: 'POST', body: { pages } });
+    let out = await api(`/api/theses/${rec.id}/parse`, { method: 'POST', body: { pages } });
+    if (out?.needMorePages && S.visionReady && rec?.filename) {
+      try {
+        const more = await collectHeadImages(rec, 3);
+        if (more.length > pages.length) {
+          out = await api(`/api/theses/${rec.id}/parse`, { method: 'POST', body: { pages: more } });
+        }
+      } catch (e) { console.warn('[thesis] 补第 2–3 页失败，沿用封面页结果：', e.message); }
+    }
+    return out;
   }
 
   /** 批量解析：并发 2（渲染页面图是 CPU 活，开太多会让界面发卡） */
   async function parseMany(recs) {
     const list = (recs || []).filter((r) => r?.filename);
     if (!list.length) { toast('这些论文还没有 PDF 附件', true); return []; }
-    const how = S.visionReady ? '视觉模型读封面' : '文本读前 3 页';
+    const how = S.visionReady ? '视觉模型读封面页' : '文本读封面页';
     let done = 0;
     toast(`正在解析 ${list.length} 篇（${how}）…`);
     const results = new Array(list.length);
@@ -925,7 +1116,8 @@
         <span style="font-size:12px;color:var(--side-muted)">第</span>
         <input id="thrPageInput" value="1" title="输入页码后回车跳转" />
         <span style="font-size:12px;color:var(--side-muted)">/ <b id="thrPageTotal">0</b> 页</span>
-        <button id="thrNoteMode" title="笔记模式：原文 ｜ AI 对话 ｜ 笔记">📝 笔记模式</button>
+        <button id="thrOcr" title="识别这一页（或框选的区域）上的文字 —— 扫描件也能摘录">🈯 识别文字</button>
+        <button id="thrNoteMode" title="笔记模式：原文 ｜ 笔记">📝 笔记模式</button>
         <button id="thrQuotesBtn" title="摘录素材库">📌 素材</button>
         <button id="thrOutlineToggle" title="折叠 / 展开书签栏">☰</button>
       </div>
@@ -979,9 +1171,11 @@
               <button class="thr-seg-btn active" data-noteview="edit">编辑</button>
               <button class="thr-seg-btn" data-noteview="preview">预览</button>
             </div>
+            <button class="tb-btn ghost" id="thrNoteImg" title="插入图片（也可以直接 Ctrl+V 粘贴截图）">🖼 插图</button>
             <span class="sp"></span>
             <span class="thr-note-state" id="thrNoteState"></span>
             <button class="tb-btn ghost" id="thrNoteExport">导出 .md</button>
+            <input type="file" id="thrNoteFile" accept="image/*" multiple class="hidden" />
           </div>
           <div class="thr-note-body" id="thrNoteBody">
             <textarea class="thr-md" id="thrMd" placeholder="读到这里想到什么就写下来。AI 生成的「本章速读 / 综述条目 / 答辩演练」也会追加到这里。"></textarea>
@@ -1057,6 +1251,8 @@
     $('#thr')?.classList.add('hidden');
     $('#thr')?.classList.remove('note-mode');
     $('#thrSelbar').style.display = 'none';
+    cancelOcr();
+    hideOcrPanel();
     // 关之前把还在防抖队列里的东西落盘，避免「刚写的笔记 / 刚翻到的页」丢掉
     if (R.id) {
       clearTimeout(R.noteTimer);
@@ -1483,7 +1679,7 @@
         <span class="th-badge ${esc(it.status || 'pending')}">${
           { pending: '待解析', parsing: '解析中', done: '已解析', error: '解析失败' }[it.status || 'pending'] || ''
         }</span>
-        ${it.source ? `<span class="th-muted">${{ vision: '视觉模型读封面', text: '文本读前 3 页' }[it.source] || ''}</span>` : ''}
+        ${it.source ? `<span class="th-muted">${esc(parseMethodLabel(it))}</span>` : ''}
         ${it.numPages ? `<span class="th-muted">${it.numPages} 页</span>` : ''}
         <span class="sp"></span>
         <button class="tb-btn ghost" id="thrReparse" title="重读封面（配置了视觉模型就看图）">↻ 重读封面</button>
@@ -1504,7 +1700,7 @@
     if (!R.record?.filename) { toast('这篇还没有上传 PDF 附件', true); return; }
     const btn = $('#thrReparse');
     if (btn) { btn.disabled = true; btn.textContent = '↻ 解析中…'; }
-    toast(S.visionReady ? '正在看图解析（视觉模型读封面）…' : '正在读前 3 页解析…');
+    toast(S.visionReady ? '正在看封面页解析（不够会自动补看第 2–3 页）…' : '正在读封面页解析…');
     try {
       const updated = await parseOne(R.record);
       R.record = updated;
@@ -1668,6 +1864,61 @@
     md.value = `${md.value}${block}`;
     saveNote();
     toast('已追加到笔记');
+  }
+
+  // ---------- 笔记里插图片 ----------
+  //
+  // 与文献中心的 Markdown 笔记保持同一套做法：图片以**内联 data URL** 写进 Markdown，
+  // 随笔记一起存进 paper-notes.json。好处是不需要额外的上传接口与文件清理；
+  // 代价是图片会直接占笔记体积，所以给单张加一个上限、超了就明确跳过。
+  const NOTE_IMG_MAX = 8 * 1024 * 1024;
+
+  /** 从 FileList / DataTransfer.files 里挑出图片 */
+  function noteImageFiles(files) {
+    return [...(files || [])].filter((f) => f && /^image\//.test(f.type));
+  }
+
+  function noteFileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result || ''));
+      r.onerror = () => reject(new Error('图片读取失败'));
+      r.readAsDataURL(file);
+    });
+  }
+
+  /** 把一批图片插到笔记光标处（Markdown 图片语法），并立刻落盘 */
+  async function insertNoteImages(files) {
+    await ensureNote();
+    const md = $('#thrMd');
+    if (!md) return;
+    if (R.noteView !== 'edit') setNoteView('edit');
+    let text = md.value;
+    let cursor = Number.isFinite(md.selectionStart) ? md.selectionStart : text.length;
+    let inserted = 0;
+    for (const f of files) {
+      if (f.size > NOTE_IMG_MAX) { toast(`${f.name || '剪贴板图片'} 超过 8MB，已跳过`, true); continue; }
+      let url = '';
+      try { url = await noteFileToDataUrl(f); } catch (_) { toast('图片读取失败', true); continue; }
+      const alt = (f.name || '图片').replace(/\.[^.]+$/, '') || '图片';
+      const snippet = `![${alt}](${url})`;
+      const res = window.PaperNoteUtils?.insertSnippet
+        ? window.PaperNoteUtils.insertSnippet(text, snippet, cursor, cursor)
+        : { text: `${text}${text.trim() ? '\n\n' : ''}${snippet}`, cursor: text.length + snippet.length };
+      text = res.text;
+      cursor = res.cursor;
+      inserted += 1;
+    }
+    if (!inserted) return;
+    md.value = text;
+    md.focus();
+    md.setSelectionRange(cursor, cursor);
+    R.note = text;
+    setNoteState('未保存');
+    clearTimeout(R.noteTimer);
+    await saveNote();
+    if (R.noteView === 'preview') setNoteView('preview');
+    toast(`已插入 ${inserted} 张图片`);
   }
 
   // ==================== 阅读器：AI 对话 ====================
@@ -1837,6 +2088,7 @@
     $('#thrOutlineToggle')?.addEventListener('click', () => $('#thrOutline')?.classList.toggle('collapsed'));
     $('#thrNoteMode')?.addEventListener('click', toggleNoteMode);
     $('#thrQuotesBtn')?.addEventListener('click', () => openQuotesDrawer());
+    $('#thrOcr')?.addEventListener('click', () => startOcr());
     $('#thrZoomIn')?.addEventListener('click', () => setScale(R.scale + 0.15));
     $('#thrZoomOut')?.addEventListener('click', () => setScale(R.scale - 0.15));
     $('#thrFit')?.addEventListener('click', () => fitScale());
@@ -1938,6 +2190,25 @@
       R.noteTimer = setTimeout(saveNote, 1200);
     });
     $('#thrMd')?.addEventListener('blur', saveNote);
+    // 笔记里插图片：Ctrl+V 直接粘贴截图，或用「🖼 插图」选文件。
+    // 学位论文常是扫描件，截图往往是唯一能进笔记的「原文」形态。
+    $('#thrMd')?.addEventListener('paste', async (e) => {
+      const cd = e.clipboardData;
+      const fromItems = [...(cd?.items || [])]
+        .filter((it) => it.kind === 'file' && /^image\//.test(it.type))
+        .map((it) => { try { return it.getAsFile(); } catch (_) { return null; } })
+        .filter(Boolean);
+      const files = fromItems.length ? fromItems : noteImageFiles(cd?.files);
+      if (!files.length) return;          // 不是图片就交给浏览器默认粘贴
+      e.preventDefault();
+      await insertNoteImages(files);
+    });
+    $('#thrNoteImg')?.addEventListener('click', () => $('#thrNoteFile')?.click());
+    $('#thrNoteFile')?.addEventListener('change', async (e) => {
+      const files = noteImageFiles(e.target.files);
+      e.target.value = '';
+      if (files.length) await insertNoteImages(files);
+    });
     $$('#thrNoteSeg .thr-seg-btn').forEach((b) => {
       b.addEventListener('click', () => setNoteView(b.dataset.noteview));
     });
@@ -2006,6 +2277,224 @@
       await loadQuotes();
       toast('已加入素材库');
     } catch (err) { toast(err.message, true); }
+  }
+
+  // ==================== 文字识别（扫描件也能摘录） ====================
+  //
+  // 为什么需要：学位论文里有相当一部分是**扫描件** —— 整页就是一张图，PDF 里没有文字层，
+  // 划词划不动，于是「加入素材库」完全无从下手（用户反馈的正是这个）。
+  // 这里补一条 OCR 通道：在页面上框一块（或直接点一下 = 整页），把图交给视觉模型转录成文字，
+  // 再走原来的「加入素材库 / 追加到笔记 / 用这段提问」。
+
+  /** 进入框选识别：在当前页上盖一层蒙版，等用户拖出一个框 */
+  async function startOcr() {
+    if (R.ocrOn) { cancelOcr(); return; }
+    if (!R.doc) { toast('先打开一篇论文', true); return; }
+    if (!S.visionReady) {
+      toast('文字识别需要视觉模型：请到「AI 解析设置」为一条模型填好 Key，并在「图像能力」里开启图片支持', true);
+      return;
+    }
+    const n = R.page || 1;
+    const el = $(`.thr-page[data-page="${n}"]`);
+    if (!el) { toast('没找到当前页', true); return; }
+    // 目标页可能已被离屏回收，先确保它渲染出来（框选要落在位图上才有意义）
+    if (el.dataset.done !== '1') await renderPage(n);
+    if (el.dataset.done !== '1') { toast('这一页还没渲染出来，稍后再试', true); return; }
+
+    hideOcrPanel();
+    R.ocrOn = true;
+    $('#thrOcr')?.classList.add('active');
+    const layer = document.createElement('div');
+    layer.className = 'thr-ocr-layer';
+    layer.innerHTML = `<div class="thr-ocr-rect hidden"></div>
+      <div class="thr-ocr-hint">拖动框选要摘录的区域 · 直接点一下识别整页 · Esc 取消</div>`;
+    el.appendChild(layer);
+
+    let start = null;
+    const rectEl = $('.thr-ocr-rect', layer);
+    const onMove = (e) => {
+      if (!start) return;
+      const b = layer.getBoundingClientRect();
+      const x1 = Math.max(0, Math.min(start.x, e.clientX) - b.left);
+      const y1 = Math.max(0, Math.min(start.y, e.clientY) - b.top);
+      const x2 = Math.min(b.width, Math.max(start.x, e.clientX) - b.left);
+      const y2 = Math.min(b.height, Math.max(start.y, e.clientY) - b.top);
+      rectEl.style.left = `${x1}px`;
+      rectEl.style.top = `${y1}px`;
+      rectEl.style.width = `${Math.max(0, x2 - x1)}px`;
+      rectEl.style.height = `${Math.max(0, y2 - y1)}px`;
+    };
+    const onDown = (e) => {
+      start = { x: e.clientX, y: e.clientY };
+      rectEl.classList.remove('hidden');
+      onMove(e);
+    };
+    const onUp = async (e) => {
+      layer.removeEventListener('mousemove', onMove);
+      layer.removeEventListener('mouseup', onUp);
+      if (!start) return;
+      const b = layer.getBoundingClientRect();
+      const x = Math.min(start.x, e.clientX) - b.left;
+      const y = Math.min(start.y, e.clientY) - b.top;
+      const w = Math.abs(e.clientX - start.x);
+      const h = Math.abs(e.clientY - start.y);
+      start = null;
+      finishOcrSelect();
+      layer.remove();
+      // 只点了一下（没拖动）→ 识别整页；拖出了框 → 只识别框里那块
+      const region = (w < 14 || h < 14) ? null : { x, y, w, h };
+      await runOcr(n, region);
+    };
+    layer.addEventListener('mousedown', onDown);
+    layer.addEventListener('mousemove', onMove);
+    layer.addEventListener('mouseup', onUp);
+    window.addEventListener('keydown', escOcr, true);
+    toast('拖动框选要识别的区域；直接点一下 = 识别整页');
+  }
+
+  function escOcr(e) {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    cancelOcr();
+  }
+
+  function finishOcrSelect() {
+    R.ocrOn = false;
+    $('#thrOcr')?.classList.remove('active');
+    window.removeEventListener('keydown', escOcr, true);
+  }
+
+  function cancelOcr() {
+    finishOcrSelect();
+    $$('.thr-ocr-layer').forEach((el) => el.remove());
+  }
+
+  async function runOcr(page, region) {
+    try {
+      toast('正在识别…');
+      const image = await cropPageJpeg(page, region);
+      if (!image) { toast('这块范围太小，重新框一次', true); return; }
+      const r = await api(`/api/theses/${R.id}/ocr`, { method: 'POST', body: { page, image } });
+      showOcrPanel(r?.text || '', { page });
+    } catch (e) {
+      toast(e.message || '识别失败', true);
+    }
+  }
+
+  /**
+   * 把某一页（或页面上的一块）画成 JPEG 交给 OCR。
+   *
+   * 刻意**重新渲染一遍**而不是从屏幕上那张 canvas 里裁：屏幕位图受 DPR 1.5 与适宽比例
+   * 双重限制，A4 页大概只有 100DPI，脚注、表格里的小数字会糊到认不出来。
+   * 这里按 2–3 倍重渲一次，只多花百来毫秒，识别率差很多。
+   */
+  async function cropPageJpeg(pageNo, region) {
+    if (!R.doc) return '';
+    const page = await R.doc.getPage(pageNo);
+    const base = page.getViewport({ scale: 1 });
+    const vp = page.getViewport({ scale: Math.min(3, Math.max(2, R.scale)) });
+    const full = document.createElement('canvas');
+    full.width = Math.max(1, Math.round(vp.width));
+    full.height = Math.max(1, Math.round(vp.height));
+    const ctx = full.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, full.width, full.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    if (!region) return full.toDataURL('image/jpeg', 0.9);
+
+    // 屏幕坐标 → 位图坐标（页在屏幕上的 CSS 尺寸是 R.pageW × R.pageH）
+    const sx = full.width / Math.max(1, R.pageW);
+    const sy = full.height / Math.max(1, R.pageH);
+    const pad = 8; // 往外放一点，免得把字边切掉
+    const x = Math.max(0, (region.x - pad) * sx);
+    const y = Math.max(0, (region.y - pad) * sy);
+    const w = Math.min(full.width - x, (region.w + pad * 2) * sx);
+    const h = Math.min(full.height - y, (region.h + pad * 2) * sy);
+    if (w < 4 || h < 4) return '';
+    const cut = document.createElement('canvas');
+    cut.width = Math.max(1, Math.round(w));
+    cut.height = Math.max(1, Math.round(h));
+    const cctx = cut.getContext('2d');
+    cctx.fillStyle = '#ffffff';
+    cctx.fillRect(0, 0, cut.width, cut.height);
+    cctx.drawImage(full, x, y, w, h, 0, 0, cut.width, cut.height);
+    return cut.toDataURL('image/jpeg', 0.9);
+  }
+
+  function ocrPanelDom() {
+    let el = $('#thOcr');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'thOcr';
+    el.className = 'th-ocr hidden';
+    el.innerHTML = `
+      <div class="th-ocr-head">
+        <b>🈯 文字识别</b>
+        <span class="th-muted" id="thOcrMeta"></span>
+        <span class="sp"></span>
+        <button class="tb-btn ghost" id="thOcrCopy">复制</button>
+        <button class="tb-btn ghost" id="thOcrClose" title="关闭">✕</button>
+      </div>
+      <textarea class="th-ocr-text" id="thOcrText" placeholder="识别出的文字会出现在这里，可以直接改…"></textarea>
+      <div class="th-ocr-acts">
+        <button class="tb-btn accent" id="thOcrQuote">📌 加入素材库</button>
+        <button class="tb-btn" id="thOcrNote">📝 追加到笔记</button>
+        <button class="tb-btn" id="thOcrAsk">💬 用这段提问</button>
+        <button class="tb-btn" id="thOcrAgain">🈯 重新框选</button>
+      </div>`;
+    document.body.appendChild(el);
+    $('#thOcrClose').addEventListener('click', hideOcrPanel);
+    $('#thOcrCopy').addEventListener('click', async () => {
+      const t = $('#thOcrText').value.trim();
+      if (!t) { toast('还没有识别结果', true); return; }
+      try { await navigator.clipboard.writeText(t); toast('已复制'); }
+      catch (_) { $('#thOcrText').select(); toast('已选中，按 Ctrl+C 复制'); }
+    });
+    $('#thOcrQuote').addEventListener('click', async () => {
+      const t = $('#thOcrText').value.trim();
+      if (!t) { toast('还没有识别结果', true); return; }
+      await quoteCurrent(t);
+      hideOcrPanel();
+    });
+    $('#thOcrNote').addEventListener('click', async () => {
+      const t = $('#thOcrText').value.trim();
+      if (!t) { toast('还没有识别结果', true); return; }
+      const p = Number($('#thOcr').dataset.page) || R.page;
+      await ensureNote();
+      appendNote(blockquoteText(t), `摘录 · 第 ${p} 页（文字识别）`);
+      hideOcrPanel();
+      if (!R.noteMode) await toggleNoteMode();
+      else { applyNoteRatio(); setNoteView('edit'); }
+    });
+    $('#thOcrAsk').addEventListener('click', () => {
+      const t = $('#thOcrText').value.trim();
+      if (!t) { toast('还没有识别结果', true); return; }
+      const p = Number($('#thOcr').dataset.page) || R.page;
+      hideOcrPanel();
+      switchTab('chat');
+      const input = $('#thrInput');
+      input.value = `关于这段（第 ${p} 页）：\n“${t}”\n\n`;
+      input.focus();
+    });
+    $('#thOcrAgain').addEventListener('click', () => { hideOcrPanel(); startOcr(); });
+    return el;
+  }
+
+  function showOcrPanel(text, { page } = {}) {
+    const el = ocrPanelDom();
+    el.dataset.page = String(page || R.page || 1);
+    el.classList.remove('hidden');
+    $('#thOcrMeta').textContent = `第 ${el.dataset.page} 页 · 识别结果可直接改`;
+    $('#thOcrText').value = text || '';
+    if (!text) toast('这一块里没识别出文字', true);
+  }
+
+  function hideOcrPanel() { $('#thOcr')?.classList.add('hidden'); }
+
+  /** 把多行文字变成 Markdown 引用块（摘录要能一眼看出「这是原文」） */
+  function blockquoteText(text) {
+    return String(text || '').split('\n').map((l) => (l.trim() ? `> ${l}` : '>')).join('\n');
   }
 
   async function loadQuotes() {
@@ -2187,6 +2676,7 @@
   /** 收起所有自建浮层（切到别的视图时由 app.js 调用） */
   function closeAll() {
     closeDetail();
+    closeColsPop();
     $('#thQuotes')?.classList.add('hidden');
     $('#thCompare')?.classList.add('hidden');
     $('#thBig')?.classList.add('hidden');
@@ -2201,6 +2691,13 @@
     }
     closeAll();
     try {
+      // 排序偏好：跟着用户上次的选择走（换列用默认方向，所以这里只存键 + 方向）
+      const saved = readJson(LS.sort, null);
+      if (saved && SORT_KEYS.has(saved.key)) {
+        S.sort = saved.key;
+        S.sortDir = saved.dir === 'asc' ? 'asc' : 'desc';
+      }
+      syncSortUi();
       await refresh();
       await loadModelChoices();
     } catch (err) {

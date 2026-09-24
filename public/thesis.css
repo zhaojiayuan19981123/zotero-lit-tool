@@ -79,10 +79,13 @@
 .th-prog-label.s2 { color: var(--green); }
 
 /* 评级星 */
+/* 评级星：★ 共 5 颗，点第几颗就是几星。
+   精确到「悬停第 N 颗 → 只点亮前 N 颗」（由 JS 打 .preview）。
+   旧的 `.th-stars:hover .th-star` 会把 5 颗一次性全染金 —— 反而让人以为只能打 5 星。 */
 .th-stars { display: inline-flex; gap: 1px; cursor: pointer; user-select: none; white-space: nowrap; }
-.th-star { color: var(--gray); font-size: 15px; line-height: 1; }
+.th-star { color: var(--gray); font-size: 15px; line-height: 1; padding: 0 1px; }
 .th-star.on { color: var(--star); }
-.th-stars:hover .th-star { color: var(--star); }
+.th-star.preview { color: var(--star); }
 
 /* 标题格：点击打开「解析详情」（与文献中心点标题的行为一致，所以是链接样式而非可编辑框） */
 .th-title-cell {
@@ -395,4 +398,87 @@ body.thr-resizing iframe { pointer-events: none; }
 @media (max-width: 1280px) {
   .thr-side { width: 340px; }
   .thr-outline { width: 230px; }
+}
+
+/* ==================== 表头排序 ==================== */
+/* 表头可点排序；当前排序列显示 ↑/↓，其余列显示一个淡 ↕ 作提示 */
+.th-sortable { cursor: pointer; user-select: none; }
+.th-sortable:hover { color: var(--primary); }
+.th-sorted { color: var(--primary); }
+.th-sort-ind { margin-left: 4px; font-size: 10px; opacity: .4; }
+.th-sorted .th-sort-ind { opacity: 1; }
+
+/* ==================== 「字段配置」弹层 ==================== */
+/* 刻意不复用共用的 .pop：它是 position:fixed 却没给 top/left，历史版本因此既没正确定位、
+   也没有任何关闭途径（点空白 / Esc / 再点按钮都关不掉）。这里自带定位与关闭方式。 */
+.th-colspop {
+  position: fixed; z-index: 80; width: 328px; max-height: 70vh;
+  display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow-lg);
+}
+.th-colspop-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.th-colspop-head .sp { flex: 1; }
+.th-colspop-x { padding: 1px 7px; }
+.th-colspop-body {
+  padding: 9px 12px; overflow-y: auto;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px;
+}
+.th-colspop-item { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+.th-colspop-item:hover { color: var(--primary); }
+.th-colspop-foot {
+  padding: 8px 12px 10px; border-top: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-3);
+}
+
+/* 顶栏按钮的选中态（「识别文字」正在框选时） */
+.thr-top button.active, .tb-btn.active { border-color: var(--primary); color: var(--primary); }
+
+/* ==================== 笔记预览里的图片 ==================== */
+/* Ctrl+V 粘贴的截图是内联 data URL，预览里要限宽，否则会把右栏撑爆 */
+.thr-md-preview img {
+  display: block; max-width: 100%; height: auto; margin: 10px 0;
+  border: 1px solid var(--border); border-radius: 4px; background: #fff;
+}
+
+/* ==================== 文字识别：页面上框选 ==================== */
+.thr-ocr-layer {
+  position: absolute; inset: 0; z-index: 40; cursor: crosshair;
+  background: rgba(18, 20, 28, .16);
+}
+.thr-ocr-rect {
+  position: absolute; border: 2px solid var(--primary); border-radius: 2px;
+  background: rgba(96, 140, 255, .18); pointer-events: none;
+}
+.thr-ocr-hint {
+  position: absolute; left: 50%; top: 8px; transform: translateX(-50%);
+  background: var(--side-1); color: var(--side-text);
+  padding: 4px 10px; border-radius: 6px; font-size: 12px;
+  white-space: nowrap; pointer-events: none;
+}
+
+/* ==================== 文字识别：结果面板 ==================== */
+.th-ocr {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); z-index: 960;
+  width: min(740px, 92vw); max-height: 64vh; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: var(--shadow-lg); overflow: hidden;
+}
+.th-ocr-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.th-ocr-head .sp { flex: 1; }
+.th-ocr-text {
+  flex: 1; min-height: 132px; max-height: 42vh; resize: none;
+  border: none; outline: none; padding: 12px;
+  font-size: 13px; line-height: 1.65; font-family: inherit;
+  background: var(--surface); color: var(--text);
+}
+.th-ocr-acts {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 10px 12px; border-top: 1px solid var(--border);
 }
