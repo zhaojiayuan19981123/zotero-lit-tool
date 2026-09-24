@@ -23,6 +23,8 @@ export const ROUTER_LIMITS = {
   retryPerProvider: [0, 10],
   logLimit: [20, 1000],
   queue: 20,
+  // 单次请求超时：推理模型（gpt-5.x / o 系列）非流式动辄 80 秒以上，30 秒会大面积误判超时。
+  timeoutSeconds: [10, 900],
 };
 
 export const DEFAULT_ROUTER_CONFIG = {
@@ -36,6 +38,9 @@ export const DEFAULT_ROUTER_CONFIG = {
   retryPerProvider: 0,
   // 请求日志条数上限
   logLimit: 200,
+  // 单次 AI 请求超时（秒）。默认 120 秒：gpt-5.x 这类推理模型实测非流式要 80 秒以上，
+  // 早先写死 30 秒会把能用的模型误判成「不可用」。
+  timeoutSeconds: 120,
   breaker: {
     failThreshold: 4,   // 连续失败多少次触发熔断
     recoverSuccess: 2,  // 半开状态下成功多少次后恢复
@@ -85,8 +90,17 @@ export function normalizeRouterConfig(raw) {
     queue,
     retryPerProvider: clampInt(r.retryPerProvider, ROUTER_LIMITS.retryPerProvider, d.retryPerProvider),
     logLimit: clampInt(r.logLimit, ROUTER_LIMITS.logLimit, d.logLimit),
+    timeoutSeconds: clampInt(r.timeoutSeconds, ROUTER_LIMITS.timeoutSeconds, d.timeoutSeconds),
     breaker: normalizeBreaker(r.breaker),
   };
+}
+
+/** 单次请求超时（毫秒）。集中在这里换算，方便各处默认值一致。 */
+export function requestTimeoutMs(config) {
+  const normalized = config && config.timeoutSeconds !== undefined
+    ? normalizeRouterConfig(config)
+    : DEFAULT_ROUTER_CONFIG;
+  return normalized.timeoutSeconds * 1000;
 }
 
 /** 从 settings 里读路由配置（settings.modelRouter 缺省时用默认值） */

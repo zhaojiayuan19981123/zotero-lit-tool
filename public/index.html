@@ -927,87 +927,155 @@
           <div class="ml-actions">
             <button type="button" id="btnMlAdd" class="btn btn-ghost btn-sm">＋ 添加模型</button>
             <button type="button" id="btnMlAddPreset" class="btn btn-ghost btn-sm">⚡ 一键添加常用模型</button>
+            <span class="ob-spacer"></span>
+            <button type="button" id="btnMlCheckup" class="btn btn-ghost btn-sm">🔌 一键体检</button>
           </div>
+          <div id="mlCheckupResult" class="ml-test-result hidden"></div>
         </div>
 
-        <!-- 两段式看图：给「看不了图的模型」配一双眼睛 -->
-        <div class="ml-section">
+        <!-- 本地 OpenAI 兼容端口：让别的软件也能用上这里的模型路由 -->
+        <div class="ml-section" id="gatewaySection">
           <div class="ml-head">
-            <span class="ml-title">👁 两段式看图</span>
-            <span class="ml-hint">当前模型不支持图片时，先用它把图转成文字再回答</span>
-          </div>
-          <p class="ml-desc">
-            DeepSeek 这类纯文本模型收到图片会直接报错。指定一个<b>视觉模型</b>后，发图提问时会先让它
-            「看图并写成详细文字描述」，再把描述交给当前模型回答；每条模型的“图片能力”可在编辑时自行覆盖。
-            <b>留空则自动选用你已配置且被判定为支持视觉的模型。</b>
-          </p>
-          <label class="field"><span>视觉模型（看图的那一双眼睛）</span>
-            <select id="setVisionProfile" class="tb-select"></select>
-          </label>
-          <div id="setVisionHint" class="ml-vision-hint"></div>
-        </div>
-
-        <!-- 模型路由：多条配置互为备份，失败自动切换 + 熔断 -->
-        <div class="ml-section" id="routerSection">
-          <div class="ml-head">
-            <span class="ml-title">🔀 模型路由</span>
-            <label class="rt-switch" title="开启后，模型调用会经过路由：失败时按队列换下一条配置">
-              <input type="checkbox" id="rtEnabled" /> 启用
+            <span class="ml-title">🌐 本地端口（给别的软件用）</span>
+            <label class="rt-switch" title="开启后本机会监听一个 OpenAI 兼容端口，供别的软件调用">
+              <input type="checkbox" id="gwEnabled" /> 开启
             </label>
           </div>
           <p class="ml-desc">
-            主模型调用失败（超时 / 限流 / 5xx / 网关返回网页）时，自动按<b>故障转移队列</b>的顺序换下一条配置重试；
-            连续失败的那条会进入<b>熔断</b>并暂时跳过，冷却过后再半开试探恢复。
-            <b>队列留空时等价于「只用主模型」</b>，不改变现有行为。
+            开启后，本应用会在本机起一个 <b>OpenAI 兼容</b>端口（只绑 127.0.0.1，不向局域网开放）。
+            把别的软件（Cherry Studio、ChatBox、Claude Code 等）的 Base URL 填成下面这个地址，
+            它们就直接用上这里的<b>多模型故障转移</b>了 —— 主模型抽风会自动换备用。
           </p>
-
           <div class="rt-row">
-            <label class="rt-switch"><input type="checkbox" id="rtFailover" /> 自动故障转移</label>
-            <span class="ml-hint" id="rtHint"></span>
+            <label class="field field-inline"><span>端口</span>
+              <input id="gwPort" class="tb-input" type="number" min="1024" max="65535" />
+            </label>
+            <button type="button" id="btnGwApply" class="btn btn-ghost btn-sm">应用</button>
+            <span class="ml-hint" id="gwStatus"></span>
           </div>
-
-          <div class="rt-stats">
-            <div class="rt-stat"><span class="rt-stat-k">活跃连接</span><b class="rt-stat-v" id="rtActive">0</b></div>
-            <div class="rt-stat"><span class="rt-stat-k">总请求数</span><b class="rt-stat-v" id="rtTotal">0</b></div>
-            <div class="rt-stat"><span class="rt-stat-k">成功率</span><b class="rt-stat-v" id="rtRate">—</b></div>
-            <div class="rt-stat"><span class="rt-stat-k">运行时间</span><b class="rt-stat-v" id="rtUptime">—</b></div>
+          <div class="gw-url">
+            <code id="gwBaseURL">—</code>
+            <button type="button" id="btnGwCopy" class="btn btn-ghost btn-sm">复制</button>
           </div>
-
-          <div class="rt-sub">故障转移队列<span class="rt-sub-note">主模型不在此列 —— 它总是第一个被尝试</span></div>
-          <div id="rtQueue" class="rt-queue"></div>
-          <div class="rt-add-row">
-            <select id="rtAddSelect" class="tb-select"></select>
-            <button type="button" id="btnRtAdd" class="btn btn-ghost btn-sm">＋ 加入队列</button>
-          </div>
-
-          <details class="rt-details">
-            <summary>熔断与重试参数</summary>
-            <div class="prof-grid">
-              <label class="field"><span>连续失败阈值</span><input id="rtFailThreshold" class="tb-input" type="number" min="1" max="20" /></label>
-              <label class="field"><span>恢复成功阈值</span><input id="rtRecoverSuccess" class="tb-input" type="number" min="1" max="10" /></label>
-              <label class="field"><span>熔断时长（秒）</span><input id="rtOpenSeconds" class="tb-input" type="number" min="0" max="300" /></label>
-              <label class="field"><span>错误率阈值（%）</span><input id="rtErrorRate" class="tb-input" type="number" min="0" max="100" /></label>
-              <label class="field"><span>算错误率的最小请求数</span><input id="rtMinRequests" class="tb-input" type="number" min="5" max="100" /></label>
-            </div>
-            <small class="ml-field-hint">连续失败到阈值、或者错误率超过阈值，都会让这条配置进入熔断；冷却结束后半开试探，连续成功到「恢复成功阈值」就恢复正常。填 0 秒表示不冷却、下一条请求立刻再试。</small>
-          </details>
-
-          <div class="rt-sub">各模型健康状态<span class="rt-sub-note">🟢 正常 · 🟡 近期有失败 · 🔴 已熔断</span></div>
-          <div id="rtProviders" class="rt-providers"></div>
-
-          <div class="rt-actions">
-            <button type="button" id="btnRtProbe" class="btn btn-ghost btn-sm">🔌 全部测速</button>
-            <button type="button" id="btnRtReset" class="btn btn-ghost btn-sm">↺ 重置统计</button>
-            <span class="ob-spacer"></span>
-            <button type="button" id="btnRtSave" class="btn btn-primary btn-sm">保存路由设置</button>
-          </div>
-          <div id="rtProbeResult" class="ml-test-result hidden"></div>
-
-          <details class="rt-details">
-            <summary>请求日志（最近 200 条，新的在最上面）</summary>
-            <div id="rtLogs" class="rt-logs"></div>
-          </details>
+          <small class="ml-field-hint">已在用的软件举例：把 Base URL 填 <code>http://127.0.0.1:15721/v1</code>、API Key 随便填一个非空值即可（本端口只监听本机，不需要鉴权）。</small>
         </div>
+
+        <!-- 高级设置：日常不用动的东西都收在这里，默认折叠，界面保持清爽 -->
+        <details class="adv-block" id="advSettings">
+          <summary>⚙️ 高级设置<span class="adv-note">请求超时 · 出站代理 · 两段式看图 · 故障转移与熔断</span></summary>
+          <div class="adv-body">
+
+            <!-- 请求超时 + 出站代理 -->
+            <div class="ml-sub">
+              <div class="ml-sub-head"><span class="ml-sub-title">⏱ 请求与网络</span></div>
+              <div class="prof-grid">
+                <label class="field"><span>单次请求超时（秒）</span>
+                  <input id="rtTimeoutSeconds" class="tb-input" type="number" min="10" max="900" />
+                </label>
+              </div>
+              <small class="ml-field-hint">推理模型（gpt-5.x 这类）想得久，单次回答动辄 80 秒以上。默认 120 秒；如果模型还是动不动「超时」，把它调大。</small>
+
+              <div class="rt-row" style="margin-top:10px">
+                <label class="field field-inline"><span>出站代理</span>
+                  <select id="pxMode" class="tb-select">
+                    <option value="auto">自动（直连优先，连不上时自动走本地代理）</option>
+                    <option value="always">始终走代理</option>
+                    <option value="off">不使用代理</option>
+                  </select>
+                </label>
+                <span class="ml-hint" id="pxStatus"></span>
+              </div>
+              <div class="rt-row">
+                <label class="field field-inline"><span>代理地址（留空 = 自动探测）</span>
+                  <input id="pxUrl" class="tb-input" type="text" placeholder="http://127.0.0.1:10809" />
+                </label>
+                <button type="button" id="btnPxDetect" class="btn btn-ghost btn-sm">重新检测</button>
+              </div>
+              <div id="pxTried" class="px-tried"></div>
+              <small class="ml-field-hint">有些上游直连不通，但本机已经跑着 v2rayN / Clash 这类软件。默认会自动探测常见的本地端口（10809 / 7890 / 10808 …），并且<b>只在直连失败时才走代理</b> —— 国内中转不会被白白绕一圈。</small>
+            </div>
+
+            <!-- 两段式看图：给「看不了图的模型」配一双眼睛 -->
+            <div class="ml-sub">
+              <div class="ml-sub-head">
+                <span class="ml-sub-title">👁 两段式看图</span>
+                <span class="ml-hint">当前模型不支持图片时，先用它把图转成文字再回答</span>
+              </div>
+              <p class="ml-desc">
+                DeepSeek 这类纯文本模型收到图片会直接报错。指定一个<b>视觉模型</b>后，发图提问时会先让它
+                「看图并写成详细文字描述」，再把描述交给当前模型回答；每条模型的“图片能力”可在编辑时自行覆盖。
+                <b>留空则自动选用你已配置且被判定为支持视觉的模型。</b>
+              </p>
+              <label class="field"><span>视觉模型（看图的那一双眼睛）</span>
+                <select id="setVisionProfile" class="tb-select"></select>
+              </label>
+              <div id="setVisionHint" class="ml-vision-hint"></div>
+            </div>
+
+            <!-- 模型路由：多条配置互为备份，失败自动切换 + 熔断 -->
+            <div class="ml-sub" id="routerSection">
+              <div class="ml-sub-head">
+                <span class="ml-sub-title">🔀 模型路由</span>
+                <label class="rt-switch" title="开启后，模型调用会经过路由：失败时按队列换下一条配置">
+                  <input type="checkbox" id="rtEnabled" /> 启用
+                </label>
+              </div>
+              <p class="ml-desc">
+                主模型调用失败（超时 / 限流 / 5xx / 网关返回网页）时，自动按<b>故障转移队列</b>的顺序换下一条配置重试；
+                连续失败的那条会进入<b>熔断</b>并暂时跳过，冷却过后再半开试探恢复。
+                <b>队列留空时等价于「只用主模型」</b>，不改变现有行为。
+              </p>
+
+              <div class="rt-row">
+                <label class="rt-switch"><input type="checkbox" id="rtFailover" /> 自动故障转移</label>
+                <span class="ml-hint" id="rtHint"></span>
+              </div>
+
+              <div class="rt-stats">
+                <div class="rt-stat"><span class="rt-stat-k">活跃连接</span><b class="rt-stat-v" id="rtActive">0</b></div>
+                <div class="rt-stat"><span class="rt-stat-k">总请求数</span><b class="rt-stat-v" id="rtTotal">0</b></div>
+                <div class="rt-stat"><span class="rt-stat-k">成功率</span><b class="rt-stat-v" id="rtRate">—</b></div>
+                <div class="rt-stat"><span class="rt-stat-k">运行时间</span><b class="rt-stat-v" id="rtUptime">—</b></div>
+              </div>
+
+              <div class="rt-sub">故障转移队列<span class="rt-sub-note">主模型不在此列 —— 它总是第一个被尝试</span></div>
+              <div id="rtQueue" class="rt-queue"></div>
+              <div class="rt-add-row">
+                <select id="rtAddSelect" class="tb-select"></select>
+                <button type="button" id="btnRtAdd" class="btn btn-ghost btn-sm">＋ 加入队列</button>
+              </div>
+
+              <details class="rt-details">
+                <summary>熔断与重试参数</summary>
+                <div class="prof-grid">
+                  <label class="field"><span>连续失败阈值</span><input id="rtFailThreshold" class="tb-input" type="number" min="1" max="20" /></label>
+                  <label class="field"><span>恢复成功阈值</span><input id="rtRecoverSuccess" class="tb-input" type="number" min="1" max="10" /></label>
+                  <label class="field"><span>熔断时长（秒）</span><input id="rtOpenSeconds" class="tb-input" type="number" min="0" max="300" /></label>
+                  <label class="field"><span>错误率阈值（%）</span><input id="rtErrorRate" class="tb-input" type="number" min="0" max="100" /></label>
+                  <label class="field"><span>算错误率的最小请求数</span><input id="rtMinRequests" class="tb-input" type="number" min="5" max="100" /></label>
+                </div>
+                <small class="ml-field-hint">连续失败到阈值、或者错误率超过阈值，都会让这条配置进入熔断；冷却结束后半开试探，连续成功到「恢复成功阈值」就恢复正常。填 0 秒表示不冷却、下一条请求立刻再试。</small>
+              </details>
+
+              <div class="rt-sub">各模型健康状态<span class="rt-sub-note">🟢 正常 · 🟡 近期有失败 · 🔴 已熔断</span></div>
+              <div id="rtProviders" class="rt-providers"></div>
+
+              <div class="rt-actions">
+                <button type="button" id="btnRtReset" class="btn btn-ghost btn-sm">↺ 重置统计</button>
+                <span class="ob-spacer"></span>
+              </div>
+
+              <details class="rt-details">
+                <summary>请求日志（最近 200 条，新的在最上面）</summary>
+                <div id="rtLogs" class="rt-logs"></div>
+              </details>
+            </div>
+
+            <div class="rt-actions adv-save-row">
+              <button type="button" id="btnRtSave" class="btn btn-primary btn-sm">保存高级设置</button>
+            </div>
+          </div>
+        </details>
 
         <!-- 模型编辑表单（新增 / 编辑共用） -->
         <div id="mlEditor" class="ml-editor hidden">

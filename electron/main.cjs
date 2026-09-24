@@ -475,6 +475,9 @@ async function startBackend() {
     defaultUploadDir: path.join(dataDir, 'uploads'),
     installDir: path.dirname(app.getPath('exe')),
     updateService,
+    // 本地 OpenAI 兼容端口（默认 127.0.0.1:15721）：桌面版才开，
+    // 好让别的软件把 Base URL 指过来复用本应用的模型路由与故障转移。
+    startGateway: true,
     // 设置里切换数据目录成功后，主进程把新目录持久化，下次启动沿用
     onDataDirChange: (dir) => writeAppConfig({ dataDir: dir === defaultDataDir ? '' : dir }),
     // 「打开数据目录」按钮：交给系统文件管理器

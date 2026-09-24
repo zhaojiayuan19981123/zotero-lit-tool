@@ -1,3 +1,114 @@
+## v1.18.0：修「能用的模型被判成用不了」+ 新增本地 OpenAI 兼容端口与出站代理 + 精简 AI 设置界面（2026-09-24）
+
+### 一、根因：推理模型被「30 秒写死超时」误判成不可用
+
+用户反馈「好几条模型还是用不了」。用 curl 逐条打到上游实测后确认：**模型本身都是好的**，
+是判定方式错了 —— 测速走的是**非流式**，等整段回答；而 `gpt-5.x` / `o` 系列这类**推理模型**
+要先「想」很久才吐字（实测非流式 > 80 秒、流式首字节 41 秒），原 `/api/models/test` 与
+`/api/router/probe` 都写死 `timeoutMs: 30000`，于是一条好模型被判成超时。
+
+修法两条腿：**判定方式**换成流式首字判定；**超时**从写死改成可配。
+
+### 二、新增文件
+
+- **`src/streamProbe.js`** —— 流式首字判定。
+  - `judgePayloadText(text, { contentType, partial })` 判断一段上游内容属于
+    SSE / JSON / 网页 / 空；**`partial` 时若「看不出结论」返回 `{ok:false, error:''}`**
+    让调用方继续读，而不是把「还没读全」误判成失败（这是最容易写错的一处）。
+  - `readFirstPayload(up, { timeoutMs })` 读到**第一个有效数据块**就返回并 `reader.cancel()`，
+    不再等整段回答。
+- **`src/proxiedFetch.js`** —— 零依赖 HTTP 代理（CONNECT 隧道）。
+  - `proxiedFetch(url, init, { proxyUrl, timeoutMs })`：`proxyUrl` 为空时**纯透传原生 fetch**；
+    非空时自己用 `node:http` 发 CONNECT、`node:tls` 握手，再把 node 响应包成标准 `Response`
+    （`Readable.toWeb`），从而和既有 `readLLMResponse` 完全兼容。
+  - **https 目标一律做隧道，不限定端口**（早期按 443/8443 白名单写过一版，会漏掉自建网关端口）。
+  - `probeProxy()` 只关心「能不能连通」：401/404 也算通。
+- **`src/outboundProxy.js`** —— 代理配置与自动探测。三模式 `auto` / `always` / `off`；
+  `DEFAULT_PROXY_CANDIDATES` 按常见度排序（10809 / 7890 / 10808 / 1080 / 2080 / 8889 / 20171）；
+  `ensureDetected()` 带 TTL 缓存 + `detecting` 并发去重；`shouldRetryWithProxy()` **只认网络层错误**
+  （超时不重试 —— 上游慢，换代理没用，只会让用户多等一倍）；`proxyForRequest()` 里 **`off` 优先级最高**，
+  其次是手填 `url`。
+  > 踩坑：`ensureDetected` 里 `lastDetectAt` 一开始记的是 `Date.now()`，而 TTL 判断用的是**注入的** `now`，
+  > 两把时钟不一致导致单测里缓存永不命中。改成 `state.lastDetectAt = now`。
+- **`src/localGateway.js`** —— 本地 OpenAI 兼容端口的 HTTP 管道。
+  - `normalizeGatewayConfig` 里 **`host` 恒定 `127.0.0.1`、不可配**（不暴露到局域网，避免被人白用 Key）。
+  - `normalizeMessages`：`content` 支持字符串与 `[{type:'text',text}]` 分片数组（很多客户端这么发）、
+    丢弃空内容消息（空 content 会让 Responses API 直接报参数非法）、`developer` 降级为 `system`、`tool` 跳过。
+  - `pickProfileByModel`：模型名 / 配置 id / 显示名 / 带厂商前缀（`openai/gpt-5.6`）都能认。
+  - `createChunkWriter` 输出标准 `chat.completion.chunk`，`finish()` 后由调用方 `done()`，
+    中途出错也能补一个 error 事件再收尾。
+  - 该模块**只做管道**（路由 / CORS / 解析 / 错误形状），「怎么调模型」由注入的 `handleChat` 决定 ——
+    于是能脱离 `server.js` 单测。
+
+### 三、改动（`server.js`）
+
+- `src/modelRouter.js`：`ROUTER_LIMITS.timeoutSeconds = [10, 900]`，`DEFAULT_ROUTER_CONFIG.timeoutSeconds = 120`，
+  新增 `requestTimeoutMs(config)` 统一换算成毫秒。
+- 新增 `currentRequestTimeoutMs()`：从 `settings.modelRouter` 读超时预算；
+  `fetchModelCompletionOnce` 的 `timeoutMs` 默认 0 → 用它。超时错误文案改为**提示去高级设置调大超时**
+  （而不是干巴巴一句「超时」）。
+- 新增 `modelFetch(url, init)`：直连优先，**直连出现网络层错误时**才走探测到的本地代理重试一次；
+  `fetchModelCompletionOnce` 内的 `fetch(...)` 全部换成它。
+- `/api/router/probe` 重写为**流式首字判定**：`stream:true` + `readFirstPayload`，拿到首块即
+  `reader.cancel()` / `abort()`；返回里带上 `firstChunk` 与 `timeoutMs`。仍然**不计入**熔断与用量统计。
+- `/api/models/test` 两处写死的 `timeoutMs: 30000` 删除（改用默认预算）。
+- 新增路由：`GET /api/proxy/status`、`POST /api/proxy/detect`、`GET /api/gateway/status`、`POST /api/gateway/restart`。
+- 流式输出抽了一层 **sink**：`pipeLLMStream(up, sink, ...)` + `resSink(res)`，
+  于是 `streamModelResponse(..., { sink })` 既能写 `res`，也能写本地端口的 SSE chunk。
+- 新增 `gatewayChat()`：`model` 命中某条配置就用它作主供应商，否则用激活模型；`stream:true` → 标准 SSE chunk，
+  `stream:false` → 标准 `chat.completion`；**故障转移完全复用 `streamModelResponse` / `fetchModelCompletion`**，
+  决策逻辑一行都没复制。
+  > 踩坑（集成测试抓出来的真 bug）：`fetchModelCompletion` 返回的是**请求句柄** `{ up, cancel, abort }`，
+  > 真正响应在 `.up` 上。这里一开始直接当成 `Response` 用，导致非流式调用永远 502
+  > （`up.text is not a function`）。单测覆盖不到，只有真起端口 + 真 fetch 才能发现。
+- `startServer` 新增 `startGateway = false`（**默认不启**，避免测试/多实例抢 15721；
+  桌面版 `electron/main.cjs` 与 CLI 显式传 `true`）。
+- `/api/settings` POST 归一化 `outboundProxy` / `localGateway` 并即时生效（改代理触发重探、改端口触发重启）。
+
+### 四、修掉两个隐形问题
+
+1. **失败的尝试不释放超时定时器**（`fetchModelCompletion` 路由版）：
+   每次尝试都会 `setTimeout(…, budgetMs)`（默认 120 秒，最大 900 秒），换下一家时没清掉，
+   失败几次就留几个「到点 abort」的定时器，进程/桌面端要干等它到期。
+   修法：循环开头把**上一轮失败留下的句柄** `cancel()` + `abort()`，只保留**最后一份**给调用方读错误详情
+   （`endpointFailureMessage` 要用）。用 `scripts/probe-failover-exit.mjs` 把 `timeoutSeconds` 设成 600
+   做回归：修之前进程被拖 20 秒以上，修之后 1.7 秒自行退出。
+2. **出站代理已关 / 已手填地址时仍去探测**：`startServer` 的后台探测会挨个连七、八个候选端口（各带超时），
+   白等十几秒。现在这两种情况下直接跳过；启动定时器也补了 `unref()`。
+   （面板上的「重新检测」仍然**一定真探** —— 那是用户在问「我本机到底有没有可用代理」，跳过等于骗他。）
+
+### 五、改动（前端 `public/index.html` / `style.css` / `app.js`）
+
+- **默认只留两块**：`🧩 已配置的模型`（新增 `#btnMlCheckup`「🔌 一键体检」+ `#mlCheckupResult`）
+  与新增的 `🌐 本地端口` 区块（`#gwEnabled` / `#gwPort` / `#btnGwApply` / `#btnGwCopy` / `#gwStatus` / `#gwBaseURL`）。
+- **两段式看图 + 模型路由整块移进 `<details id="advSettings">`（默认折叠）**，
+  并与新的「请求与网络」（`#rtTimeoutSeconds` + 出站代理 `#pxMode` / `#pxUrl` / `#btnPxDetect` / `#pxTried`）同处其中。
+  底部按钮改为「保存高级设置」，一次保存路由 + 代理 + 网关三组配置。
+- 删除旧的 `#btnRtProbe` / `#rtProbeResult`（被「一键体检」取代）。
+- `app.js`：`probeRouter` 改读新按钮/容器并**先把所有模型列成「测试中」**（用户能立刻看到在干什么）；
+  新增 `loadGatewayStatus` / `renderGateway` / `applyGateway` / `loadProxyStatus` / `renderProxy` /
+  `saveProxyConfig` / `detectProxyNow`。
+
+### 六、测试
+
+- 单元测试 **278 项全绿**（v1.17.0 基线 224，本轮新增 54）：
+  `test/stream-probe.test.mjs` 11、`test/outbound-proxy.test.mjs` 19（含真实 CONNECT 隧道，自签证书）、
+  `test/local-gateway.test.mjs` 21、`test/local-gateway-e2e.test.mjs` 2（真起端口 + 真 fetch + 真故障转移）、
+  `test/router-timeout-leak.test.mjs` 1（子进程判据）。
+- 既有浏览器功能回归 **75 项全绿**，无回退。
+- 真机端到端 `verify-router-panel.mjs` 从 36 项扩到 **52 项全绿**，新增覆盖：
+  默认精简 + 高级折叠、一键体检逐条结论、本地端口真的在监听、**页面里跨域直接调用该端口能拿到内容**
+  （顺带验证 CORS 与 `OPTIONS` 预检）、`/v1/models` 给出的名字填回去能被认出来。
+- 写测试时的两个坑（已固化）：
+  - `server.close()` 会等 keep-alive 空闲连接到期（默认 5 秒），几个 mock 上游叠起来白等二十秒 →
+    `close()` 里补 `closeAllConnections?.()`。
+  - `fetch` 默认复用连接，容易在「服务端已关」时报 `fetch failed` → 统一带 `Connection: close`。
+
+### 七、说明
+
+- 判定方式的改动**只影响判定**，没有改动任何既有 AI 调用路径的对外行为；模型配置无需重填。
+- 本地端口默认开启但**只绑回环**；默认端口 15721，可改，关掉即释放，被占用时面板会明确指出并建议换端口。
+
 ## v1.17.0：新增「模型路由」（多条模型配置互为备份 + 故障转移 + 熔断 + 用量面板）（2026-09-24）
 
 ### 一、为什么做

@@ -21,6 +21,10 @@ import { DEFAULT_PDF_TRANSLATE_OPTIONS } from './src/pdfTranslate/index.js';
 import { pruneConnections } from './src/mail.js';
 import * as catalog from './src/modelCatalog.js';
 import * as modelRouter from './src/modelRouter.js';
+import { readFirstPayload } from './src/streamProbe.js';
+import * as outboundProxy from './src/outboundProxy.js';
+import { proxiedFetch, probeProxy } from './src/proxiedFetch.js';
+import * as localGateway from './src/localGateway.js';
 import { UTD_JOURNALS, JOURNAL_PRESETS, createTopJournalState, syncJournals, checkInAndCreateDelivery, deliveryArticles, recentArticles, historyArticles, deliveredArticleIds, setArticleFavorite, removeFavorites, removeHistoryArticles, calendarSummary, markArticleOpened } from './src/topJournals.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -156,6 +160,69 @@ function sseEnd(res) {
 // 兼容问题的核心不是“能否连上 TCP”，而是每个网关对 Base URL、鉴权、system role、SSE 的实现差异。
 // 统一在这里处理，避免“测试成功、实际对话/翻译无返回”的假阳性。
 const LLM_REQUEST_TIMEOUT_MS = 90000;
+
+/**
+ * 单次 AI 请求的默认超时（毫秒）。优先用用户在「高级设置」里配的值（默认 120 秒）。
+ * 为什么不能再写死 30/90 秒：gpt-5.x 这类推理模型实测**非流式要 80 秒以上**、
+ * 流式首字节也要 40 秒，写死小超时会把明明能用的模型误判成「不可用」。
+ */
+function currentRequestTimeoutMs() {
+  try {
+    return modelRouter.requestTimeoutMs(store.getSettings()?.modelRouter);
+  } catch (_) {
+    return LLM_REQUEST_TIMEOUT_MS;
+  }
+}
+
+// ---------- 出站代理（v2rayN / Clash 这类本地端口） ----------
+// 有些上游直连不通，本机却已经跑着代理软件。默认 auto = 直连优先，
+// 只在直连出现**网络层错误**时才自动改用探测到的本地代理重试一次 ——
+// 这样国内中转（siliconflow / 火山 ark 等）不会被白白塞进代理。
+const proxyState = outboundProxy.createProxyState();
+
+function currentProxyConfig() {
+  try {
+    return outboundProxy.readProxyConfig(store.getSettings());
+  } catch (_) {
+    return outboundProxy.normalizeProxyConfig(null);
+  }
+}
+
+/** 探测本地代理（并发去重 + 结果缓存都在 ensureDetected 里） */
+async function ensureProxyDetected({ force = false } = {}) {
+  const config = currentProxyConfig();
+  // 不必探测的两种情况 —— 探测会挨个去连候选端口（每个都带超时），白等十几秒：
+  //   off     ：用户明确关掉了出站代理，探到了也不会用（proxyForRequest 里 off 优先级最高）
+  //   填了地址：手填的地址优先，自动探测的结果根本不会被读到
+  if (config.mode === outboundProxy.PROXY_MODE.OFF || config.url) {
+    if (config.mode === outboundProxy.PROXY_MODE.OFF) proxyState.detectedUrl = '';
+    proxyState.tried = [];
+    proxyState.lastDetectAt = Date.now();
+    return { url: config.url || '', tried: [], cached: false, skipped: true };
+  }
+  return await outboundProxy.ensureDetected(proxyState, config, {
+    probe: probeProxy,
+    force,
+  });
+}
+
+/** 所有 AI 出站请求的统一出口。 */
+async function modelFetch(url, init) {
+  const config = currentProxyConfig();
+  const proxyUrl = outboundProxy.proxyForRequest(config, proxyState);
+  if (proxyUrl) return proxiedFetch(url, init, { proxyUrl });
+  try {
+    return await proxiedFetch(url, init, { proxyUrl: '' });
+  } catch (e) {
+    if (!outboundProxy.shouldRetryWithProxy(e, config)) throw e;
+    let detected = proxyState.detectedUrl;
+    if (!detected) {
+      try { detected = (await ensureProxyDetected({ force: true })).url; } catch (_) { detected = ''; }
+    }
+    if (!detected) throw e;
+    return proxiedFetch(url, init, { proxyUrl: detected });   // 直连不通 → 走本地代理再试一次
+  }
+}
 
 function completionText(data) {
   const content = data?.output_text ?? data?.choices?.[0]?.delta?.content ?? data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? data?.output?.flatMap?.((item) => item?.content || []).map?.((part) => part?.text || '').join('') ?? '';
@@ -357,9 +424,10 @@ function endpointFailureMessage(up, detail) {
  * 对**一条**配置发起调用（单供应商版本）。多供应商的故障转移由下面的 fetchModelCompletion 负责，
  * 这里只管「同一条配置内部的端点回退」（chat / responses、补 /v1、换 assistant 写法）。
  */
-async function fetchModelCompletionOnce(profile, payload, { stream = false, timeoutMs = LLM_REQUEST_TIMEOUT_MS } = {}) {
+async function fetchModelCompletionOnce(profile, payload, { stream = false, timeoutMs = 0 } = {}) {
+  const budgetMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : currentRequestTimeoutMs();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), budgetMs);
   const attempts = buildEndpointAttempts(profile);
   const failures = [];
   // 返回句柄：cancel 清超时定时器；abort 主动掐断上游（路由器决定「换下一家」时要用，避免留着半开的 SSE 连接）
@@ -373,13 +441,13 @@ async function fetchModelCompletionOnce(profile, payload, { stream = false, time
       messages ? { ...payload, messages } : payload,
       attempt.format, stream, attempt.assistantStyle,
     ));
-    let up = await fetch(url, {
+    let up = await modelFetch(url, {
       method: 'POST', headers: modelHeaders(profile), signal: controller.signal, body: build(null),
     });
     if (!up.ok && profile?.systemPromptMode === 'auto') {
       const detail = await up.text().catch(() => '');
       if (isSystemRoleError(detail)) {
-        up = await fetch(url, {
+        up = await modelFetch(url, {
           method: 'POST', headers: modelHeaders(profile), signal: controller.signal,
           body: build(flattenSystemMessages(payload.messages)),
         });
@@ -425,7 +493,7 @@ async function fetchModelCompletionOnce(profile, payload, { stream = false, time
   } catch (e) {
     clearTimeout(timer);
     if (e?.name === 'AbortError') {
-      const err = new Error('AI 请求超时（' + Math.round(timeoutMs / 1000) + ' 秒）。请确认本地模型服务已启动、模型已加载，或检查网关地址');
+      const err = new Error('AI 请求超时（' + Math.round(budgetMs / 1000) + ' 秒）。模型可能正在推理、或上游较慢；可在「AI 设置 → 高级设置」里调大「单次请求超时」。');
       err.kind = 'timeout';   // 让路由器能把「超时」和其它失败区分开
       throw err;
     }
@@ -493,8 +561,15 @@ async function readLLMResponse(up, { onDelta } = {}) {
 }
 
 // 把上游的 OpenAI 兼容流逐块转发给浏览器，也接受“stream=true 却返回普通 JSON”的兼容网关。
-async function pipeLLMStream(up, res, { onDelta } = {}) {
-  return readLLMResponse(up, { onDelta: (delta) => { sseSend(res, { delta }); onDelta?.(delta); } });
+// sink 是「往哪儿写」的抽象：本应用前端用 sseSend（自定义 {delta} 包），
+// 本地 OpenAI 兼容端口用标准 chat.completion.chunk —— 路由与故障转移逻辑两者共用。
+async function pipeLLMStream(up, sink, { onDelta } = {}) {
+  return readLLMResponse(up, { onDelta: (delta) => { sink.delta(delta); onDelta?.(delta); } });
+}
+
+/** 默认 sink：写成本应用前端认识的 SSE 格式 */
+function resSink(res) {
+  return { delta: (delta) => sseSend(res, { delta }) };
 }
 
 // ---------- 模型路由：把「一次调用」升级成「按优先级依次尝试多条模型配置」 ----------
@@ -580,7 +655,7 @@ function withProviderNotes(request, tried) {
  * 流式：单条配置版本（含「流式失败退非流式」兜底）。
  * 多供应商的故障转移在下面的 streamModelResponse 里做 —— 它需要知道「有没有已经吐字给客户端」。
  */
-async function streamModelResponseOnce(profile, payload, res, { onDelta } = {}) {
+async function streamModelResponseOnce(profile, payload, sink, { onDelta } = {}) {
   const preferNonStream = profile?.streamMode === 'nonstream';
   let request = await fetchModelCompletionOnce(profile, payload, { stream: !preferNonStream });
   try {
@@ -598,7 +673,7 @@ async function streamModelResponseOnce(profile, payload, res, { onDelta } = {}) 
       const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
       throw new Error(endpointFailureMessage(request.up, detail));
     }
-    let result = await pipeLLMStream(request.up, res, { onDelta });
+    let result = await pipeLLMStream(request.up, sink, { onDelta });
     // 非标准网关常在 stream=true 下直接断开或没有 token；auto 退回普通 JSON，前端仍能收到内容。
     if (!result.full.trim() && !result.aborted && !preferNonStream && profile?.streamMode === 'auto') {
       request.cancel();
@@ -607,7 +682,7 @@ async function streamModelResponseOnce(profile, payload, res, { onDelta } = {}) 
         const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
         throw new Error(`AI 流式响应为空，非流式兜底也失败（${request.up.status}）：${clip(detail, 300)}`);
       }
-      result = await pipeLLMStream(request.up, res, { onDelta });
+      result = await pipeLLMStream(request.up, sink, { onDelta });
     }
     return result;
   } finally { request.cancel?.(); }
@@ -653,6 +728,10 @@ async function fetchModelCompletion(preferred, payload, opts = {}) {
   try {
     for (let index = 0; index < plan.candidates.length; index += 1) {
       const candidate = plan.candidates[index];
+      // 上一轮失败留下的句柄先放掉：只留**最后一份**给调用方读错误详情（endpointFailureMessage）。
+      // 不放的话，每次失败都会残留一个「预算到期就 abort」的定时器（最长 900 秒），
+      // 白白占着事件循环，也让进程优雅退出时得干等它到期。
+      if (last) { last.cancel?.(); last.abort?.(); last = null; }
       const attempt = await callProviderOnce(candidate, bodyForCandidate(payload, candidate, preferred), {
         stream: !!opts.stream, timeoutMs: opts.timeoutMs,
       });
@@ -687,9 +766,10 @@ async function fetchModelCompletion(preferred, payload, opts = {}) {
  * 关键约束：**一旦已经往客户端写过 token 就不能再换供应商** —— 响应体已经开始输出，
  * 换一家会把两家的内容拼在一起。所以只在「还没吐字」时切换，其余情况如实报错。
  */
-async function streamModelResponse(preferred, payload, res, { onDelta, settings } = {}) {
+async function streamModelResponse(preferred, payload, res, { onDelta, settings, sink } = {}) {
   const plan = routerPlan(preferred, settings);
   if (!plan.candidates.length) throw new Error(noModelError());
+  const out = sink || resSink(res);
   const tracker = requestTracker();
   const tried = [];
   let emitted = false;
@@ -699,7 +779,7 @@ async function streamModelResponse(preferred, payload, res, { onDelta, settings 
       const candidate = plan.candidates[index];
       const startedAt = Date.now();
       try {
-        const result = await streamModelResponseOnce(candidate, bodyForCandidate(payload, candidate, preferred), res, {
+        const result = await streamModelResponseOnce(candidate, bodyForCandidate(payload, candidate, preferred), out, {
           onDelta: (delta) => { emitted = true; onDelta?.(delta); },
         });
         const latencyMs = Date.now() - startedAt;
@@ -741,6 +821,111 @@ async function streamModelResponse(preferred, payload, res, { onDelta, settings 
     tracker.finish(false, '未完成');   // 兜底：异常路径也不让「活跃连接」漏减
   }
 }
+
+// ---------- 本地 OpenAI 兼容端口（给别的软件用，默认 127.0.0.1:15721） ----------
+// 只是把上面这套「路由 + 故障转移」的能力从 HTTP 口子露出去，决策逻辑一行都没有复制。
+
+function gatewayEntries() {
+  const s = store.getSettings();
+  return (s.modelProfiles || [])
+    .map((raw) => ({ raw, profile: catalog.resolveProfile(raw) }))
+    .filter((x) => x.profile);
+}
+
+function gatewayModelList() {
+  return gatewayEntries().map(({ raw, profile }) => ({
+    id: raw.id, label: raw.label || raw.model, model: raw.model,
+    provider: raw.provider, providerName: profile.providerName, vision: profile.vision,
+  }));
+}
+
+/**
+ * 本地端口的一次对话请求。
+ * - model 命中某条已配置模型（模型名 / id / 显示名）→ 用它作主供应商；否则用「当前激活模型」。
+ *   主供应商失败后照样按「故障转移队列」往下换 —— 这正是把这里做成端口的意义。
+ * - stream:true 输出标准 SSE chunk；stream:false 输出标准 chat.completion JSON。
+ */
+async function gatewayChat({ body, res }) {
+  const settings = store.getSettings();
+  const entries = gatewayEntries();
+  if (!entries.length) {
+    throw Object.assign(
+      new Error('本应用还没有可用的模型配置。请先打开「AI 设置」添加模型并填好 API 密钥，此端口才有模型可用'),
+      { statusCode: 400 },
+    );
+  }
+  const messages = localGateway.normalizeMessages(body?.messages);
+  if (!messages.length) throw Object.assign(new Error('messages 不能为空'), { statusCode: 400 });
+
+  const matched = localGateway.pickProfileByModel(entries.map((e) => e.profile), body?.model);
+  const preferred = matched || activeModel(settings) || entries[0].profile;
+
+  const payload = { model: preferred.model, messages };
+  if (Number.isFinite(Number(body?.temperature))) payload.temperature = Number(body.temperature);
+  if (Number.isFinite(Number(body?.max_tokens)) && Number(body.max_tokens) > 0) payload.max_tokens = Number(body.max_tokens);
+
+  const id = `chatcmpl-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const modelName = String(body?.model || preferred.model || '').trim() || preferred.model;
+
+  if (body?.stream === true) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'X-Accel-Buffering': 'no',
+    });
+    const writer = localGateway.createChunkWriter(res, { id, model: modelName });
+    let clientGone = false;
+    res.on('close', () => { clientGone = true; });
+    try {
+      await streamModelResponse(preferred, payload, res, {
+        settings,
+        // 调用方断了就不要继续烧 token：抛出的信息里带 aborted，
+        // 上游读取循环会按「已中止」优雅收尾（见 readLLMResponse 的 catch）。
+        sink: { delta: (d) => { if (clientGone) throw new Error('client aborted the connection'); writer.delta(d); } },
+      });
+      if (!clientGone) { writer.finish('stop'); writer.done(); }
+    } catch (e) {
+      if (!clientGone) { writer.error(e?.message || '调用模型失败'); writer.done(); }
+    }
+    return;
+  }
+
+  // 注意：fetchModelCompletion 返回的是「请求句柄」{ up, cancel, abort }，
+  // 真正上游响应在 .up 上（全站其它调用点也都是这么用的）。
+  const request = await fetchModelCompletion(preferred, payload, { stream: false, settings });
+  const up = request.up;
+  let full = '';
+  try {
+    if (!up.ok) {
+      const detail = up._litErrorText ?? await up.text().catch(() => '');
+      throw Object.assign(new Error(endpointFailureMessage(up, detail)), { statusCode: 502 });
+    }
+    full = (await readLLMResponse(up)).full;
+  } finally {
+    request.cancel?.();
+    request.abort?.();
+  }
+  const payloadOut = JSON.stringify(localGateway.buildChatCompletion({ id, model: modelName, content: full }));
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(payloadOut),
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-store',
+  });
+  res.end(payloadOut);
+}
+
+const localGatewayServer = localGateway.createLocalGateway({
+  getConfig: () => localGateway.readGatewayConfig(store.getSettings()),
+  handleChat: (args) => gatewayChat(args),
+  listModels: () => gatewayModelList(),
+  onEvent: (evt) => {
+    if (evt.type === 'error') console.error('[本地端口]', evt.error);
+    else if (evt.type === 'listening') console.log(`[本地端口] 已就绪 http://127.0.0.1:${evt.port}/v1`);
+  },
+});
 
 // ---------- 当前生效的模型配置 ----------
 // 多模型配置的唯一入口：所有 AI 能力（解析 / 助手 / 论文对话 / 翻译）都从这里取配置。
@@ -1058,7 +1243,9 @@ export function createApp({
     }
   });
 
-  // 批量测速：给每条模型配置发一个极小的请求，报告可用性与耗时。
+  // 批量测速（面板上叫「一键体检」）：给每条模型配置发一个极小的**流式**请求，
+  // 拿到第一个有效数据块就算通过并立刻断开 —— 推理模型非流式动辄 80 秒以上，
+  // 等整段回答会把能用的模型误判成「超时」。
   // 刻意直接走 fetchModelCompletionOnce（单配置），**不计入**熔断统计 ——
   // 手动测一下不应该影响线上路由的熔断判断。
   app.post('/api/router/probe', async (req, res) => {
@@ -1066,41 +1253,100 @@ export function createApp({
       const s = store.getSettings();
       const wanted = Array.isArray(req.body?.profileIds) ? req.body.profileIds.map(String) : null;
       const list = (s.modelProfiles || []).filter((p) => !wanted || wanted.includes(String(p.id)));
+      const budgetMs = currentRequestTimeoutMs();
       const results = await Promise.all(list.map(async (raw) => {
         const meta = { id: String(raw.id), label: raw.label || raw.model || String(raw.id) };
         const profile = catalog.resolveProfile(raw);
         if (!profile) return { ...meta, ok: false, latencyMs: 0, error: '未填写 API 密钥' };
         const startedAt = Date.now();
+        let request = null;
         try {
-          const request = await fetchModelCompletionOnce(profile, {
+          request = await fetchModelCompletionOnce(profile, {
             model: profile.model,
             messages: [{ role: 'user', content: 'ping' }],
             max_tokens: 8,
-          }, { stream: false, timeoutMs: 30000 });
-          const latencyMs = Date.now() - startedAt;
+          }, { stream: true, timeoutMs: budgetMs });
           if (!request.up.ok) {
             const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
-            request.cancel();
-            return { ...meta, ok: false, latencyMs, error: endpointFailureMessage(request.up, detail) };
+            return { ...meta, ok: false, latencyMs: Date.now() - startedAt, error: endpointFailureMessage(request.up, detail) };
           }
-          const body = await request.up.text().catch(() => '');   // 读掉响应体，避免连接悬挂
-          request.cancel();
-          if (/^\s*</.test(body)) {
-            return { ...meta, ok: false, latencyMs, error: '返回的是网页而不是模型响应（Base URL 可能少写了 /v1）' };
+          if (isHtmlResponse(request.up)) {
+            return { ...meta, ok: false, latencyMs: Date.now() - startedAt, error: '返回的是网页而不是模型响应（Base URL 可能少写了 /v1）' };
           }
-          return { ...meta, ok: true, latencyMs, error: '' };
+          const verdict = await readFirstPayload(request.up, { timeoutMs: budgetMs });
+          const latencyMs = Date.now() - startedAt;
+          if (verdict.ok) return { ...meta, ok: true, latencyMs, error: '', firstChunk: verdict.sample };
+          return {
+            ...meta, ok: false, latencyMs,
+            error: verdict.timedOut
+              ? `已连上，但 ${Math.round(budgetMs / 1000)} 秒内没有返回任何内容（模型可能在排队或推理很慢，可在「高级设置」里调大单次请求超时）`
+              : (verdict.error || '上游没有返回可用内容'),
+          };
         } catch (e) {
-          return { ...meta, ok: false, latencyMs: Date.now() - startedAt, error: e.message || '测速失败' };
+          const timedOut = e?.kind === 'timeout' || e?.name === 'AbortError';
+          return {
+            ...meta, ok: false, latencyMs: Date.now() - startedAt,
+            error: timedOut
+              ? `超过 ${Math.round(budgetMs / 1000)} 秒没有响应（模型可能在排队或推理很慢，可在「高级设置」里调大单次请求超时）`
+              : (e.message || '测速失败'),
+          };
+        } finally {
+          request?.cancel?.();
+          request?.abort?.();   // 拿到首字就断，不为了一次体检白等整段回答
         }
       }));
-      res.json({ results });
+      res.json({ results, timeoutMs: budgetMs });
     } catch (e) {
       res.status(500).json({ error: e.message || '测速失败' });
     }
   });
 
-  for (const action of ['check', 'download', 'install']) {
-    app.post(`/api/update/${action}`, async (_req, res) => {
+  // ---------- 出站代理（让 AI 请求走本机 v2rayN / Clash 这类软件） ----------
+  app.get('/api/proxy/status', (_req, res) => {
+    try {
+      const config = outboundProxy.readProxyConfig(store.getSettings());
+      res.json(outboundProxy.proxySnapshot(proxyState, config));
+    } catch (e) {
+      res.status(500).json({ error: e.message || '读取代理状态失败' });
+    }
+  });
+
+  // 重新探测常见本地端口（面板上的「重新检测」）。force 时忽略缓存。
+  // 用户主动点「检测」就一定要真的探一遍（即便此刻是 off / 已手填地址）——
+  // 那是他在问「我本机到底有没有可用代理」，跳过就等于骗他。
+  app.post('/api/proxy/detect', async (req, res) => {
+    try {
+      const result = await outboundProxy.ensureDetected(proxyState, currentProxyConfig(), {
+        probe: probeProxy,
+        force: req.body?.force !== false,
+      });
+      const config = outboundProxy.readProxyConfig(store.getSettings());
+      res.json({ ...outboundProxy.proxySnapshot(proxyState, config), url: result.url, tried: result.tried });
+    } catch (e) {
+      res.status(500).json({ error: e.message || '代理检测失败' });
+    }
+  });
+
+  // ---------- 本地 OpenAI 兼容端口（给别的软件用） ----------
+  app.get('/api/gateway/status', (_req, res) => {
+    try {
+      res.json(localGatewayServer.status());
+    } catch (e) {
+      res.status(500).json({ error: e.message || '读取本地端口状态失败' });
+    }
+  });
+
+  // 端口改动 / 开关切换 / 端口被占用后重试 —— 都走这一个接口
+  app.post('/api/gateway/restart', async (_req, res) => {
+    try {
+      const status = await localGatewayServer.sync();
+      res.json(status);
+    } catch (e) {
+      res.status(500).json({ error: e.message || '重启本地端口失败' });
+    }
+  });
+
+  for (const action of ['check', 'download', 'install']) {    app.post(`/api/update/${action}`, async (_req, res) => {
       try {
         if (!updateService?.[action]) return res.status(409).json({ error: browserUpdateStatus.error });
         res.json(await updateService[action]());
@@ -3498,7 +3744,7 @@ export function createApp({
     };
     const t0 = Date.now();
     try {
-      let request = await fetchModelCompletion(profile, payload, { stream: false, timeoutMs: 30000 });
+      let request = await fetchModelCompletion(profile, payload, { stream: false });
       if (!request.up.ok) {
         const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
         request.cancel();
@@ -3510,7 +3756,7 @@ export function createApp({
       if (streamMode === 'nonstream') {
         return res.json({ ok: true, cost: Date.now() - t0, reply: clip(normal.full, 60), mode: 'nonstream', normalizedBaseURL: baseURL, message: '已验证普通 JSON 调用；软件将以非流式方式显示回复' });
       }
-      request = await fetchModelCompletion(profile, payload, { stream: true, timeoutMs: 30000 });
+      request = await fetchModelCompletion(profile, payload, { stream: true });
       let streamed = null;
       let streamError = '';
       if (request.up.ok) {
@@ -3570,10 +3816,26 @@ export function createApp({
     if (Object.prototype.hasOwnProperty.call(body, 'modelRouter')) {
       next.modelRouter = modelRouter.normalizeRouterConfig(next.modelRouter);
     }
+    // 出站代理配置同样归一化；改了模式（例如从 off 改成 always）就重新探测一次
+    const proxyChanged = Object.prototype.hasOwnProperty.call(body, 'outboundProxy');
+    if (proxyChanged) {
+      next.outboundProxy = outboundProxy.normalizeProxyConfig(next.outboundProxy);
+    }
+    // 本地端口配置归一化；端口或开关变了就重启监听
+    const gatewayChanged = Object.prototype.hasOwnProperty.call(body, 'localGateway');
+    if (gatewayChanged) {
+      next.localGateway = localGateway.normalizeGatewayConfig(next.localGateway);
+    }
     const saved = store.saveSettings(next);
     if (Object.prototype.hasOwnProperty.call(body, 'modelRouter')) {
       modelRouter.applyRouterConfig(routerState, modelRouter.readRouterConfig(saved));
     }
+    if (proxyChanged) {
+      const mode = outboundProxy.readProxyConfig(saved).mode;
+      if (mode === outboundProxy.PROXY_MODE.OFF) proxyState.detectedUrl = '';
+      else ensureProxyDetected({ force: true }).catch(() => {});
+    }
+    if (gatewayChanged) localGatewayServer.sync().catch(() => {});
     res.json(saved);
   });
 
@@ -3636,6 +3898,9 @@ export async function startServer(options = {}) {
     dataDir, uploadDir, port = 0,
     publicDir = path.join(__dirname, 'public'),
     defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir, saveTextFile, exportPdf, updateService,
+    // 本地 OpenAI 兼容端口：默认**不启动**，避免测试 / 多实例之间抢占 15721。
+    // 桌面版（electron/main.cjs）与 CLI 会显式传 true。
+    startGateway = false,
   } = options;
   if (dataDir) store.configure({ dataDir });
   const { app } = createApp({
@@ -3656,9 +3921,22 @@ export async function startServer(options = {}) {
   app.get('/', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
   app.use(express.static(publicDir));
 
+  // 后台先把本地代理探一遍：这样第一次「直连失败 → 自动走代理」时不用现等探测。
+  // 失败不打扰用户（auto 模式下没有代理也完全正常）。unref：这个定时器不该拖住进程退出。
+  setTimeout(() => { ensureProxyDetected({ force: true }).catch(() => {}); }, 1500).unref?.();
+
+  // 本地 OpenAI 兼容端口（给别的软件用）。端口被占用只记错误、不抛异常，主服务照常可用。
+  if (startGateway) {
+    try { await localGatewayServer.sync(); } catch (e) { console.error('[本地端口] 启动失败：', e.message); }
+  }
+
   return new Promise((resolve) => {
     const server = app.listen(port, '127.0.0.1', () => {
-      resolve({ server, port: server.address().port, app });
+      resolve({
+        server, port: server.address().port, app,
+        gateway: startGateway ? localGatewayServer : null,
+        stopGateway: () => localGatewayServer.stop().catch(() => {}),
+      });
     });
   });
 }
@@ -3667,7 +3945,7 @@ export async function startServer(options = {}) {
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const port = Number(process.env.PORT) || 3000;
-  startServer({ port }).then(({ port: p }) => {
+  startServer({ port, startGateway: true }).then(({ port: p }) => {
     console.log('');
     console.log('  ┌──────────────────────────────────────────────┐');
     console.log('  │   一站式科研终端 · 已启动                    │');

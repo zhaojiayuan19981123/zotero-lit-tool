@@ -1685,6 +1685,8 @@
   // 决策与记账都在后端（src/modelRouter.js + server.js），前端只做「展示 + 改配置」。
 
   let routerStatus = null;   // 最近一次 /api/router/status 的结果
+  let gatewayStatus = null;  // 最近一次 /api/gateway/status 的结果（本地 OpenAI 兼容端口）
+  let proxyStatus = null;    // 最近一次 /api/proxy/status 的结果（出站代理）
   let routerTimer = null;    // 设置弹窗打开时的自动刷新定时器
   const RT_REFRESH_MS = 4000;
   const RT_HEALTH_LABEL = { ok: '正常', warn: '有失败', open: '已熔断', halfOpen: '试探中' };
@@ -1741,6 +1743,7 @@
     setNum('rtOpenSeconds', b.openSeconds);
     setNum('rtErrorRate', b.errorRate);
     setNum('rtMinRequests', b.minRequests);
+    setNum('rtTimeoutSeconds', cfg.timeoutSeconds);
     renderRouterQueue();
     renderRouterAddSelect();
     updateRouterHint();
@@ -1887,7 +1890,10 @@
     }).join('');
   }
 
-  /** 保存路由设置；overrides 用于「只改队列」这类局部保存（避免丢掉用户刚勾的开关） */
+  /**
+   * 保存「高级设置」= 路由配置 + 出站代理 + 本地端口。一个按钮管完，免得用户在高级区里到处找保存。
+   * overrides 用于「只改队列」这类局部保存（避免丢掉用户刚勾的开关）。
+   */
   async function saveRouterConfig(overrides = {}) {
     const numOrUndef = (id) => {
       const raw = String($(id)?.value ?? '').trim();
@@ -1899,6 +1905,8 @@
       enabled: !!$('rtEnabled')?.checked,
       failover: !!$('rtFailover')?.checked,
       queue: overrides.queue || rtQueue(),
+      // 慢推理模型的救命项：单次请求超时（秒）
+      timeoutSeconds: numOrUndef('rtTimeoutSeconds'),
       breaker: {
         failThreshold: numOrUndef('rtFailThreshold'),
         recoverSuccess: numOrUndef('rtRecoverSuccess'),
@@ -1911,39 +1919,181 @@
       await api('/api/router/config', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
       });
-      toast('路由设置已保存', 'success');
+      const proxyOk = await saveProxyConfig({ silent: true });
+      const gwOk = await applyGateway({ silent: true });
+      toast(proxyOk && gwOk ? '高级设置已保存' : '部分设置未保存成功，请看提示', proxyOk && gwOk ? 'success' : 'error');
       await loadRouterStatus();
       fillRouterForm();
+      if (proxyOk) await loadProxyStatus();
+      if (gwOk) await loadGatewayStatus();
     } catch (e) {
-      toast('保存路由设置失败：' + e.message, 'error');
+      toast('保存设置失败：' + e.message, 'error');
+      throw e;
     }
   }
 
-  async function probeRouter() {
-    const btn = $('btnRtProbe');
-    const box = $('rtProbeResult');
+  // ---------- 本地 OpenAI 兼容端口（给别的软件用） ----------
+  async function loadGatewayStatus() {
+    try {
+      gatewayStatus = await api('/api/gateway/status');
+    } catch (_) {
+      gatewayStatus = null;
+    }
+    renderGateway();
+    return gatewayStatus;
+  }
+
+  function renderGateway() {
+    const s = gatewayStatus;
+    if (!s) return;
+    if ($('gwEnabled') && document.activeElement !== $('gwEnabled')) $('gwEnabled').checked = !!s.enabled;
+    if ($('gwPort') && document.activeElement !== $('gwPort')) $('gwPort').value = String(s.port || 15721);
+    const st = $('gwStatus');
+    if (st) {
+      if (!s.enabled) st.textContent = '已关闭';
+      else if (s.running) st.textContent = '✅ 运行中';
+      else st.textContent = '⚠ ' + (s.error || '未启动');
+      st.className = 'ml-hint' + (s.enabled && !s.running ? ' gw-bad' : '');
+    }
+    const url = s.running ? (s.baseURL || `http://127.0.0.1:${s.actualPort || s.port}/v1`) : '（未启动）';
+    if ($('gwBaseURL')) $('gwBaseURL').textContent = url;
+  }
+
+  /** 保存本地端口设置并重启监听；silent 时不上 toast（给「保存高级设置」批量调用用） */
+  async function applyGateway({ silent = false } = {}) {
+    const payload = {
+      enabled: !!$('gwEnabled')?.checked,
+      port: Number(String($('gwPort')?.value ?? '').trim()) || undefined,
+    };
+    try {
+      await api('/api/settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ localGateway: payload }),
+      });
+      if (settings) settings.localGateway = payload;
+      const st = await api('/api/gateway/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+      gatewayStatus = st;
+      renderGateway();
+      if (!silent) {
+        if (st.running) toast(`本地端口已开启：${st.baseURL}`, 'success');
+        else toast('本地端口未启动：' + (st.error || '已关闭'), st.enabled ? 'error' : 'success');
+      }
+      return st.enabled ? !!st.running : true;
+    } catch (e) {
+      renderGateway();
+      if (!silent) toast('本地端口设置失败：' + e.message, 'error');
+      return false;
+    }
+  }
+
+  // ---------- 出站代理（v2rayN / Clash 这类本地端口） ----------
+  async function loadProxyStatus() {
+    try {
+      proxyStatus = await api('/api/proxy/status');
+    } catch (_) {
+      proxyStatus = null;
+    }
+    renderProxy();
+    return proxyStatus;
+  }
+
+  function renderProxy() {
+    const s = proxyStatus;
+    if (!s) return;
+    if ($('pxMode') && document.activeElement !== $('pxMode')) $('pxMode').value = s.mode || 'auto';
+    if ($('pxUrl') && document.activeElement !== $('pxUrl')) $('pxUrl').value = s.url || '';
+    const st = $('pxStatus');
+    if (st) {
+      if (s.mode === 'off') st.textContent = '已关闭代理';
+      else if (s.activeUrl) st.textContent = `✅ 当前出口：${s.activeUrl}`;
+      else if (s.mode === 'always') st.textContent = '⚠ 已设为始终走代理，但还没探到可用的本地端口';
+      else if (s.detectedUrl) st.textContent = `✅ 已探到本地代理 ${s.detectedUrl}（直连失败时自动使用）`;
+      else st.textContent = '未检测到本地代理（直连失败时会自动重试探测）';
+    }
+    const box = $('pxTried');
+    if (box) {
+      const tried = s.tried || [];
+      box.innerHTML = tried.length
+        ? tried.map((t) => `${t.ok ? '✅' : '·'} <code>${esc(t.url)}</code>${t.ok ? '' : ` <span class="px-err">${esc(t.error || '连不上')}</span>`}`).join('<br />')
+        : '';
+    }
+  }
+
+  async function saveProxyConfig({ silent = false } = {}) {
+    const payload = {
+      mode: $('pxMode')?.value || 'auto',
+      url: String($('pxUrl')?.value || '').trim(),
+    };
+    try {
+      await api('/api/settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ outboundProxy: payload }),
+      });
+      if (settings) settings.outboundProxy = payload;
+      await loadProxyStatus();
+      if (!silent) toast('出站代理设置已保存', 'success');
+      return true;
+    } catch (e) {
+      if (!silent) toast('保存出站代理失败：' + e.message, 'error');
+      return false;
+    }
+  }
+
+  /** 「重新检测」：强制重探常见本地端口 */
+  async function detectProxyNow() {
+    const btn = $('btnPxDetect');
     const original = btn ? btn.textContent : '';
-    if (btn) { btn.disabled = true; btn.textContent = '测速中…'; }
-    if (box) { box.className = 'ml-test-result'; box.textContent = '正在逐条测试（每条最长 30 秒）…'; }
+    if (btn) { btn.disabled = true; btn.textContent = '检测中…'; }
+    try {
+      const s = await api('/api/proxy/detect', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force: true }),
+      });
+      proxyStatus = s;
+      renderProxy();
+      if (s.detectedUrl) toast(`已探到本地代理：${s.detectedUrl}`, 'success');
+      else toast('没有在本机常见端口上探到可用代理（直连不受影响）', 'success');
+    } catch (e) {
+      toast('检测代理失败：' + e.message, 'error');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = original || '重新检测'; }
+    }
+  }
+
+  /**
+   * 「一键体检」：逐条测一遍模型能不能用。
+   * 后端现在是**流式首字判定**（拿到第一个数据块就算通过并断开），所以推理模型不会
+   * 再因为「整段回答要 80 秒」被误判成超时；每条最长的等待时间 = 设置里的单次请求超时。
+   */
+  async function probeRouter() {
+    const btn = $('btnMlCheckup');
+    const box = $('mlCheckupResult');
+    const original = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '体检中…'; }
+    // 先把所有模型列成「测试中」，用户能立刻看到在干什么（而不是一个静止的按钮）
+    if (box) {
+      box.className = 'ml-test-result';
+      box.innerHTML = (profiles || []).map((p) => `⏳ ${esc(p.label || p.model || p.id)} · 测试中…`).join('<br />');
+    }
     try {
       const d = await api('/api/router/probe', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
       });
       const list = d.results || [];
       const okCount = list.filter((x) => x.ok).length;
+      const budget = d.timeoutMs ? Math.round(d.timeoutMs / 1000) : 120;
       if (box) {
         box.className = 'ml-test-result ' + (list.length && okCount === list.length ? 'ok' : 'err');
         box.innerHTML = list.map((x) => (x.ok
           ? `✅ ${esc(x.label)} · ${x.latencyMs}ms`
           : `❌ ${esc(x.label)} · ${esc(x.error || '失败')}`)).join('<br />')
-          + `<br /><b>${okCount}/${list.length} 条可用</b>（测速不计入熔断与用量统计）`;
+          + `<br /><b>${okCount}/${list.length} 条可用</b>（每条最长等 ${budget} 秒；体检不计入熔断与用量统计）`;
       }
       await loadRouterStatus();
       fillRouterForm();
     } catch (e) {
-      if (box) { box.className = 'ml-test-result err'; box.textContent = '测速失败：' + e.message; }
+      if (box) { box.className = 'ml-test-result err'; box.textContent = '体检失败：' + e.message; }
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = original || '🔌 全部测速'; }
+      if (btn) { btn.disabled = false; btn.textContent = original || '🔌 一键体检'; }
     }
   }
 
@@ -2383,6 +2533,25 @@
     $('btnMlCancel').addEventListener('click', closeMlEditor);
     $('btnMlTest').addEventListener('click', testMlProfile);
 
+    $('btnMlCheckup').addEventListener('click', probeRouter);
+
+    // ---- 本地 OpenAI 兼容端口（给别的软件用） ----
+    $('btnGwApply').addEventListener('click', () => applyGateway());
+    $('btnGwCopy').addEventListener('click', async () => {
+      const text = $('gwBaseURL')?.textContent || '';
+      if (!text || text === '—' || text.startsWith('（')) { toast('本地端口还没启动，先点「应用」', 'error'); return; }
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('已复制：' + text, 'success');
+      } catch (_) {
+        toast('复制失败，请手动选中复制', 'error');
+      }
+    });
+    $('gwEnabled').addEventListener('change', () => applyGateway());
+
+    // ---- 出站代理 ----
+    $('btnPxDetect').addEventListener('click', detectProxyNow);
+
     // ---- 模型路由（故障转移） ----
     $('btnRtSave').addEventListener('click', () => saveRouterConfig());
     $('btnRtAdd').addEventListener('click', () => {
@@ -2405,7 +2574,6 @@
       else return;
       saveRouterConfig({ queue });
     });
-    $('btnRtProbe').addEventListener('click', probeRouter);
     $('btnRtReset').addEventListener('click', resetRouterStats);
     ['rtEnabled', 'rtFailover'].forEach((id) => $(id).addEventListener('change', updateRouterHint));
     // 切供应商时自动带出官方 Base URL（用户手动改过则不动）
@@ -9493,6 +9661,8 @@ a { color: #176b87; }
     fillRouterForm();
     renderRouterLive();
     startRouterRefresh();
+    // 本地端口与出站代理：都拉一次状态填进表单
+    await Promise.all([loadGatewayStatus(), loadProxyStatus()]);
     $('settingsModal').classList.remove('hidden');
     loadBackupList();
   }

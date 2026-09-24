@@ -305,6 +305,54 @@ input, select, textarea { font-family: inherit; }
 .rt-log-msg { color: var(--text-2); word-break: break-all; }
 .rt-log-fo { color: var(--orange); flex-shrink: 0; }
 
+/* ---------- 高级设置折叠块（默认收起，保持「AI 解析设置」清爽） ---------- */
+.adv-block {
+  margin-top: 14px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel-soft); overflow: hidden;
+}
+.adv-block > summary {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  padding: 11px 13px; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--text);
+  list-style: none; user-select: none;
+}
+.adv-block > summary::-webkit-details-marker { display: none; }
+.adv-block > summary::before {
+  content: '▸'; color: var(--text-3); font-size: 11px; transition: transform .15s;
+}
+.adv-block[open] > summary::before { transform: rotate(90deg); }
+.adv-block > summary:hover { background: var(--panel-2); }
+.adv-note { font-size: 11.5px; font-weight: 400; color: var(--text-3); }
+.adv-body { padding: 2px 13px 13px; }
+.adv-save-row { justify-content: flex-end; margin-top: 14px; }
+
+/* 高级块里的子分区：比顶层 ml-section 更轻，视觉上从属 */
+.ml-sub {
+  margin-top: 14px; padding: 12px 13px; border: 1px solid var(--border-soft);
+  border-radius: 9px; background: var(--surface);
+}
+.ml-sub-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 9px; }
+.ml-sub-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.ml-sub .ml-desc { margin-top: 0; }
+
+/* ---------- 本地端口 ---------- */
+.gw-url {
+  display: flex; align-items: center; gap: 8px; margin-top: 9px;
+  padding: 8px 10px; border: 1px dashed var(--border); border-radius: 8px; background: var(--surface);
+}
+.gw-url code {
+  flex: 1; min-width: 0; font-size: 12.5px; color: var(--primary);
+  overflow-x: auto; white-space: nowrap; font-family: ui-monospace, Consolas, monospace;
+}
+.gw-bad { color: var(--red) !important; }
+
+/* ---------- 出站代理 ---------- */
+.px-tried { margin-top: 7px; font-size: 11px; line-height: 1.75; color: var(--text-3); }
+.px-tried code { font-family: ui-monospace, Consolas, monospace; color: var(--text-2); }
+.px-err { color: var(--text-3); }
+.field-inline { display: flex; align-items: center; gap: 8px; }
+.field-inline > span { flex-shrink: 0; white-space: nowrap; }
+.field-inline .tb-input, .field-inline .tb-select { flex: 1; min-width: 120px; }
+
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 8px 14px; border: 1px solid var(--border); background: var(--surface);
