@@ -1,0 +1,1707 @@
+/* thesis.js —— 学位论文阅读（独立模块）
+ *
+ * 与文献中心完全分开：数据走 /api/theses 系列，阅读器是独立实现（不改 app.js 里那套 pr 阅读器），
+ * 因此文献中心的行为不受任何影响。app.js 只负责在切到本视图时调一次 ThesisView.mount()。
+ *
+ * 三块内容：
+ *   ① 列表：以表格管理学位论文（AI 读前 3 页填字段、分类、自动进度、手点评级）
+ *   ② 阅读器：左侧章节书签栏 + 中间 PDF 连续滚动 + 右侧「解析结果 / AI 对话」，保留笔记模式
+ *   ③ 写作支撑：摘录素材库、章节速读、综述条目、答辩演练、对比阅读、关联我的大论文
+ *
+ * 长文档问答的做法见 src/thesisContext.js：不塞全文，而是「档案卡 + 当前位置 + 检索命中 + 近 8 轮」。
+ */
+(function () {
+  'use strict';
+
+  // ==================== 常量 ====================
+
+  const BASE_COLS = [
+    { key: 'file', label: '文献', cls: 'th-col-file' },
+    { key: 'title', label: '标题', cls: 'th-col-title' },
+    { key: 'authors', label: '作者' },
+    { key: 'school', label: '学校' },
+    { key: 'collectionId', label: '分类' },
+    { key: 'progress', label: '阅读进度', cls: 'th-col-num' },
+    { key: 'rating', label: '评级', cls: 'th-col-num' },
+    { key: 'importedAt', label: '导入时间' },
+    { key: 'myThoughts', label: '我的思考' },
+    { key: 'referenceValue', label: '参考价值' },
+  ];
+
+  const EXTRA_COLS = [
+    { key: 'degreeType', label: '学位类型' }, { key: 'year', label: '年份' },
+    { key: 'major', label: '专业' }, { key: 'supervisor', label: '导师' },
+    { key: 'keywords', label: '关键词' }, { key: 'summary', label: '一段话总结' },
+    { key: 'researchQuestion', label: '研究问题' }, { key: 'theory', label: '理论框架' },
+    { key: 'method', label: '研究方法' }, { key: 'dataSource', label: '数据来源与样本' },
+    { key: 'conclusion', label: '主要结论' }, { key: 'innovation', label: '创新点' },
+    { key: 'limitation', label: '局限与不足' }, { key: 'value', label: '可借鉴之处' },
+    { key: 'structure', label: '章节结构概览' }, { key: 'dataOpen', label: '数据/代码是否公开' },
+  ];
+
+  const LABELS = {
+    title: '标题', authors: '作者', school: '学校', degreeType: '学位类型', year: '年份',
+    major: '专业', supervisor: '导师', keywords: '关键词', abstractPoints: '摘要要点',
+    summary: '一段话总结', researchQuestion: '研究问题', theory: '理论框架', method: '研究方法',
+    dataSource: '数据来源与样本', conclusion: '主要结论', innovation: '创新点',
+    limitation: '局限与不足', value: '可借鉴之处', structure: '章节结构概览',
+    dataOpen: '数据/代码是否公开', suggestedRating: 'AI 建议评级', ratingReason: '建议理由',
+    myThoughts: '我的思考', referenceValue: '参考价值',
+  };
+
+  // 可以就地编辑的文本字段（其余 AI 字段在阅读器的「解析结果」里改）
+  const INLINE_EDITABLE = new Set(['title', 'authors', 'school', 'myThoughts', 'referenceValue']);
+
+  const LS = {
+    cols: 'thesisCols',
+    model: 'aiModel:thesis',
+    budget: 'thesisBudget',
+    attach: 'thesisAttachSection',
+  };
+
+  const BUDGETS = [
+    { v: 20000, label: '精简 20k' },
+    { v: 40000, label: '标准 40k' },
+    { v: 80000, label: '充裕 80k' },
+  ];
+
+  // ==================== 状态 ====================
+
+  const S = {
+    mounted: false,
+    items: [], collections: [], summary: null,
+    filter: { collectionId: '__all__', progress: '', q: '' },
+    selected: new Set(),
+    cols: null,
+    bigPaper: null,
+    quotes: [],
+    modelChoices: [],
+    busy: false,
+  };
+
+  // 阅读器状态
+  const R = {
+    id: '', record: null, doc: null, numPages: 0, scale: 1.2, pageW: 0, pageH: 0,
+    page: 1, outline: [], outlineSource: '', chat: [], note: '', noteLoaded: false,
+    tab: 'analysis', noteMode: false, busy: false, observer: null, scrollRaf: 0,
+    saveTimer: 0, noteTimer: 0, renderTimer: 0, quotes: [],
+  };
+
+  // ==================== 工具 ====================
+
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
+  function toast(msg, isErr) {
+    const el = document.createElement('div');
+    el.className = 'th-toast' + (isErr ? ' err' : '');
+    el.textContent = String(msg || '');
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), isErr ? 5600 : 2600);
+  }
+
+  async function api(path, opts = {}) {
+    const init = { method: opts.method || 'GET', headers: {} };
+    if (opts.body !== undefined) {
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(opts.body);
+    }
+    const res = await fetch(path, init);
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = { error: text }; }
+    if (!res.ok) throw new Error((data && data.error) || `请求失败（${res.status}）`);
+    return data;
+  }
+
+  /** 逐帧消费后端 SSE（server.js 用的是 `data: {json}\n\n` 格式） */
+  async function streamPost(path, body, onEvent) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      let msg = `请求失败（${res.status}）`;
+      try { msg = JSON.parse(t).error || msg; } catch (_) { /* ignore */ }
+      throw new Error(msg);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop() || '';
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        let obj = null;
+        try { obj = JSON.parse(payload); } catch (_) { continue; }
+        onEvent(obj);
+      }
+    }
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  function readJson(key, fallback) {
+    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+  }
+  function writeJson(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* ignore */ }
+  }
+
+  function markdown(text) {
+    const src = String(text || '');
+    let html;
+    try {
+      html = window.marked?.parse ? window.marked.parse(src) : esc(src).replace(/\n/g, '<br>');
+    } catch { html = esc(src).replace(/\n/g, '<br>'); }
+    if (window.DOMPurify) html = window.DOMPurify.sanitize(html, { ADD_ATTR: ['data-page'] });
+    // 把【章节 · p.12】变成可点的出处
+    return html.replace(/【([^】]{1,80}?)·\s*p\.(\d+)】/g,
+      (m, where, page) => `<span class="src" data-page="${page}">【${where}· p.${page}】</span>`);
+  }
+
+  function download(name, text, mime) {
+    const blob = new Blob([text], { type: mime || 'text/markdown;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }
+
+  function progressOf(it) {
+    return it.progress || { percent: 0, label: '未阅读', readPage: 0, numPages: it.numPages || 0 };
+  }
+
+  // ==================== 视图骨架 ====================
+
+  function buildDom() {
+    const view = $('#viewThesis');
+    if (!view) return;
+    view.classList.add('th-view');
+    view.innerHTML = `
+      <div class="th-head">
+        <div class="th-head-row">
+          <div class="th-title"><h2>🎓 学位论文阅读</h2><span id="thSummary"></span></div>
+          <div class="tb-spacer"></div>
+          <button class="tb-btn accent" id="thBtnImport">⬆ 导入学位论文 PDF</button>
+          <button class="tb-btn" id="thBtnCols">▦ 字段配置</button>
+          <button class="tb-btn" id="thBtnQuotes">📌 素材库</button>
+          <button class="tb-btn" id="thBtnBig">🎯 我的大论文</button>
+          <input type="file" id="thFileInput" accept="application/pdf" multiple class="hidden" />
+        </div>
+        <div class="th-chips" id="thChips"></div>
+      </div>
+      <div class="th-toolbar">
+        <input type="search" id="thSearch" class="tb-input th-search" placeholder="搜索标题 / 作者 / 学校 / 关键词…" />
+        <select id="thProgressFilter" class="tb-select">
+          <option value="">进度：全部</option>
+          <option value="未阅读">未阅读</option>
+          <option value="阅读中">阅读中</option>
+          <option value="已阅读">已阅读</option>
+        </select>
+        <select id="thSort" class="tb-select">
+          <option value="importedAt">按导入时间</option>
+          <option value="progress">按阅读进度</option>
+          <option value="rating">按评级</option>
+          <option value="title">按标题</option>
+          <option value="year">按年份</option>
+        </select>
+        <div class="tb-spacer"></div>
+        <button class="tb-btn" id="thBtnCompare">⇄ 对比阅读</button>
+        <button class="tb-btn" id="thBtnBatchParse">▶ 批量解析选中</button>
+        <button class="tb-btn" id="thBtnDelete">🗑 删除选中</button>
+      </div>
+      <div class="th-bulk hidden" id="thBulk"></div>
+      <div class="th-table-wrap" id="thWrap"></div>
+      <div id="thColsPop" class="pop hidden"></div>
+    `;
+  }
+
+  // ==================== 列表渲染 ====================
+
+  function visibleCols() {
+    if (!S.cols) S.cols = readJson(LS.cols, null) || BASE_COLS.map((c) => c.key);
+    const byKey = new Map([...BASE_COLS, ...EXTRA_COLS.map((c) => ({ ...c, extra: true }))].map((c) => [c.key, c]));
+    const cols = S.cols.map((k) => byKey.get(k)).filter(Boolean);
+    return cols.length ? cols : BASE_COLS;
+  }
+
+  function filtered() {
+    const q = S.filter.q.trim().toLowerCase();
+    let list = S.items.filter((it) => {
+      if (S.filter.collectionId !== '__all__' && (it.collectionId || '') !== S.filter.collectionId) return false;
+      const p = progressOf(it);
+      if (S.filter.progress && p.label !== S.filter.progress) return false;
+      if (!q) return true;
+      const hay = [it.title, it.authors, it.school, it.keywords, it.major, it.originalName, it.supervisor]
+        .join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+    const sort = S.sort || 'importedAt';
+    list = [...list].sort((a, b) => {
+      if (sort === 'progress') return progressOf(b).percent - progressOf(a).percent;
+      if (sort === 'rating') return (Number(b.rating) || 0) - (Number(a.rating) || 0);
+      if (sort === 'title') return String(a.title || '').localeCompare(String(b.title || ''), 'zh');
+      if (sort === 'year') return (Number(b.year) || 0) - (Number(a.year) || 0);
+      return String(b.importedAt || '').localeCompare(String(a.importedAt || ''));
+    });
+    return list;
+  }
+
+  function renderChips() {
+    const box = $('#thChips');
+    if (!box) return;
+    const counts = new Map();
+    for (const it of S.items) {
+      const k = it.collectionId || '';
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    const chip = (key, label, n) => `<div class="th-chip${S.filter.collectionId === key ? ' active' : ''}" data-col="${esc(key)}">
+        ${esc(label)}<span class="th-chip-n">${n}</span></div>`;
+    box.innerHTML = [
+      chip('__all__', '全部', S.items.length),
+      chip('', '未分类', counts.get('') || 0),
+      ...S.collections.map((c) => chip(c.id, c.name, counts.get(c.id) || 0)),
+      '<div class="th-chip th-chip-add" id="thAddCol">＋ 新建分类</div>',
+    ].join('');
+  }
+
+  function starHtml(it) {
+    const rating = Number(it.rating) || 0;
+    const stars = [1, 2, 3, 4, 5].map((i) => `<span class="th-star${i <= rating ? ' on' : ''}" data-v="${i}">★</span>`).join('');
+    const sug = it.suggestedRating && String(it.suggestedRating) !== String(rating)
+      ? `<span class="th-star-suggest" title="${esc(it.ratingReason || '')}">AI 建议 ${esc(it.suggestedRating)}<button data-suggest="${esc(it.suggestedRating)}">采纳</button></span>`
+      : '';
+    return `<span class="th-stars" data-id="${esc(it.id)}">${stars}</span>${sug}`;
+  }
+
+  function progressHtml(it) {
+    const p = progressOf(it);
+    const cls = p.label === '已阅读' ? 's2' : (p.label === '阅读中' ? 's1' : 's0');
+    const tip = p.numPages ? `${p.readPage}/${p.numPages} 页` : '页数未知';
+    return `<div class="th-prog" title="${tip}">
+        <div class="th-prog-bar"><div class="th-prog-fill" style="width:${p.percent}%"></div></div>
+        <span class="th-prog-label ${cls}">${esc(p.label)}</span>
+      </div>`;
+  }
+
+  function cellHtml(it, key) {
+    if (key === 'file') {
+      const name = it.originalName || '未上传附件';
+      const meta = it.numPages ? `${it.numPages} 页` : '';
+      const st = it.status || 'pending';
+      const stLabel = { pending: '待解析', parsing: '解析中', done: '已解析', error: '解析失败' }[st] || st;
+      const idx = it.indexStatus === 'ready' ? '<span class="th-badge idx">已建索引</span>' : '';
+      return `<div class="th-file">
+          <span class="th-file-name" data-open="${esc(it.id)}">${esc(name)}</span>
+          <span class="th-file-meta"><span class="th-badge ${esc(st)}">${esc(stLabel)}</span> ${esc(meta)} ${idx}</span>
+        </div>`;
+    }
+    if (key === 'progress') return progressHtml(it);
+    if (key === 'rating') return starHtml(it);
+    if (key === 'collectionId') {
+      const name = S.collections.find((c) => c.id === it.collectionId)?.name || '';
+      return `<span class="th-muted" data-col-pick="${esc(it.id)}" style="cursor:pointer">${esc(name || '未分类')}</span>`;
+    }
+    if (key === 'importedAt') return `<span class="th-muted">${esc(fmtDate(it.importedAt))}</span>`;
+    if (key === 'title') {
+      const v = it.title || '';
+      return `<div class="th-cell-edit${v ? '' : ' th-muted'}" contenteditable="true" data-id="${esc(it.id)}" data-f="${key}">${esc(v || '（待解析）')}</div>`;
+    }
+    const v = String(it[key] || '');
+    if (INLINE_EDITABLE.has(key)) {
+      return `<div class="th-cell-edit th-truncate${v ? '' : ' th-muted'}" contenteditable="true" data-id="${esc(it.id)}" data-f="${key}">${esc(v || '双击填写')}</div>`;
+    }
+    return v ? `<div class="th-truncate">${esc(v)}</div>` : '<span class="th-muted">—</span>';
+  }
+
+  function renderTable() {
+    const wrap = $('#thWrap');
+    if (!wrap) return;
+    const cols = visibleCols();
+    const list = filtered();
+    const sum = S.summary || {};
+    const sm = $('#thSummary');
+    if (sm) {
+      const bp = sum.byProgress || {};
+      sm.textContent = `共 ${sum.total || 0} 篇 · 未阅读 ${bp['未阅读'] || 0} · 阅读中 ${bp['阅读中'] || 0} · 已阅读 ${bp['已阅读'] || 0} · 素材 ${sum.quotes || 0} 条`;
+    }
+    if (!list.length) {
+      wrap.innerHTML = `<div class="th-empty"><div class="th-empty-icon">🎓</div>
+        <p>${S.items.length ? '没有符合筛选条件的论文' : '还没有学位论文'}</p>
+        <p class="th-muted">点击「⬆ 导入学位论文 PDF」；导入后会自动读取前 3 页填好标题、作者、学校等字段</p></div>`;
+      renderBulk();
+      return;
+    }
+    const head = `<tr>
+      <th class="th-col-pick"><input type="checkbox" id="thChkAll" ${list.every((it) => S.selected.has(it.id)) ? 'checked' : ''} /></th>
+      ${cols.map((c) => `<th class="${c.cls || ''}">${esc(c.label)}</th>`).join('')}
+      <th></th>
+    </tr>`;
+    const rows = list.map((it) => `<tr data-id="${esc(it.id)}" class="${S.selected.has(it.id) ? 'sel' : ''}">
+      <td class="th-col-pick"><input type="checkbox" data-chk="${esc(it.id)}" ${S.selected.has(it.id) ? 'checked' : ''} /></td>
+      ${cols.map((c) => `<td class="${c.cls || ''}">${cellHtml(it, c.key)}</td>`).join('')}
+      <td class="th-col-num"><button class="tb-btn ghost" data-read="${esc(it.id)}" title="打开阅读器">📖</button></td>
+    </tr>`).join('');
+    wrap.innerHTML = `<table class="th-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
+    renderBulk();
+  }
+
+  function renderBulk() {
+    const bar = $('#thBulk');
+    if (!bar) return;
+    const n = S.selected.size;
+    bar.classList.toggle('hidden', n === 0);
+    if (!n) { bar.innerHTML = ''; return; }
+    const opts = ['<option value="">移动到分类…</option>', '<option value="">未分类</option>']
+      .concat(S.collections.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`));
+    bar.innerHTML = `<span>已选 <b>${n}</b> 篇</span>
+      <select class="tb-select" id="thBulkCol">${opts.join('')}</select>
+      <button class="tb-btn" id="thBulkClear">取消选择</button>`;
+  }
+
+  // ==================== 列表交互 ====================
+
+  async function refresh() {
+    const data = await api('/api/theses');
+    S.items = data.items || [];
+    S.collections = data.collections || [];
+    S.summary = data.summary || null;
+    renderChips();
+    renderTable();
+  }
+
+  async function loadModelChoices() {
+    if (S.modelChoices.length) return S.modelChoices;
+    try {
+      const [list, settings] = await Promise.all([api('/api/models'), api('/api/settings')]);
+      const activeId = settings?.activeProfileId || '';
+      S.modelChoices = (list || []).map((m) => ({ id: m.id, label: m.label || m.model, active: m.id === activeId }));
+    } catch (_) { S.modelChoices = []; }
+    return S.modelChoices;
+  }
+
+  function modelSelectHtml(id) {
+    const saved = (() => { try { return localStorage.getItem(LS.model) || ''; } catch { return ''; } })();
+    const current = S.modelChoices.some((m) => m.id === saved) ? saved : (S.modelChoices.find((m) => m.active)?.id || S.modelChoices[0]?.id || '');
+    return `<select id="${id}">${S.modelChoices.map((m) => `<option value="${esc(m.id)}" ${m.id === current ? 'selected' : ''}>${esc(m.label)}${m.active ? ' ★' : ''}</option>`).join('')}</select>`;
+  }
+
+  function pickedModel() {
+    const sel = $('#thrModel');
+    const v = sel?.value || '';
+    if (v) { try { localStorage.setItem(LS.model, v); } catch (_) { /* ignore */ } }
+    return v;
+  }
+
+  function bindList() {
+    $('#thBtnImport')?.addEventListener('click', () => $('#thFileInput')?.click());
+    $('#thFileInput')?.addEventListener('change', async (e) => {
+      const files = [...(e.target.files || [])];
+      e.target.value = '';
+      if (files.length) await importFiles(files);
+    });
+
+    $('#thSearch')?.addEventListener('input', (e) => { S.filter.q = e.target.value || ''; renderTable(); });
+    $('#thProgressFilter')?.addEventListener('change', (e) => { S.filter.progress = e.target.value; renderTable(); });
+    $('#thSort')?.addEventListener('change', (e) => { S.sort = e.target.value; renderTable(); });
+
+    $('#thChips')?.addEventListener('click', async (e) => {
+      const chip = e.target.closest('.th-chip');
+      if (!chip) return;
+      if (chip.id === 'thAddCol') {
+        const name = prompt('分类名称');
+        if (!name || !name.trim()) return;
+        try {
+          const col = await api('/api/thesis-collections', { method: 'POST', body: { name: name.trim() } });
+          S.collections.push(col);
+          renderChips();
+        } catch (err) { toast(err.message, true); }
+        return;
+      }
+      S.filter.collectionId = chip.dataset.col;
+      renderChips();
+      renderTable();
+    });
+
+    $('#thWrap')?.addEventListener('click', async (e) => {
+      const t = e.target;
+      if (t.dataset.open || t.dataset.read) {
+        const id = t.dataset.open || t.dataset.read;
+        await openReader(id);
+        return;
+      }
+      const star = t.closest('.th-star');
+      if (star) {
+        const id = star.closest('.th-stars').dataset.id;
+        const v = Number(star.dataset.v);
+        const it = S.items.find((x) => x.id === id);
+        const next = String(Number(it?.rating) === v ? 0 : v);
+        await patchItem(id, { rating: next });
+        return;
+      }
+      const sug = t.closest('[data-suggest]');
+      if (sug) {
+        const id = sug.closest('[data-suggest]').dataset.suggest; // 占位，下面用 closest 行取 id
+        const row = t.closest('tr');
+        await patchItem(row.dataset.id, { rating: String(sug.dataset.suggest) });
+        return;
+      }
+      const pick = t.closest('[data-col-pick]');
+      if (pick) {
+        const id = pick.dataset.colPick;
+        const name = prompt(`移到分类（留空=未分类）\n已有：${S.collections.map((c) => c.name).join('、') || '（无）'}`);
+        if (name === null) return;
+        const target = S.collections.find((c) => c.name === name.trim());
+        if (name.trim() && !target) { toast('没有这个分类，请先用「＋ 新建分类」创建', true); return; }
+        await patchItem(id, { collectionId: target ? target.id : '' });
+      }
+    });
+
+    // 复选框 / 批量
+    $('#thWrap')?.addEventListener('change', (e) => {
+      if (e.target.id === 'thChkAll') {
+        const list = filtered();
+        if (e.target.checked) list.forEach((it) => S.selected.add(it.id));
+        else list.forEach((it) => S.selected.delete(it.id));
+        renderTable();
+        return;
+      }
+      const chk = e.target.closest('[data-chk]');
+      if (chk) {
+        const id = chk.dataset.chk;
+        if (chk.checked) S.selected.add(id); else S.selected.delete(id);
+        chk.closest('tr')?.classList.toggle('sel', chk.checked);
+        renderBulk();
+      }
+    });
+
+    $('#thBulk')?.addEventListener('change', async (e) => {
+      if (e.target.id !== 'thBulkCol') return;
+      const val = e.target.value;
+      const ids = [...S.selected];
+      try {
+        await api('/api/theses/batch-update', { method: 'POST', body: { ids, patch: { collectionId: val } } });
+        toast(`已移动 ${ids.length} 篇`);
+        S.selected.clear();
+        await refresh();
+      } catch (err) { toast(err.message, true); }
+    });
+    $('#thBulk')?.addEventListener('click', (e) => {
+      if (e.target.id === 'thBulkClear') { S.selected.clear(); renderTable(); }
+    });
+
+    $('#thBtnBatchParse')?.addEventListener('click', async () => {
+      const ids = [...S.selected];
+      if (!ids.length) { toast('先勾选要解析的论文', true); return; }
+      toast(`正在解析 ${ids.length} 篇（读前 3 页填字段）…`);
+      try {
+        const r = await api('/api/theses/batch-parse', { method: 'POST', body: { ids } });
+        const bad = (r.results || []).filter((x) => x.status !== 'done');
+        toast(bad.length ? `${ids.length - bad.length} 篇成功，${bad.length} 篇失败` : `解析完成：${ids.length} 篇`, !!bad.length);
+        await refresh();
+      } catch (err) { toast(err.message, true); }
+    });
+
+    $('#thBtnDelete')?.addEventListener('click', async () => {
+      const ids = [...S.selected];
+      if (!ids.length) { toast('先勾选要删除的论文', true); return; }
+      if (!confirm(`确定删除选中的 ${ids.length} 篇学位论文及其附图、素材摘录？此操作不可撤销。`)) return;
+      try {
+        await api('/api/theses/batch-delete', { method: 'POST', body: { ids } });
+        S.selected.clear();
+        await refresh();
+        toast('已删除');
+      } catch (err) { toast(err.message, true); }
+    });
+
+    $('#thBtnCompare')?.addEventListener('click', () => openCompare());
+    $('#thBtnQuotes')?.addEventListener('click', () => openQuotesDrawer());
+    $('#thBtnBig')?.addEventListener('click', () => openBigPaper());
+    $('#thBtnCols')?.addEventListener('click', () => openColsPop());
+
+    // 就地编辑：blur 时保存
+    $('#thWrap')?.addEventListener('focusout', async (e) => {
+      const cell = e.target.closest?.('.th-cell-edit');
+      if (!cell) return;
+      const id = cell.dataset.id;
+      const field = cell.dataset.f;
+      const value = String(cell.innerText || '').trim();
+      const it = S.items.find((x) => x.id === id);
+      if (!it || String(it[field] || '') === value) return;
+      await patchItem(id, { [field]: value });
+    });
+  }
+
+  async function patchItem(id, patch) {
+    try {
+      const updated = await api(`/api/theses/${id}`, { method: 'PATCH', body: patch });
+      const idx = S.items.findIndex((x) => x.id === id);
+      if (idx >= 0) S.items[idx] = updated;
+      renderTable();
+      if (R.id === id) R.record = updated;
+      return updated;
+    } catch (err) { toast(err.message, true); return null; }
+  }
+
+  function openColsPop() {
+    const pop = $('#thColsPop');
+    if (!pop) return;
+    const all = [...BASE_COLS, ...EXTRA_COLS];
+    const cur = new Set(visibleCols().map((c) => c.key));
+    pop.innerHTML = `<div class="pop-title">显示哪些列</div>
+      ${all.map((c) => `<label class="pop-item"><input type="checkbox" data-col="${esc(c.key)}" ${cur.has(c.key) ? 'checked' : ''} /> ${esc(c.label)}</label>`).join('')}
+      <div class="pop-foot"><button class="btn btn-sm" id="thColsReset">恢复默认</button></div>`;
+    pop.classList.remove('hidden');
+    const commit = () => {
+      const keys = $$('input[data-col]', pop).filter((i) => i.checked).map((i) => i.dataset.col);
+      S.cols = keys.length ? keys : BASE_COLS.map((c) => c.key);
+      writeJson(LS.cols, S.cols);
+      renderTable();
+    };
+    pop.addEventListener('change', commit);
+    $('#thColsReset')?.addEventListener('click', () => {
+      S.cols = BASE_COLS.map((c) => c.key);
+      writeJson(LS.cols, S.cols);
+      renderTable();
+      openColsPop();
+    });
+  }
+
+  // ==================== 导入 ====================
+
+  async function importFiles(files) {
+    const pdfs = files.filter((f) => /\.pdf$/i.test(f.name));
+    if (!pdfs.length) { toast('请选择 PDF 文件', true); return; }
+    const ids = [];
+    toast(`正在导入 ${pdfs.length} 个文件…`);
+    for (const f of pdfs) {
+      try {
+        const rec = await api('/api/theses', {
+          method: 'POST',
+          body: { title: f.name.replace(/\.pdf$/i, ''), collectionId: S.filter.collectionId === '__all__' ? '' : S.filter.collectionId },
+        });
+        const fd = new FormData();
+        fd.append('file', f, f.name);
+        const res = await fetch(`/api/theses/${rec.id}/attachment`, { method: 'POST', body: fd });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || '上传失败');
+        ids.push(rec.id);
+      } catch (err) {
+        toast(`${f.name}：${err.message}`, true);
+      }
+    }
+    await refresh();
+    if (!ids.length) return;
+    toast(`已导入 ${ids.length} 篇，正在读取前 3 页填字段…`);
+    try {
+      const r = await api('/api/theses/batch-parse', { method: 'POST', body: { ids } });
+      const bad = (r.results || []).filter((x) => x.status !== 'done');
+      toast(bad.length ? `导入完成，${bad.length} 篇字段识别失败（可稍后重试）` : '导入并解析完成', !!bad.length);
+    } catch (err) { toast('导入完成，但自动解析失败：' + err.message, true); }
+    await refresh();
+  }
+
+  // ==================== 阅读器：骨架 ====================
+
+  function buildReaderDom() {
+    if ($('#thr')) return;
+    const el = document.createElement('div');
+    el.id = 'thr';
+    el.className = 'thr hidden';
+    el.innerHTML = `
+      <div class="thr-top">
+        <button id="thrBack">← 返回</button>
+        <span class="thr-name" id="thrName"></span>
+        <span class="thr-here" id="thrHere"></span>
+        <div class="thr-spacer"></div>
+        <span id="thrModelSlot"></span>
+        <button id="thrFit" title="适宽显示">↔ 适宽</button>
+        <button id="thrZoomOut" title="缩小">－</button>
+        <button id="thrZoomIn" title="放大">＋</button>
+        <span style="font-size:12px;color:var(--side-muted)">第</span>
+        <input id="thrPageInput" value="1" title="输入页码后回车跳转" />
+        <span style="font-size:12px;color:var(--side-muted)">/ <b id="thrPageTotal">0</b> 页</span>
+        <button id="thrNoteMode" title="笔记模式：原文 ｜ AI 对话 ｜ 笔记">📝 笔记模式</button>
+        <button id="thrQuotesBtn" title="摘录素材库">📌 素材</button>
+        <button id="thrOutlineToggle" title="折叠 / 展开书签栏">☰</button>
+      </div>
+      <div class="thr-body">
+        <aside class="thr-outline" id="thrOutline">
+          <div class="thr-out-head">
+            <input class="tb-input thr-out-search" id="thrOutSearch" type="search" placeholder="搜索章节 / 书签" />
+            <div class="thr-out-actions">
+              <button class="tb-btn" id="thrAddBookmark">＋ 在当前位置加书签</button>
+            </div>
+          </div>
+          <div class="thr-out-list" id="thrOutList"></div>
+        </aside>
+        <div class="thr-stage" id="thrStage">
+          <div class="thr-scroll" id="thrScroll"><div class="thr-pages" id="thrPages"></div></div>
+        </div>
+        <aside class="thr-side" id="thrSide">
+          <div class="thr-tabs">
+            <div class="thr-tab active" data-tab="analysis">解析结果</div>
+            <div class="thr-tab" data-tab="chat">AI 对话</div>
+          </div>
+          <div class="thr-pane" data-pane="analysis">
+            <div class="thr-note-cmds">
+              <button class="tb-btn" id="thrDigest">⚡ 本章速读</button>
+              <button class="tb-btn" id="thrReview">📝 综述条目</button>
+              <button class="tb-btn" id="thrDefense">🎤 答辩演练</button>
+              <button class="tb-btn" id="thrRebuild" title="重新读取 PDF 并识别章节（换过附件或想重来时用）">↻ 重建索引</button>
+            </div>
+            <div class="thr-fields" id="thrFields"></div>
+          </div>
+          <div class="thr-pane hidden" data-pane="chat">
+            <div class="thr-chat-list" id="thrChatList"></div>
+            <div class="thr-chat-foot">
+              <div class="thr-chat-opts">
+                <label><input type="checkbox" id="thrAttach" checked /> 附上本节正文</label>
+                <span>上下文</span>
+                <select id="thrBudget">${BUDGETS.map((b) => `<option value="${b.v}">${b.label}</option>`).join('')}</select>
+                <button class="tb-btn ghost" id="thrClearChat" style="padding:1px 6px">清空对话</button>
+              </div>
+              <div class="thr-input-row">
+                <textarea class="thr-input" id="thrInput" placeholder="问关于这篇学位论文的问题…（选中正文可自动引用；回车发送，Shift+回车换行）"></textarea>
+                <button class="thr-send" id="thrSend">发送</button>
+              </div>
+            </div>
+          </div>
+        </aside>
+        <aside class="thr-note" id="thrNotePane">
+          <div class="thr-note-head"><span>笔记</span><span class="sp"></span>
+            <button class="tb-btn ghost" id="thrNotePreview" style="padding:1px 6px">预览</button>
+            <button class="tb-btn ghost" id="thrNoteExport" style="padding:1px 6px">导出 .md</button>
+          </div>
+          <div class="thr-note-body" id="thrNoteBody">
+            <textarea class="thr-md" id="thrMd" placeholder="读到这里想到什么就写下来。AI 生成的「本章速读 / 综述条目 / 答辩演练」也会追加到这里。"></textarea>
+            <div class="thr-md-preview hidden" id="thrMdPreview"></div>
+          </div>
+        </aside>
+      </div>
+      <div class="thr-selbar" id="thrSelbar">
+        <button id="thrSelAsk">用这段提问</button>
+        <button id="thrSelQuote">加入素材库</button>
+        <button id="thrSelTask">追加到笔记</button>
+      </div>
+    `;
+    document.body.appendChild(el);
+    bindReader();
+  }
+
+  // ==================== 阅读器：打开 / 关闭 ====================
+
+  async function openReader(id) {
+    buildReaderDom();
+    const rec = S.items.find((x) => x.id === id) || await api(`/api/theses/${id}`).catch(() => null);
+    if (!rec) { toast('论文不存在', true); return; }
+    R.id = id;
+    R.record = rec;
+    R.outline = [];
+    R.page = Math.max(1, Number(rec.lastPage) || 1);
+    R.chat = [];
+    R.note = '';
+    R.noteLoaded = false;
+    R.tab = 'analysis';
+    R.noteMode = false;
+    $('#thrName').textContent = rec.title || rec.originalName || '未命名';
+    $('#thrPageTotal').textContent = String(rec.numPages || 0);
+    $('#thr').classList.remove('hidden', 'note-mode');
+    switchTab('analysis');
+    renderFields();
+    renderChat();
+    await loadModelChoices();
+    $('#thrModelSlot').innerHTML = modelSelectHtml('thrModel');
+    S.modelChoices.find((m) => m.id === $('#thrModel')?.value)?.active;
+    try { $('#thrBudget').value = String(readJson(LS.budget, 40000)); } catch (_) { /* ignore */ }
+    $('#thrAttach').checked = readJson(LS.attach, true) !== false;
+
+    // 书签栏 + 对话记录先出来，PDF 与索引并行加载
+    await Promise.all([loadOutline(), loadChatHistory(), loadQuotes()]);
+    try {
+      await loadDoc();
+      await buildPages();
+      goPage(R.page, false);
+      updateHere();
+    } catch (err) {
+      $('#thrPages').innerHTML = `<div class="th-out-empty">PDF 打开失败：${esc(err.message)}</div>`;
+    }
+  }
+
+  function closeReader() {
+    R.observer?.disconnect();
+    R.observer = null;
+    R.doc?.destroy?.().catch?.(() => {});
+    R.doc = null;
+    $('#thr')?.classList.add('hidden');
+    $('#thr')?.classList.remove('note-mode');
+    $('#thrSelbar').style.display = 'none';
+    // 关之前把还在防抖队列里的东西落盘，避免「刚写的笔记 / 刚翻到的页」丢掉
+    if (R.id) {
+      clearTimeout(R.noteTimer);
+      saveNote();
+      saveReadPos(true);
+    }
+  }
+
+  // ==================== 阅读器：PDF ====================
+
+  let pdfjsPromise = null;
+  function loadPdfJs() {
+    if (window.pdfjsLib) {
+      if (!window.pdfjsLib.GlobalWorkerOptions.workerSrc) window.pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.min.js';
+      return Promise.resolve(window.pdfjsLib);
+    }
+    if (!pdfjsPromise) {
+      pdfjsPromise = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = '/vendor/pdf.min.js';
+        s.onload = () => {
+          const lib = window.pdfjsLib;
+          if (!lib) { reject(new Error('pdf.js 未正确加载')); return; }
+          lib.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.min.js';
+          resolve(lib);
+        };
+        s.onerror = () => reject(new Error('pdf.js 加载失败'));
+        document.head.appendChild(s);
+      });
+    }
+    return pdfjsPromise;
+  }
+
+  async function loadDoc() {
+    const rec = R.record;
+    if (!rec?.filename) throw new Error('这篇还没有上传 PDF 附件');
+    const lib = await loadPdfJs();
+    const url = `/uploads/${encodeURIComponent(rec.filename)}`;
+    R.doc = await lib.getDocument({ url }).promise;
+    R.numPages = R.doc.numPages || rec.numPages || 0;
+    $('#thrPageTotal').textContent = String(R.numPages);
+  }
+
+  async function buildPages() {
+    const wrap = $('#thrPages');
+    wrap.innerHTML = '';
+    // 清空容器会把 scrollTop 归零并触发一次 scroll —— 那一刻 R.doc 已是新文档、
+    // 但页高还是上一轮的值，按滚动位置推算会把页码算成 1 并落库（「回到上次位置」因此失效）。
+    // 把 pageH 归零，currentVisiblePage() 就会在重建期间直接返回当前页码、不误判。
+    R.pageH = 0;
+    const first = await R.doc.getPage(1);
+    const base = first.getViewport({ scale: 1 });
+    const scroll = $('#thrScroll');
+    R.scale = Math.min(2.6, Math.max(0.5, (scroll.clientWidth - 44) / base.width));
+    const vp = first.getViewport({ scale: R.scale });
+    R.pageW = vp.width;
+    R.pageH = vp.height;
+    const frag = document.createDocumentFragment();
+    for (let i = 1; i <= R.numPages; i += 1) {
+      const el = document.createElement('div');
+      el.className = 'thr-page placeholder';
+      el.dataset.page = String(i);
+      el.style.width = `${R.pageW}px`;
+      el.style.height = `${R.pageH}px`;
+      frag.appendChild(el);
+    }
+    wrap.appendChild(frag);
+    observePages();
+  }
+
+  function observePages() {
+    R.observer?.disconnect();
+    const root = $('#thrScroll');
+    R.observer = new IntersectionObserver((entries) => {
+      for (const e of entries) if (e.isIntersecting) renderPage(Number(e.target.dataset.page));
+    }, { root, rootMargin: '900px 0px' });
+    $$('.thr-page', $('#thrPages')).forEach((el) => R.observer.observe(el));
+  }
+
+  async function renderPage(n) {
+    const el = $(`.thr-page[data-page="${n}"]`);
+    if (!el || el.dataset.done === '1' || el.dataset.busy === '1') return;
+    el.dataset.busy = '1';
+    try {
+      const page = await R.doc.getPage(n);
+      const vp = page.getViewport({ scale: R.scale });
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(vp.width * dpr);
+      canvas.height = Math.floor(vp.height * dpr);
+      canvas.style.width = `${vp.width}px`;
+      canvas.style.height = `${vp.height}px`;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      el.innerHTML = '';
+      el.appendChild(canvas);
+      const no = document.createElement('div');
+      no.className = 'thr-pgno';
+      no.textContent = String(n);
+      el.appendChild(no);
+      el.classList.remove('placeholder');
+      el.dataset.done = '1';
+    } catch (_) { /* 单页渲染失败不影响其它页 */ }
+    el.dataset.busy = '';
+  }
+
+  async function rebuildPages() {
+    $$('.thr-page', $('#thrPages')).forEach((el) => {
+      el.dataset.done = '';
+      el.innerHTML = '';
+      el.classList.add('placeholder');
+      el.style.width = `${R.pageW}px`;
+      el.style.height = `${R.pageH}px`;
+    });
+    observePages();
+  }
+
+  function currentVisiblePage() {
+    const scroll = $('#thrScroll');
+    if (!scroll || !R.pageH) return R.page;
+    const mid = scroll.scrollTop + scroll.clientHeight / 2;
+    const n = Math.floor(mid / (R.pageH + 14)) + 1;
+    return Math.min(R.numPages || 1, Math.max(1, n));
+  }
+
+  function goPage(n, smooth = true) {
+    const scroll = $('#thrScroll');
+    const target = Math.min(R.numPages || 1, Math.max(1, Number(n) || 1));
+    const top = Math.max(0, (target - 1) * (R.pageH + 14) + 14 - 8);
+    if (smooth) scroll.scrollTo({ top, behavior: 'auto' });
+    else scroll.scrollTop = top;
+    R.page = target;
+    $('#thrPageInput').value = String(target);
+    updateHere();
+    highlightOutline();
+    saveReadPos();
+  }
+
+  async function setScale(next) {
+    R.scale = Math.min(3, Math.max(0.4, next));
+    const first = await R.doc.getPage(1);
+    const vp = first.getViewport({ scale: R.scale });
+    R.pageW = vp.width;
+    R.pageH = vp.height;
+    await rebuildPages();
+    goPage(R.page, false);
+  }
+
+  function updateHere() {
+    const ch = R.outline.find((c) => c.page <= R.page && R.page <= c.endPage);
+    // 取最深层级的那个（子节比章更精确）
+    const deep = R.outline.filter((c) => c.page <= R.page && R.page <= c.endPage)
+      .sort((a, b) => (b.level || 1) - (a.level || 1))[0] || ch;
+    $('#thrHere').innerHTML = `第 <b>${R.page}</b> 页${deep ? ` · <b>${esc(deep.title)}</b>` : ''}`;
+    $('#thrPageInput').value = String(R.page);
+  }
+
+  function saveReadPos(immediate) {
+    clearTimeout(R.saveTimer);
+    const run = () => {
+      if (!R.id) return;
+      api(`/api/theses/${R.id}`, { method: 'PATCH', body: { readPage: R.page, lastPage: R.page } })
+        .then((updated) => {
+          const idx = S.items.findIndex((x) => x.id === R.id);
+          if (idx >= 0 && updated) S.items[idx] = { ...S.items[idx], ...updated };
+        })
+        .catch(() => { /* 位置记不上不是大事 */ });
+    };
+    if (immediate) run();
+    else R.saveTimer = setTimeout(run, 900);
+  }
+
+  // ==================== 阅读器：书签栏 ====================
+
+  async function loadOutline() {
+    try {
+      const data = await api(`/api/theses/${R.id}/outline`);
+      R.outline = data.items || [];
+      R.outlineSource = data.source || '';
+      if (!R.outline.length) {
+        // 还没有索引：后台建一次（首次会慢几秒），建好再刷新书签栏
+        renderOutline('正在识别章节结构…');
+        streamPost(`/api/theses/${R.id}/index`, {}, (ev) => {
+          if (ev.message) renderOutline(ev.message);
+          if (ev.error) renderOutline(`章节识别失败：${ev.error}`);
+          if (ev.done) loadOutline();
+        }).catch(() => {});
+        return;
+      }
+    } catch (err) {
+      R.outline = [];
+      renderOutline(err.message);
+      return;
+    }
+    renderOutline();
+  }
+
+  function bookmarks() {
+    return Array.isArray(R.record?.bookmarks) ? R.record.bookmarks : [];
+  }
+
+  function renderOutline(placeholder) {
+    const box = $('#thrOutList');
+    if (!box) return;
+    if (placeholder) { box.innerHTML = `<div class="thr-out-empty">${esc(placeholder)}</div>`; return; }
+    const q = ($('#thrOutSearch')?.value || '').trim().toLowerCase();
+    const marks = bookmarks().slice().sort((a, b) => a.page - b.page);
+    const srcTip = { bookmark: '来自 PDF 内嵌书签', toc: '来自目录页', heading: '由标题推断', fallback: '未识别到章节，按每 10 页分组' }[R.outlineSource] || '';
+    const parts = [];
+    if (marks.length) {
+      parts.push('<div class="thr-out-group">我的书签</div>');
+      for (const b of marks) {
+        if (q && !String(b.note || '').toLowerCase().includes(q)) continue;
+        parts.push(`<div class="thr-out-item" data-page="${b.page}" data-bm="${esc(b.id)}">
+          <span class="t">${esc(b.note || `第 ${b.page} 页`)}</span>
+          <span class="p">${b.page}</span>
+          <button class="del" title="删除书签">✕</button></div>`);
+      }
+    }
+    parts.push(`<div class="thr-out-group">章节目录${srcTip ? ` · ${esc(srcTip)}` : ''}</div>`);
+    const items = R.outline.filter((c) => !q || String(c.title).toLowerCase().includes(q));
+    if (!items.length) {
+      parts.push(`<div class="thr-out-empty">${R.outline.length ? '没有匹配的章节' : '尚未识别到章节。点上方「＋ 在当前位置加书签」也能自己标。'}</div>`);
+    }
+    for (const c of items) {
+      parts.push(`<div class="thr-out-item lv${c.level || 1}" data-page="${c.page}">
+        <span class="t" title="${esc(c.title)}">${esc(c.title)}</span>
+        <span class="p">${c.page}</span></div>`);
+    }
+    box.innerHTML = parts.join('');
+    highlightOutline();
+  }
+
+  function highlightOutline() {
+    const box = $('#thrOutList');
+    if (!box) return;
+    let best = null;
+    for (const el of $$('.thr-out-item[data-page]', box)) {
+      const p = Number(el.dataset.page);
+      el.classList.remove('active');
+      if (p <= R.page && (!best || p >= Number(best.dataset.page))) best = el;
+    }
+    if (best) {
+      best.classList.add('active');
+      const list = $('#thrOutList');
+      const top = best.offsetTop;
+      if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - 40) {
+        list.scrollTop = Math.max(0, top - list.clientHeight / 2);
+      }
+    }
+  }
+
+  /**
+   * 轻量文本输入弹窗。
+   * 刻意不用 window.prompt：Electron 的渲染进程里 prompt 被禁用（调用会直接抛错），
+   * 打包版点「加书签」就会炸；换成自绘弹窗后浏览器 / 桌面版行为一致，也能被自动化驱动。
+   * @returns {Promise<string|null>} 取消返回 null
+   */
+  function askText({ title = '输入', hint = '', value = '', placeholder = '' } = {}) {
+    return new Promise((resolve) => {
+      let el = $('#thAsk');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'thAsk';
+        el.className = 'th-modal hidden';
+        el.innerHTML = `<div class="th-modal-box th-ask-box">
+          <div class="th-modal-head"><h3 id="thAskTitle">输入</h3></div>
+          <div class="th-modal-body">
+            <div class="th-ask-hint" id="thAskHint"></div>
+            <input class="th-ask-input" id="thAskInput" />
+          </div>
+          <div class="th-modal-foot">
+            <button class="tb-btn" id="thAskCancel">取消</button>
+            <button class="tb-btn accent" id="thAskOk">确定</button>
+          </div>
+        </div>`;
+        document.body.appendChild(el);
+      }
+      const input = $('#thAskInput');
+      $('#thAskTitle').textContent = title;
+      $('#thAskHint').textContent = hint;
+      input.value = value || '';
+      input.placeholder = placeholder || '';
+      el.classList.remove('hidden');
+      setTimeout(() => { input.focus(); input.select(); }, 30);
+
+      const cleanup = () => {
+        el.classList.add('hidden');
+        input.removeEventListener('keydown', onKey);
+        $('#thAskOk').removeEventListener('click', done);
+        $('#thAskCancel').removeEventListener('click', cancel);
+      };
+      const done = () => { const v = input.value; cleanup(); resolve(v); };
+      const cancel = () => { cleanup(); resolve(null); };
+      const onKey = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); done(); }
+        if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+      };
+      input.addEventListener('keydown', onKey);
+      $('#thAskOk').addEventListener('click', done);
+      $('#thAskCancel').addEventListener('click', cancel);
+    });
+  }
+
+  // ==================== 书签（我的书签） ====================
+
+  async function addBookmark() {
+    const ch = R.outline.filter((c) => c.page <= R.page && R.page <= c.endPage)
+      .sort((a, b) => (b.level || 1) - (a.level || 1))[0];
+    const fallback = ch?.title || `第 ${R.page} 页`;
+    const note = await askText({
+      title: '加书签',
+      hint: `第 ${R.page} 页${ch?.title ? ` · ${ch.title}` : ''}（留空就用章节名）`,
+      placeholder: fallback,
+    });
+    if (note === null) return;
+    const list = bookmarks().slice();
+    list.push({ id: `b${Date.now().toString(36)}`, page: R.page, note: (note || '').trim() || fallback });
+    const updated = await api(`/api/theses/${R.id}`, { method: 'PATCH', body: { bookmarks: list } });
+    R.record = updated;
+    const idx = S.items.findIndex((x) => x.id === R.id);
+    if (idx >= 0) S.items[idx] = { ...S.items[idx], ...updated };
+    renderOutline();
+  }
+
+  async function removeBookmark(id) {
+    const list = bookmarks().filter((b) => b.id !== id);
+    const updated = await api(`/api/theses/${R.id}`, { method: 'PATCH', body: { bookmarks: list } });
+    R.record = updated;
+    renderOutline();
+  }
+
+  // ==================== 阅读器：字段面板 ====================
+
+  function renderFields() {
+    const box = $('#thrFields');
+    if (!box) return;
+    const it = R.record || {};
+    const rows = ['title', 'authors', 'school', 'degreeType', 'year', 'major', 'supervisor', 'keywords',
+      'abstractPoints', 'summary', 'researchQuestion', 'theory', 'method', 'dataSource', 'conclusion',
+      'innovation', 'limitation', 'value', 'structure', 'dataOpen',
+      'myThoughts', 'referenceValue'];
+    const userFields = new Set(['myThoughts', 'referenceValue']);
+    box.innerHTML = rows.map((k) => {
+      const v = String(it[k] || '');
+      return `<div class="thr-field">
+        <div class="thr-field-label">${esc(LABELS[k] || k)}${userFields.has(k) ? ' <span class="th-muted">（我填的）</span>' : ''}</div>
+        <div class="thr-field-value${v ? '' : ' th-muted'}" contenteditable="true" data-f="${esc(k)}">${v ? esc(v) : '（空，可点击填写）'}</div>
+      </div>`;
+    }).join('') + `<div class="thr-field">
+        <div class="thr-field-label">AI 建议评级</div>
+        <div>${it.suggestedRating ? `${esc(it.suggestedRating)} / 5　<span class="th-muted">${esc(it.ratingReason || '')}</span>` : '<span class="th-muted">暂无</span>'}</div>
+      </div>`;
+  }
+
+  async function saveField(field, value) {
+    const patch = { [field]: value };
+    const updated = await patchItem(R.id, patch);
+    if (updated) {
+      R.record = updated;
+      const idx = S.items.findIndex((x) => x.id === R.id);
+      if (idx >= 0) S.items[idx] = updated;
+    }
+  }
+
+  // ==================== 阅读器：标签页 / 笔记模式 ====================
+
+  function switchTab(name) {
+    R.tab = name;
+    $$('.thr-tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+    $$('.thr-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== name));
+    if (name === 'chat') setTimeout(() => $('#thrInput')?.focus(), 30);
+  }
+
+  async function toggleNoteMode() {
+    R.noteMode = !R.noteMode;
+    $('#thr').classList.toggle('note-mode', R.noteMode);
+    if (R.noteMode) {
+      switchTab('chat');
+      $('#thrStage').style.flex = '1';
+      await ensureNote();
+    }
+  }
+
+  async function ensureNote() {
+    if (R.noteLoaded) return;
+    R.noteLoaded = true;
+    try {
+      const data = await api(`/api/paper-notes/${R.id}`);
+      R.note = data.md || '';
+    } catch (_) { R.note = ''; }
+    const md = $('#thrMd');
+    if (md && !md.value) md.value = R.note;
+  }
+
+  async function saveNote() {
+    const md = $('#thrMd');
+    if (!md) return;
+    R.note = md.value;
+    try { await api(`/api/paper-notes/${R.id}`, { method: 'PUT', body: { md: R.note } }); } catch (_) { /* ignore */ }
+  }
+
+  function appendNote(text, heading) {
+    const md = $('#thrMd');
+    if (!md) return;
+    const block = `${md.value.trim() ? '\n\n' : ''}${heading ? `## ${heading}\n\n` : ''}${text}`;
+    md.value = `${md.value}${block}`;
+    saveNote();
+    toast('已追加到笔记');
+  }
+
+  // ==================== 阅读器：AI 对话 ====================
+
+  function renderChat() {
+    const box = $('#thrChatList');
+    if (!box) return;
+    if (!R.chat.length) {
+      box.innerHTML = `<div class="thr-msg system">问关于这篇学位论文的问题即可。我会先检索相关章节再作答，并在句末标出【章节 · p.页码】——点一下可以跳到那一页。也可以直接问「这章的方法能不能用在我的第 4 章」。</div>`;
+      return;
+    }
+    box.innerHTML = R.chat.map((m) => {
+      if (m.role === 'system') return `<div class="thr-msg system">${esc(m.content)}</div>`;
+      if (m.role === 'user') return `<div class="thr-msg user">${esc(m.content)}</div>`;
+      if (m.error) return `<div class="thr-msg error">${esc(m.content)}</div>`;
+      const stats = m.stats
+        ? `<div class="th-muted" style="font-size:11px;margin-top:5px">本次上下文 ${m.stats.usedChars} 字 / 预算 ${m.stats.budgetChars} 字 · 命中 ${m.stats.hitCount} 段${m.stats.truncated ? '（已截断）' : ''} · 回到 p.${(m.stats.hitPages || [])[0] || '-'}</div>`
+        : '';
+      return `<div class="thr-msg assistant">${markdown(m.content)}${stats}</div>`;
+    }).join('');
+    box.querySelectorAll('.src').forEach((el) => {
+      el.addEventListener('click', () => goPage(Number(el.dataset.page)));
+    });
+    box.scrollTop = box.scrollHeight;
+  }
+
+  async function loadChatHistory() {
+    try {
+      const data = await api(`/api/paper-chat/${R.id}`);
+      R.chat = (data.messages || []).map((m) => ({ role: m.role, content: m.content }));
+    } catch (_) { R.chat = []; }
+    renderChat();
+  }
+
+  async function persistChat() {
+    try {
+      await api(`/api/paper-chat/${R.id}`, {
+        method: 'PUT',
+        body: { messages: R.chat.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ role: m.role, content: m.content })) },
+      });
+    } catch (_) { /* ignore */ }
+  }
+
+  let streaming = false;
+
+  async function sendChat() {
+    const input = $('#thrInput');
+    const text = String(input?.value || '').trim();
+    if (!text || streaming) return;
+    if (!R.record?.filename) { toast('这篇还没有上传 PDF 附件', true); return; }
+    input.value = '';
+    const history = R.chat.filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({ role: m.role, content: m.content }));
+    R.chat.push({ role: 'user', content: text });
+    const holder = { role: 'assistant', content: '' };
+    R.chat.push(holder);
+    renderChat();
+    streaming = true;
+    $('#thrSend').disabled = true;
+    const paint = () => { clearTimeout(R.renderTimer); R.renderTimer = setTimeout(renderChat, 70); };
+
+    try {
+      await streamPost(`/api/theses/${R.id}/chat`, {
+        query: text,
+        page: R.page,
+        budget: Number($('#thrBudget')?.value) || 40000,
+        attachSection: !!$('#thrAttach')?.checked,
+        profileId: pickedModel(),
+        history,
+      }, (ev) => {
+        if (ev.stage) { holder.content = ''; R.chat.splice(R.chat.length - 1, 0, { role: 'system', content: ev.message || '正在准备内容…' }); renderChat(); return; }
+        if (ev.stats) { holder.stats = ev.stats; return; }
+        if (ev.error) { holder.error = true; holder.content = ev.error; renderChat(); return; }
+        if (ev.delta) {
+          // 第一个 delta 到来时把「准备中」的系统提示去掉
+          const lastSys = R.chat.findIndex((m) => m.role === 'system');
+          if (lastSys >= 0) R.chat.splice(lastSys, 1);
+          holder.content += ev.delta;
+          paint();
+        }
+      });
+      if (!holder.content) { holder.error = true; holder.content = 'AI 没有返回内容。可在「AI 设置」里换一个模型再试。'; }
+    } catch (err) {
+      holder.error = true;
+      holder.content = err.message;
+    }
+    clearTimeout(R.renderTimer);
+    renderChat();
+    streaming = false;
+    $('#thrSend').disabled = false;
+    persistChat();
+  }
+
+  async function runTask(task, opts = {}) {
+    if (streaming) { toast('上一件事还没做完', true); return; }
+    if (!R.record?.filename) { toast('这篇还没有上传 PDF 附件', true); return; }
+    const labelMap = { 'chapter-digest': '本章速读', 'review-entry': '综述条目', 'defense': '答辩问答演练' };
+    const label = labelMap[task] || task;
+    const needNote = opts.toNote !== false;
+    switchTab('chat');
+    R.chat.push({ role: 'system', content: `正在生成「${label}」…` });
+    renderChat();
+    let text = '';
+    streaming = true;
+    $('#thrSend').disabled = true;
+    const paint = () => { clearTimeout(R.renderTimer); R.renderTimer = setTimeout(renderChat, 70); };
+    const holder = { role: 'assistant', content: '' };
+    R.chat.push(holder);
+    try {
+      await streamPost(`/api/theses/${R.id}/summarize`, {
+        task, page: R.page, chapterId: opts.chapterId || '', profileId: pickedModel(),
+      }, (ev) => {
+        if (ev.stage) return;
+        if (ev.error) { holder.error = true; holder.content = ev.error; renderChat(); return; }
+        if (ev.delta) {
+          const i = R.chat.findIndex((m) => m.role === 'system' && String(m.content).startsWith('正在生成'));
+          if (i >= 0) R.chat.splice(i, 1);
+          text += ev.delta;
+          holder.content = text;
+          paint();
+        }
+      });
+      if (!text) { holder.error = true; holder.content = 'AI 没有返回内容。'; }
+    } catch (err) {
+      holder.error = true;
+      holder.content = err.message;
+    }
+    clearTimeout(R.renderTimer);
+    renderChat();
+    streaming = false;
+    $('#thrSend').disabled = false;
+    if (text && needNote) {
+      await ensureNote();
+      appendNote(text, label);
+    }
+    persistChat();
+  }
+
+  // ==================== 阅读器：选中文本 ====================
+
+  function selectionText() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return '';
+    const text = String(sel.toString() || '').trim();
+    if (text.length < 2) return '';
+    // 只认阅读器里的选区（PDF 文字层 / 对话内容），避免误触其它区域
+    const node = sel.anchorNode;
+    if (!(node instanceof Node) || !$('#thr')?.contains(node)) return '';
+    return text.slice(0, 4000);
+  }
+
+  function showSelbar(x, y) {
+    const bar = $('#thrSelbar');
+    if (!bar) return;
+    bar.style.display = 'flex';
+    const w = 260;
+    bar.style.left = `${Math.min(window.innerWidth - w - 10, Math.max(10, x))}px`;
+    bar.style.top = `${Math.max(10, y - 40)}px`;
+  }
+
+  function hideSelbar() { const b = $('#thrSelbar'); if (b) b.style.display = 'none'; }
+
+  // ==================== 阅读器：事件绑定 ====================
+
+  function bindReader() {
+    $('#thrBack')?.addEventListener('click', closeReader);
+    $('#thrOutlineToggle')?.addEventListener('click', () => $('#thrOutline')?.classList.toggle('collapsed'));
+    $('#thrNoteMode')?.addEventListener('click', toggleNoteMode);
+    $('#thrQuotesBtn')?.addEventListener('click', () => openQuotesDrawer());
+    $('#thrZoomIn')?.addEventListener('click', () => setScale(R.scale + 0.15));
+    $('#thrZoomOut')?.addEventListener('click', () => setScale(R.scale - 0.15));
+    $('#thrFit')?.addEventListener('click', async () => {
+      const first = await R.doc.getPage(1);
+      const base = first.getViewport({ scale: 1 });
+      await setScale((($('#thrScroll').clientWidth - 44) / base.width));
+    });
+
+    $('#thrPageInput')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); goPage(Number(e.target.value)); e.target.blur(); }
+    });
+
+    $('#thrScroll')?.addEventListener('scroll', () => {
+      if (R.scrollRaf) return;
+      R.scrollRaf = requestAnimationFrame(() => {
+        R.scrollRaf = 0;
+        // 关闭阅读器时容器被隐藏，scrollTop 会被浏览器归零并触发一次 scroll；
+        // 若不拦住，这里会把页码记成 1，900ms 后覆盖掉刚存好的「读到第几页」。
+        if (!R.doc) return;
+        const n = currentVisiblePage();
+        if (n !== R.page) {
+          R.page = n;
+          updateHere();
+          highlightOutline();
+          saveReadPos();
+        }
+      });
+    }, { passive: true });
+
+    $('#thrScroll')?.addEventListener('wheel', (e) => {
+      // Ctrl+滚轮 = 缩放，普通滚动交给浏览器
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      setScale(R.scale + (e.deltaY < 0 ? 0.1 : -0.1));
+    }, { passive: false });
+
+    // 书签栏
+    $('#thrOutList')?.addEventListener('click', (e) => {
+      const del = e.target.closest('.del');
+      if (del) { e.stopPropagation(); removeBookmark(del.closest('.thr-out-item').dataset.bm); return; }
+      const item = e.target.closest('.thr-out-item');
+      if (item?.dataset.page) goPage(Number(item.dataset.page));
+    });
+    $('#thrOutSearch')?.addEventListener('input', () => renderOutline());
+    $('#thrAddBookmark')?.addEventListener('click', addBookmark);
+
+    // 标签页 / 任务
+    $$('.thr-tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
+    $('#thrDigest')?.addEventListener('click', () => runTask('chapter-digest'));
+    $('#thrReview')?.addEventListener('click', () => runTask('review-entry'));
+    $('#thrDefense')?.addEventListener('click', () => runTask('defense'));
+    $('#thrRebuild')?.addEventListener('click', async () => {
+      if (!confirm('重新读取 PDF 并识别章节结构？已建的索引会被覆盖（笔记与对话不受影响）。')) return;
+      toast('正在重建索引…');
+      await streamPost(`/api/theses/${R.id}/index`, { force: true }, (ev) => {
+        if (ev.message) $('#thrOutList').innerHTML = `<div class="thr-out-empty">${esc(ev.message)}</div>`;
+        if (ev.error) toast(ev.error, true);
+      });
+      await loadOutline();
+      toast('索引已重建');
+    });
+
+    // 对话
+    $('#thrSend')?.addEventListener('click', sendChat);
+    $('#thrInput')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+    });
+    $('#thrBudget')?.addEventListener('change', (e) => writeJson(LS.budget, Number(e.target.value)));
+    $('#thrAttach')?.addEventListener('change', (e) => writeJson(LS.attach, e.target.checked));
+    $('#thrClearChat')?.addEventListener('click', async () => {
+      if (!confirm('清空这篇论文的 AI 对话记录？')) return;
+      R.chat = [];
+      renderChat();
+      try { await api(`/api/paper-chat/${R.id}`, { method: 'DELETE' }); } catch (_) { /* ignore */ }
+    });
+    $('#thrChatList')?.addEventListener('click', (e) => {
+      const src = e.target.closest('.src');
+      if (src) goPage(Number(src.dataset.page));
+    });
+
+    // 字段编辑
+    $('#thrFields')?.addEventListener('focusout', async (e) => {
+      const cell = e.target.closest?.('.thr-field-value');
+      if (!cell) return;
+      const field = cell.dataset.f;
+      const value = String(cell.innerText || '').trim();
+      if (String(R.record?.[field] || '') === value) return;
+      await saveField(field, value);
+    });
+
+    // 笔记
+    // 笔记用独立定时器：和「记录阅读位置」共用同一个槽时，滚动会把防抖中的
+    // 笔记保存取消掉（字就丢了），这是真会丢数据的坑。
+    $('#thrMd')?.addEventListener('input', () => { clearTimeout(R.noteTimer); R.noteTimer = setTimeout(saveNote, 1200); });
+    $('#thrMd')?.addEventListener('blur', saveNote);
+    $('#thrNotePreview')?.addEventListener('click', () => {
+      const prev = $('#thrMdPreview');
+      const md = $('#thrMd');
+      const showPreview = prev.classList.contains('hidden');
+      if (showPreview) {
+        prev.innerHTML = markdown(md.value);
+        prev.classList.remove('hidden');
+        md.classList.add('hidden');
+      } else {
+        prev.classList.add('hidden');
+        md.classList.remove('hidden');
+      }
+    });
+    $('#thrNoteExport')?.addEventListener('click', () => {
+      const name = (R.record?.title || '学位论文笔记').replace(/[\\/:*?"<>|]/g, '_');
+      download(`${name}-笔记.md`, $('#thrMd')?.value || '');
+    });
+
+    // 划词
+    $('#thr')?.addEventListener('mouseup', () => {
+      setTimeout(() => {
+        const text = selectionText();
+        if (!text) { hideSelbar(); return; }
+        const sel = window.getSelection();
+        const rect = sel.getRangeAt(0).getBoundingClientRect();
+        showSelbar(rect.left, rect.top);
+      }, 10);
+    });
+    $('#thr')?.addEventListener('mousedown', (e) => {
+      if (!e.target.closest('#thrSelbar')) hideSelbar();
+    });
+
+    $('#thrSelAsk')?.addEventListener('click', () => {
+      const text = selectionText();
+      hideSelbar();
+      if (!text) return;
+      switchTab('chat');
+      const input = $('#thrInput');
+      input.value = `关于这段（第 ${R.page} 页）：\n“${text}”\n\n`;
+      input.focus();
+    });
+    $('#thrSelQuote')?.addEventListener('click', async () => {
+      const text = selectionText();
+      hideSelbar();
+      if (!text) return;
+      await quoteCurrent(text);
+    });
+    $('#thrSelTask')?.addEventListener('click', async () => {
+      const text = selectionText();
+      hideSelbar();
+      if (!text) return;
+      await ensureNote();
+      appendNote(`> ${text}\n\n—— 第 ${R.page} 页`, '摘录');
+      switchTab('chat');
+      $('#thr').classList.add('note-mode');
+      R.noteMode = true;
+    });
+  }
+
+  // ==================== 素材库 ====================
+
+  async function quoteCurrent(text) {
+    const ch = R.outline.filter((c) => c.page <= R.page && R.page <= c.endPage)
+      .sort((a, b) => (b.level || 1) - (a.level || 1))[0];
+    try {
+      await api('/api/thesis-quotes', {
+        method: 'POST',
+        body: {
+          thesisId: R.id,
+          text,
+          page: R.page,
+          chapterTitle: ch?.title || '',
+          source: 'reader',
+        },
+      });
+      await loadQuotes();
+      toast('已加入素材库');
+    } catch (err) { toast(err.message, true); }
+  }
+
+  async function loadQuotes() {
+    try { S.quotes = (await api('/api/thesis-quotes')).filter((q) => q.thesisId === R.id); }
+    catch (_) { S.quotes = []; }
+  }
+
+  function openQuotesDrawer() {
+    let el = $('#thQuotes');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'thQuotes';
+      el.className = 'th-quotes hidden';
+      el.innerHTML = `
+        <div class="th-quotes-head">
+          <b>📌 摘录素材库</b><span class="sp"></span>
+          <button class="tb-btn" id="thqExport">导出 Markdown</button>
+          <button class="tb-btn" id="thqClose">✕</button>
+        </div>
+        <div class="th-quotes-list" id="thqList"></div>`;
+      document.body.appendChild(el);
+      $('#thqClose').addEventListener('click', () => el.classList.add('hidden'));
+      $('#thqExport').addEventListener('click', () => { window.location.href = '/api/thesis-quotes/export'; });
+      $('#thqList').addEventListener('click', async (e) => {
+        const del = e.target.closest('[data-del]');
+        if (del) {
+          await api(`/api/thesis-quotes/${del.dataset.del}`, { method: 'DELETE' });
+          renderQuotes();
+          return;
+        }
+        const jump = e.target.closest('[data-jump]');
+        if (jump) {
+          const id = jump.dataset.jump;
+          const page = Number(jump.dataset.page) || 1;
+          if (R.id !== id) await openReader(id);
+          goPage(page);
+        }
+      });
+    }
+    el.classList.remove('hidden');
+    renderQuotes();
+  }
+
+  async function renderQuotes() {
+    const box = $('#thqList');
+    if (!box) return;
+    let list = [];
+    try { list = await api('/api/thesis-quotes'); } catch (_) { list = []; }
+    if (!list.length) {
+      box.innerHTML = '<div class="thr-out-empty">还没有摘录。在阅读器里选中正文 →「加入素材库」即可，摘录会自动带上章节与页码。</div>';
+      return;
+    }
+    const groups = new Map();
+    for (const q of list) {
+      const k = q.thesisTitle || '未命名';
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(q);
+    }
+    box.innerHTML = [...groups.entries()].map(([title, items]) => `
+      <div class="thr-out-group">${esc(title)}（${items.length}）</div>
+      ${items.map((q) => `<div class="th-quote">
+        <div class="th-quote-text">${esc(q.text)}</div>
+        <div class="th-quote-src">
+          <span class="link" data-jump="${esc(q.thesisId)}" data-page="${q.page}">${esc([q.chapterTitle, q.page ? `p.${q.page}` : ''].filter(Boolean).join(' · ') || '阅读器')}</span>
+          <span class="sp" style="flex:1"></span>
+          <button class="tb-btn ghost" data-del="${esc(q.id)}" style="padding:0 5px">删除</button>
+        </div>
+        ${q.note ? `<div class="th-quote-note">${esc(q.note)}</div>` : ''}
+      </div>`).join('')}
+    `).join('');
+  }
+
+  // ==================== 对比阅读 ====================
+
+  function openCompare() {
+    const ids = [...S.selected];
+    const preset = ids.length >= 2 ? ids : S.items.slice(0, 2).map((x) => x.id);
+    let el = $('#thCompare');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'thCompare';
+      el.className = 'th-modal hidden';
+      el.innerHTML = `<div class="th-modal-box">
+        <div class="th-modal-head"><h3>⇄ 对比阅读</h3><span class="sp"></span><span id="thCmpModel"></span><button class="tb-btn" id="thCmpClose">✕</button></div>
+        <div class="th-modal-body" id="thCmpBody"></div>
+        <div class="th-modal-foot"><button class="tb-btn" id="thCmpExport" disabled>导出 Markdown</button><button class="tb-btn accent" id="thCmpRun">开始对比</button></div>
+      </div>`;
+      document.body.appendChild(el);
+      $('#thCmpClose').addEventListener('click', () => el.classList.add('hidden'));
+      $('#thCmpExport').addEventListener('click', () => download('学位论文对比.md', $('#thCmpBody').innerText || ''));
+      $('#thCmpRun').addEventListener('click', runCompare);
+    }
+    el.classList.remove('hidden');
+    loadModelChoices().then(() => { $('#thCmpModel').innerHTML = modelSelectHtml('thCmpModel'); });
+    const chosen = new Set(preset);
+    $('#thCmpBody').innerHTML = `<p class="th-muted">勾选 2–5 篇（已解析出字段的效果最好），再点「开始对比」。</p>
+      ${S.items.map((it) => `<label class="pop-item" style="display:block;padding:5px 2px">
+        <input type="checkbox" data-cmp="${esc(it.id)}" ${chosen.has(it.id) ? 'checked' : ''} />
+        ${esc(it.title || it.originalName || '未命名')} <span class="th-muted">${esc(it.year || '')}</span></label>`).join('')}`;
+    $('#thCmpExport').disabled = true;
+  }
+
+  async function runCompare() {
+    const ids = $$('#thCmpBody input[data-cmp]').filter((i) => i.checked).map((i) => i.dataset.cmp);
+    if (ids.length < 2) { toast('至少选 2 篇', true); return; }
+    if (ids.length > 5) { toast('最多 5 篇', true); return; }
+    const body = $('#thCmpBody');
+    const btn = $('#thCmpRun');
+    btn.disabled = true;
+    let text = '';
+    body.innerHTML = '<p class="th-muted">正在生成对比表…</p>';
+    try {
+      const sel = $('#thCmpModel')?.value || '';
+      await streamPost('/api/theses/compare', { ids, profileId: sel }, (ev) => {
+        if (ev.error) { body.innerHTML = `<p style="color:var(--red)">${esc(ev.error)}</p>`; return; }
+        if (ev.delta) {
+          text += ev.delta;
+          clearTimeout(R.renderTimer);
+          R.renderTimer = setTimeout(() => { body.innerHTML = `<div class="md-render">${markdown(text)}</div>`; }, 90);
+        }
+      });
+      clearTimeout(R.renderTimer);
+      body.innerHTML = `<div class="md-render">${markdown(text || '（没有生成内容）')}</div>`;
+      $('#thCmpExport').disabled = !text;
+    } catch (err) {
+      body.innerHTML = `<p style="color:var(--red)">${esc(err.message)}</p>`;
+    }
+    btn.disabled = false;
+  }
+
+  // ==================== 我的大论文 ====================
+
+  async function openBigPaper() {
+    try { S.bigPaper = await api('/api/thesis-bigpaper'); } catch (_) { S.bigPaper = {}; }
+    let el = $('#thBig');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'thBig';
+      el.className = 'th-modal hidden';
+      el.innerHTML = `<div class="th-modal-box" style="width:min(620px,92vw)">
+        <div class="th-modal-head"><h3>🎯 我的大论文</h3><span class="sp"></span><button class="tb-btn" id="thBigClose">✕</button></div>
+        <div class="th-modal-body">
+          <p class="th-muted" style="margin-top:0">填好之后，AI 对话会自动带上这些信息，
+          于是你可以直接问「这篇的方法能不能用在我的第四章」。</p>
+          <div class="th-form-row"><label>题目</label><input id="thBigTitle" /></div>
+          <div class="th-form-row"><label>当前阶段</label><input id="thBigStage" placeholder="例如：第三章 研究设计写作中" /></div>
+          <div class="th-form-row"><label>框架</label><textarea id="thBigFramework" placeholder="1 绪论&#10;2 文献综述&#10;3 研究设计"></textarea></div>
+          <div class="th-form-row"><label>备注</label><input id="thBigNotes" placeholder="例如：数据还没收齐" /></div>
+        </div>
+        <div class="th-modal-foot"><button class="tb-btn accent" id="thBigSave">保存</button></div>
+      </div>`;
+      document.body.appendChild(el);
+      $('#thBigClose').addEventListener('click', () => el.classList.add('hidden'));
+      $('#thBigSave').addEventListener('click', async () => {
+        try {
+          S.bigPaper = await api('/api/thesis-bigpaper', {
+            method: 'PUT',
+            body: {
+              title: $('#thBigTitle').value,
+              stage: $('#thBigStage').value,
+              framework: $('#thBigFramework').value,
+              notes: $('#thBigNotes').value,
+            },
+          });
+          toast('已保存，下次提问会带上它');
+          el.classList.add('hidden');
+        } catch (err) { toast(err.message, true); }
+      });
+    }
+    el.classList.remove('hidden');
+    $('#thBigTitle').value = S.bigPaper.title || '';
+    $('#thBigStage').value = S.bigPaper.stage || '';
+    $('#thBigFramework').value = S.bigPaper.framework || '';
+    $('#thBigNotes').value = S.bigPaper.notes || '';
+  }
+
+  // ==================== 对外接口 ====================
+
+  async function mount() {
+    if (!S.mounted) {
+      S.mounted = true;
+      buildDom();
+      bindList();
+    }
+    try {
+      await refresh();
+      await loadModelChoices();
+    } catch (err) {
+      const wrap = $('#thWrap');
+      if (wrap) wrap.innerHTML = `<div class="th-empty">加载失败：${esc(err.message)}</div>`;
+    }
+  }
+
+  window.ThesisView = { mount, open: (id) => openReader(id) };
+})();

@@ -1,3 +1,107 @@
+## v1.19.0：新增「学位论文阅读」——长文档检索增强问答 + 章节书签栏（2026-09-24）
+
+方案文档见 `docs/学位论文阅读-方案.md`（含用户拍板的四个决定：进度自动算 / 评级手点 /
+支持分类 / 做对比阅读与关联大论文）。核心命题：**学位论文动辄十几万字，整本塞不进模型**，
+所以必须「先定位、再回答」。
+
+### 一、新增文件（后端）
+
+- **`src/thesisPdf.js`** —— 用 `unpdf` 按页取文本 + 读内嵌书签。
+  - `readThesisPdf(file)` → `{ pages:[{page,text}], totalPages, charCount }`；
+  - `readOutline(file)` → pdf.js `getDocumentProxy().getOutline()`，把 `dest` 解析成**真实页码**
+    （`getPageIndex(ref)` 拿到的是 0 基，返回时要 +1）。
+  > 踩坑：早期版本对 `dest` 的形态做了「对象 / 引用」两分支判断，但两个分支写法完全一样 ——
+  > 其实是同一个调用，删掉多余分支。
+- **`src/thesisOutline.js`** —— 章节识别，**三级兜底**：内嵌书签 → 目录页 → 标题正则。
+  - 产出 `[{title, page, level, endPage, children}]` 的目录树 + `source` 说明用了哪一级；
+  - `toTree()` 建树，`chapterAt(items, page)` 按页取所属章节（书签栏高亮与「你在第几章」都靠它）；
+  - 「我的书签」与自动目录**共用同一份数据**，所以书签栏只有一个渲染路径。
+  > 踩坑：目录页识别阈值一开始偏严（要求连续多行都像目录项），真实的跨页目录常常只有几行，
+  > 会漏掉；改成「出现『目录/Contents』字样即可开闸，之后按 4 分阈值计」。另外 `chapterAt`
+  > 对超出总页数的入参**返回最后一个章节**而不是 null（UI 上显示最后一章比显示「无」更有用）。
+- **`src/thesisIndex.js`** —— 分块 + 中文 2-gram BM25，**零新依赖、纯本地**。
+  - 按章节切 **700 字**块（带 80 字重叠），`tokenize()` 中文按 2-gram、拉丁按词；
+  - 纯停用字组成的 bigram（「的了」「是在」）丢弃；**2–6 字的短词整块再保留一份**，
+    提升术语精确命中的权重；
+  - `search(index, query, {topK})` 返回带页码与章节的命中段。
+  > 为什么不上向量库：中文 2-gram BM25 对「找章节、找概念、找原话」这类高频问法足够，
+  > 且不联网、不花钱、不需要额外依赖；embedding 钩子预留但默认关闭。
+- **`src/thesisContext.js`** —— 长上下文的组装核心。
+  - 送进模型的是四块：**档案卡 + 章节目录树（带页码）+ 当前位置章节正文 + BM25 命中段**，
+    再加最近 8 轮对话；
+  - 预算三档 `20k / 40k / 80k` 字，`stats` 回传「送了多少字、命中几段」给前端显示；
+  - `buildTaskPrompt()` 生成**本章速读 / 综述条目 / 答辩演练**三种任务提示词；
+    `buildCompareMessages()` 生成对比阅读的提示词；
+  - 提示词强制引用格式 **【章节标题 · p.页码】**，并要求「检索不到就直说没检索到」。
+  > 踩坑：`isLocalQuery()` 最初写的是「这段」，而用户实际会说「这**一**段」，指代词漏判 →
+  > 局部提问会走全文检索。已补全「这一页 / 这一节 / 这本」等说法。
+- **`src/thesisFields.js`** —— 字段清单：`THESIS_AI_FIELDS`（AI 读前 3 页填的 17 个）、
+  `THESIS_USER_FIELDS`（只由用户写的 `myThoughts` / `referenceValue`），以及抽取提示词。
+- **`src/thesisStore.js`** —— 独立数据文件 `theses.json` + 分类 + 索引缓存 + 素材库 + 大论文信息。
+  - **`PATCH_WHITELIST`**：白名单外的字段一律丢弃（`filePath` / `status` 这类只能服务端维护）。
+  - `patchThesis` 对 `bookmarks` 做结构校验（只留合法 `{id,page,note}`，页码取整、备注限 300 字）。
+  - `deleteThesis` 连带清索引与素材摘录。
+- **`src/thesisRoutes.js`**（通过 `registerThesisRoutes(app, ctx)` 注册，server.js 只加一行）——
+  `/api/theses` 系列共 30 条路由：记录增删改查、分类、附件上传、前 3 页解析、批量解析、
+  建索引、章节树、按页取文、问答（SSE）、速读 / 综述 / 答辩（SSE）、对比阅读（SSE）、
+  素材库、大论文信息、统计。
+
+### 二、新增文件（前端）
+
+- **`public/thesis.css`** —— 表格页 + 阅读器 + 书签栏 + 弹窗的独立样式，复用既有主题变量。
+- **`public/thesis.js`**（IIFE，对外只暴露 `window.ThesisView = { mount, open }`）——
+  - **表格页**：10 列默认显示，其余进「▦ 字段配置」；星级评分手点、进度条自动算、
+    就地编辑标题/作者/学校/我的思考/参考价值；分类筛选条、搜索、排序、批量解析 / 批量删除 / 批量改分类。
+  - **阅读器**：`pr` 那套阅读器**完全没有复用**（paper 模式零改动），这里是独立实现；
+    - 左侧书签栏（章节树 + 页码 + 滚动自动高亮 + 我的书签 + 搜索 + 添加）；
+    - 右侧只有**「解析结果」与「AI 对话」两个页签** —— 按要求不做划词/全文翻译；
+    - 笔记模式三栏「原文 ｜ AI 对话 ｜ 笔记」，`/api/paper-notes/:id` 与文献中心共用存储；
+    - 划词浮条三动作：用这段提问 / 加入素材库 / 追加到笔记；
+    - `【… · p.N】` 渲染成 `span.src[data-page]`，点击跳页。
+  - **写作支撑**：素材库抽屉（导出 Markdown）、章节速读 / 综述条目 / 答辩演练、
+    对比阅读（勾 2–5 篇 + 导出）、我的大论文。
+
+### 三、接线改动
+
+- `public/index.html`：左侧「研究工作」下新增 `data-view="thesis"` 导航项；
+  新增 `<section id="viewThesis">` 挂载点（内容由 `buildDom()` 生成）；
+  引入 `thesis.css` / `thesis.js`。
+- `public/app.js`：`switchView` 的视图映射加 `thesis: 'viewThesis'`；
+  主区加 `.main-area.th-mode`（表格内部滚动）；`v === 'thesis'` 时调 `window.ThesisView.mount()`。
+- `server.js`：`import { registerThesisRoutes }`，在 `createApp` 内（`upload` 作用域里）注册。
+  > 踩坑：第一次把注册代码插到了 `createApp` 之外，`upload` 未定义直接抛错；`upload` 是
+  > `createApp` 内的局部变量，必须插在作用域里。
+
+### 四、本轮修掉的真问题（都补了回归测试或 E2E 断言）
+
+| 问题 | 根因 | 后果 |
+| --- | --- | --- |
+| 加书签点了没反应 | `bookmarks` 没进 `PATCH_WHITELIST` | PATCH 被**静默丢弃**，界面毫无反馈 |
+| 「回到上次读到的位置」失效 | `buildPages()` 清空容器 → `scrollTop` 归零 → 触发一次 `scroll`，此时 `R.doc` 已是新文档但 `R.pageH` 还是旧值，页码被算成 1 并覆盖真实位置 | 每次重开都回到第 1 页 |
+| 笔记可能丢字 | 笔记保存与阅读位置记录**共用 `R.saveTimer`** | 滚动会把防抖中的笔记保存取消掉 |
+| 从素材库跳进阅读器拿不到记录 | 缺 `GET /api/theses/:id`（落到前端兜底，返回网页首页） | 打不开论文 |
+| 删除论文留下孤儿数据 | 笔记 / 对话没跟着删 | 数据文件里堆永远看不到的记录 |
+| 素材库导出的是空文件 | `#thqExport` 绑了**两个** click 处理函数，第一个下载空内容 | 导出的 md 是空的 |
+| 加书签用了 `window.prompt` | Electron 渲染进程**禁用 prompt**（调用直接抛错） | 打包版点「加书签」会炸 |
+
+两条修法的要点：
+
+1. **位置记录**：`buildPages()` 开头把 `R.pageH` 归零 —— `currentVisiblePage()` 里本来就有
+   「`pageH` 为 0 就直接返回当前页码」的兜底，于是重建期间不再误判；`scroll` 监听再加一道
+   `if (!R.doc) return`（关闭阅读器时容器隐藏也会触发一次 scroll）。
+2. **定时器**：笔记改用独立的 `R.noteTimer`；`closeReader()` 里 `clearTimeout(noteTimer)` +
+   `saveNote()` + `saveReadPos(true)`，把两个防抖队列都落盘。
+
+### 五、测试
+
+- 新增单测：`thesis-outline`（章节识别，含越界与英文标题形态）、`thesis-index`（分词 / BM25 / 排序）、
+  `thesis-context`（预算裁剪 / 局部提问 / 任务提示词）、`thesis-store`（白名单 + 书签校验 + 分类 + 统计）、
+  `thesis-http`（**真实 PDF**：上传 → 解析前 3 页 → 建索引 → 章节树 → 问答上下文 → 对比阅读 →
+  单条读取 → 书签与阅读位置 → 删除连带清理）。
+- 全量单测 **341/341**（v1.18.0 为 278，本轮 +63）。
+- `verify-thesis.mjs`（新增，**真机 Chromium + 真实 HTTP + 真实 PDF**）**67/67**。
+- 既有回归：`verify-features.mjs` **75/75**、`verify-router-panel.mjs` **52/52**，无回退。
+
 ## v1.18.0：修「能用的模型被判成用不了」+ 新增本地 OpenAI 兼容端口与出站代理 + 精简 AI 设置界面（2026-09-24）
 
 ### 一、根因：推理模型被「30 秒写死超时」误判成不可用

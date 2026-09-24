@@ -9,6 +9,7 @@
   <!-- 思维导图（simple-mind-map，MIT，XMind 风格）：仅笔记模式的思维导图视图使用 -->
   <link rel="stylesheet" href="vendor/simple-mind-map/simpleMindMap.min.css" />
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="thesis.css" />
 </head>
 <body>
   <!-- 顶栏 -->
@@ -63,6 +64,7 @@
         <div class="nav-section-label">研究工作</div>
         <div class="nav-item active" data-view="home"><span class="nav-ico">🏠</span>首页</div>
         <div class="nav-item" data-view="library"><span class="nav-ico">📚</span>文献中心</div>
+        <div class="nav-item" data-view="thesis"><span class="nav-ico">🎓</span>学位论文阅读</div>
         <div class="nav-item" data-view="topjournals"><span class="nav-ico">🏛️</span>顶刊追踪<span id="navTopJournalBadge" class="nav-badge hidden">0</span></div>
         <div class="nav-item" data-view="projects"><span class="nav-ico">📂</span>项目管理</div>
         <div class="nav-item" data-view="tasks"><span class="nav-ico">✅</span>任务安排</div>
@@ -260,6 +262,10 @@
       </section>
 
       <!-- ===== 视图：UTD 顶刊追踪 ===== -->
+      <!-- ===== 视图：学位论文阅读（表格 + 书签栏阅读器 + 检索增强问答） ===== -->
+      <!-- 内部 DOM 由 thesis.js 的 buildDom() 生成，这里只留挂载点 -->
+      <section id="viewThesis" class="view hidden"></section>
+
       <section id="viewTopJournals" class="view hidden top-journal-view">
         <div class="top-journal-head">
           <div>
@@ -1784,6 +1790,7 @@
   <script src="pdf-reader-utils.js"></script>
   <script src="paper-note-utils.js"></script>
   <script src="doi-utils.js"></script>
+  <script src="thesis.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -113,6 +113,10 @@ const ALL_DATA_FILES = [
   'top-journal-analyses.json', // 顶刊 AI 分析记录 顶刊追踪：订阅、元数据、打卡与投递记录
   'paper-notes.json',   // 阅读器笔记模式的笔记（按文献 id，含 Markdown 与思维导图两种视图）
   'paper-chats.json',   // 阅读器 AI 对话记录（按文献 id 持久化，退出不丢）
+  'theses.json',        // 学位论文阅读：论文记录（含 AI 字段、分类、阅读进度）
+  'thesis-collections.json', // 学位论文阅读：分类
+  'thesis-quotes.json', // 学位论文阅读：摘录素材库
+  'thesis-bigpaper.json', // 学位论文阅读：关联的「我的大论文」框架与阶段
 ];
 
 export function dataFileNames() {

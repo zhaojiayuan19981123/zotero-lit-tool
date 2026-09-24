@@ -17,6 +17,7 @@ import { translate } from './src/translate.js';
 import { TRANSLATE_PROVIDERS } from './src/translateProviders.js';
 import { registerMailRoutes } from './src/mailRoutes.js';
 import { registerPdfTranslateRoutes } from './src/pdfTranslate/routes.js';
+import { registerThesisRoutes } from './src/thesisRoutes.js';
 import { DEFAULT_PDF_TRANSLATE_OPTIONS } from './src/pdfTranslate/index.js';
 import { pruneConnections } from './src/mail.js';
 import * as catalog from './src/modelCatalog.js';
@@ -3872,6 +3873,23 @@ export function createApp({
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="literature.csv"');
     res.send('\uFEFF' + lines.join('\r\n'));
+  });
+
+  // ---------- 学位论文阅读（独立模块：表格管理 + 章节书签 + 检索增强问答） ----------
+  // 数据文件、字段、阅读器全部与文献中心分开，互不影响；模型调用复用同一套路由与故障转移，
+  // 因此 v1.18.0 的本地端口（15721）也能自动路由到这些新功能用到的模型。
+  registerThesisRoutes(app, {
+    store,
+    upload,
+    getUploadDir: () => currentUploadDir,
+    fixFileName,
+    resolveRequestModel,
+    fetchModelCompletion,
+    streamModelResponse,
+    readLLMResponse,
+    sseStart,
+    sseSend,
+    sseEnd,
   });
 
   // 静态：上传目录（动态）+ 前端页面
