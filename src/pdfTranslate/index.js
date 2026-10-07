@@ -336,6 +336,8 @@ export class PdfTranslateService extends EventEmitter {
    * @param {string} params.filePath 本地 PDF 绝对路径
    * @param {string} [params.fileName]
    * @param {string} [params.literatureId]
+   * @param {string} [params.achievementId] 来源为「成果管理」的附件时使用（与 literatureId 二选一）
+   * @param {string} [params.fileId]        成果附件的 id（配合 achievementId）
    * @param {object} [params.options]
    * @param {Array<{page:number,image:string}>} [params.pageImages]
    *   视觉识别用的逐页截图（dataURL，由前端从原 PDF 渲染）。只在 vision 模式下使用；
@@ -347,6 +349,10 @@ export class PdfTranslateService extends EventEmitter {
     const job = {
       id: 't' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex'),
       literatureId: params.literatureId || null,
+      // 成果附件来源：作业带上它，前端才能把「这一篇成果的翻译历史」筛出来。
+      // 两者互斥，都为空时表示「直接上传的 PDF」。
+      achievementId: params.achievementId || null,
+      fileId: params.fileId || null,
       filePath: params.filePath,
       fileName: params.fileName || path.basename(params.filePath || ''),
       status: 'queued',

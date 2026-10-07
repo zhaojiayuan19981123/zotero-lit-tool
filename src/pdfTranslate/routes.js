@@ -52,6 +52,9 @@ export function registerPdfTranslateRoutes(app, deps) {
     // 在这里注入而不是 import，避免 pdfTranslate ↔ server 循环依赖）
     visionComplete = null,
     visionInfo = null,
+    // 成果管理里的附件（科研人员自己的论文）：由 server.js 注入，按 achievementId + fileId
+    // 解析出磁盘路径。这样「成果管理 → 阅读器 → 全文翻译」与文献中心走同一条翻译流水线。
+    resolveAchievementFile = null,
   } = deps;
 
   const service = new PdfTranslateService({
@@ -166,7 +169,7 @@ export function registerPdfTranslateRoutes(app, deps) {
 
   // ---------- 预估 ----------
   app.post('/api/pdf-translate/estimate', async (req, res) => {
-    const filePath = resolveSourceFile(req.body, { store, getUploadDir });
+    const filePath = resolveSourceFile(req.body, { store, getUploadDir, resolveAchievementFile });
     if (filePath.error) return res.status(400).json({ error: filePath.error });
     try {
       const result = await service.estimate({ filePath: filePath.path, options: req.body?.options });
@@ -186,13 +189,16 @@ export function registerPdfTranslateRoutes(app, deps) {
   });
 
   app.post('/api/pdf-translate/jobs', (req, res) => {
-    const resolved = resolveSourceFile(req.body, { store, getUploadDir });
+    const resolved = resolveSourceFile(req.body, { store, getUploadDir, resolveAchievementFile });
     if (resolved.error) return res.status(400).json({ error: resolved.error });
     try {
       const job = service.start({
         filePath: resolved.path,
         fileName: resolved.name,
         literatureId: req.body?.literatureId || null,
+        // 成果附件来源：作业记住它，前端才能按「成果」筛出这一篇的翻译历史
+        achievementId: req.body?.achievementId || null,
+        fileId: req.body?.fileId || null,
         options: req.body?.options,
         // 视觉识别用的逐页截图（Markdown 译文 + 视觉开关时由前端提供）
         pageImages: req.body?.pages,
@@ -276,8 +282,18 @@ export function registerPdfTranslateRoutes(app, deps) {
 }
 
 /** 把请求里的「文献 id / 文件路径 / fileName」统一解析成本地绝对路径 */
-function resolveSourceFile(body, { store, getUploadDir }) {
+function resolveSourceFile(body, { store, getUploadDir, resolveAchievementFile }) {
   const uploadDir = getUploadDir ? getUploadDir() : null;
+
+  // 成果管理里的附件（科研人员自己的论文）。放在最前：这是最具体的来源，
+  // 避免同一次请求里混传 literatureId 时被误判成文献库里的记录。
+  if (body?.achievementId && body?.fileId) {
+    if (typeof resolveAchievementFile !== 'function') return { error: '当前版本不支持翻译成果附件' };
+    const found = resolveAchievementFile(body.achievementId, body.fileId);
+    if (!found) return { error: '找不到该成果附件，或附件文件已丢失' };
+    if (!/\.pdf$/i.test(found.path)) return { error: '只支持 PDF 文件' };
+    return { path: found.path, name: found.name || path.basename(found.path) };
+  }
 
   if (body?.literatureId) {
     const item = store.listLiterature().find((x) => x.id === body.literatureId);

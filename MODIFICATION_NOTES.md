@@ -1,3 +1,76 @@
+## v1.21.0：成果管理里的论文支持「在终端内阅读与翻译」（复用文献中心阅读器 + 来源收敛）（2026-10-08）
+
+需求原话：*「对于英文论文，要支持像文献中心一样，能够在这个终端中阅读，翻译，逻辑与文献中心保持一致」*。
+
+做法：**不新写阅读器，而是让阅读器多认一种「记录来源」**。文献中心的 PDF 阅读器（左 PDF / 右划词翻译 +
+全文翻译）本来只认文献库的 `literatureId`，这次把「成果管理的附件」作为第二种来源接进去，
+翻译走的仍是**同一条服务端流水线**（`/api/pdf-translate/*`），所以引擎 / 模型 / 术语表 / 并发设置天然共用。
+
+### 一、后端：给翻译服务加「成果附件」来源
+
+- `src/pdfTranslate/routes.js`
+  - `registerPdfTranslateRoutes` 新增注入项 `resolveAchievementFile`（由 `server.js` 提供），
+    路由层不直接 import 数据层，延续本项目「依赖注入避免循环依赖」的既有做法；
+  - `resolveSourceFile()` 新增分支：`achievementId` + `fileId` → 交给注入的解析器拿磁盘路径。
+    **放在最前面判断**，因为它比 `literatureId` 更具体，混传时不会被误判成文献记录；
+  - `estimate` / `jobs` 两个入口把 `achievementId` / `fileId` 透传给服务。
+- `src/pdfTranslate/index.js`
+  - `PdfTranslateService.start()` 把 `achievementId` / `fileId` 写进作业对象（`publicView` 是浅拷贝，自动带到前端），
+    前端才能按「这一篇成果」筛出翻译历史。`literatureId` 语义不变，老路径零影响。
+- `server.js`
+  - 注入 `resolveAchievementFile(achievementId, fileId)`：从成果数据层按 id 找附件、校验文件存在，返回 `{ path, name }`。
+
+> **安全边界**：前端**始终拿不到**附件的磁盘文件名与绝对路径 —— `publicFile()` 会把 `filename` / `filePath`
+> 剥掉，翻译时也只报 `achievementId + fileId` 让服务端自己解析。前端无法拼出任意路径去读本机文件。
+
+### 二、前端：阅读器支持「按来源收敛面板」
+
+- `public/app.js`
+  - 阅读器状态新增 `pr.source`：`{ kind:'literature', id }` 或 `{ kind:'achievement', achievementId, fileId, name }`；
+  - 抽出 `openReaderShell({ pdfUrl, title, source })`，`openPdfReader`（文献中心）与
+    新增的 `openAchievementPdfReader`（成果附件）共用同一套「清残留 → 显示 → 载入 PDF」；
+  - 新增 `applyReaderMode()`：成果附件并**没有文献库记录**，所以隐藏所有依赖记录的 UI ——
+    「解析结果 / AI 对话」页签、「我的思考 / 笔记与高亮」区块、「高亮色」工具组、「笔记模式」按钮，
+    以及划词工具条里的**高亮 / 下划线 / 笔记**（这三个会 PATCH 回文献库），只留「复制 / 翻译」；
+  - 全文翻译的请求体改由 `ftSourceBody()` 构造：文献来源传 `literatureId`，成果来源传 `achievementId + fileId`；
+    历史过滤抽成 `ftJobBelongsToCurrent()`，避免成果论文的翻译记录串到文献上；
+  - `collectPageImages()`（视觉识别的逐页截图）原来用 `it.filename` 拼 `/uploads/...`，
+    改成直接用阅读器**已加载的 `pr.docUrl`** —— 现在两类来源都能用，也不必重复加载 PDF；
+  - 暴露 `window.__openReaderExternal(opts)` 给成果管理模块调用。
+- `public/achievements.js`
+  - 附件行新增「**📖 阅读**」（仅 PDF，`isPdfFile()` 判断）：拿到 `raw` 地址与 `achievementId/fileId` 后
+    调 `window.__openReaderExternal`。非 PDF 不显示该按钮（pdf.js 读不了）。
+
+### 三、★ 顺手修掉一个只有真实浏览器才暴露的层叠缺陷
+
+`.pdf-reader` 的 `z-index` 是 **90**，而成果管理的详情抽屉 `.ac-detail` 是 **860** ——
+从抽屉里点开阅读器，**阅读器会被抽屉盖住**，看起来就是「点了没反应、返回按钮也点不到」。
+
+修法：阅读器按来源打标记（`body.ac-reading`），在 `achievements.css` 里把阅读器提到 `z-index: 1000`；
+文献中心路径不受影响。**这是静态检查与单测都发现不了、只有真实点击才暴露的问题** ——
+变异测试时把这条 CSS 撤掉，脚本立刻卡在「点不到 `#prClose`」上，正是用户会遇到的现象。
+
+### 四、验证
+
+- 新增 `test/achievement-reader.test.mjs`（7 项）：作业记住成果来源、不误标成文献、
+  附件对外不暴露磁盘路径、前端按来源收敛用到的选择器都真的存在于 `index.html`、
+  `data-litonly` 标记齐全、成果附件能被翻译服务解析出正文、四条拒绝路径（不存在 / 缺 fileId / 非 PDF / 成果优先于文献）。
+- 全量 `node --test`：**389 项全绿**（Node 20.19.0 与 Node 22.22.2 **双版本**都跑，贴近 CI 的 Node 20 不漏）。
+- 真实浏览器端到端（Playwright + 真实 Chromium + 真实多页英文 PDF）：**18 项全绿、0 条 JS 运行时错误**，
+  含「PDF 真的渲染出画布」「阅读器盖住抽屉」「成果下只剩 2 个页签」「文献下仍是 4 个页签」等。
+- **变异验证**：撤掉来源隔离 → 3 条断言立刻变红；撤掉层叠修复 → 层叠断言变红且点击真的失效。
+  两次变异都证明断言有效（不会失败的断言等于没有断言）。
+
+### 五、需求覆盖
+
+| 需求 | 落点 |
+| --- | --- |
+| 英文论文能在终端中阅读 | 成果详情 → 附件 →「📖 阅读」，进入与文献中心同一套阅读器（连续翻页 / 缩放 / 旋转） |
+| 能翻译 | 同一阅读器右侧「划词翻译」（选中即译）与「全文翻译」（整篇，产出 Markdown / 单语 / 双语 / 重排版） |
+| 逻辑与文献中心一致 | 同一套前端阅读器、同一个 `/api/pdf-translate/*` 服务端流水线、同一份翻译引擎与设置 |
+
+---
+
 ## v1.20.0：新增「🏆 成果管理」——自己的成果统一归档（二级侧边栏 / 识别字段 / 任意格式附件 / 在投进度与草稿 / 文件夹 / 导出 ZIP）（2026-10-08）
 
 需求原话：*「支持科研人员自己的成果管理。可以再展开二级侧边栏（可以收回），分为论文、专利、证书、

@@ -19,6 +19,7 @@ import { registerMailRoutes } from './src/mailRoutes.js';
 import { registerPdfTranslateRoutes } from './src/pdfTranslate/routes.js';
 import { registerThesisRoutes } from './src/thesisRoutes.js';
 import { registerAchievementRoutes } from './src/achievementRoutes.js';
+import * as achievementStore from './src/achievementStore.js';
 import { DEFAULT_PDF_TRANSLATE_OPTIONS } from './src/pdfTranslate/index.js';
 import { pruneConnections } from './src/mail.js';
 import * as catalog from './src/modelCatalog.js';
@@ -3636,6 +3637,17 @@ export function createApp({
     const vm = resolveVisionModel(store.getSettings());
     return vm ? { ready: true, model: vm.model } : { ready: false, model: '' };
   };
+  /**
+   * 全文翻译的第二个来源：成果管理里的附件（科研人员自己的论文）。
+   * 成管理的附件与文献 PDF 存在同一个上传目录，但对外接口刻意不暴露磁盘文件名，
+   * 所以这里按 achievementId + fileId 解析出真实路径交给翻译服务，避免前端能拼任意路径。
+   */
+  const resolveAchievementFile = (achievementId, fileId) => {
+    const item = achievementStore.getAchievement(String(achievementId || ''));
+    const file = (item?.files || []).find((f) => f.id === String(fileId || ''));
+    if (!file?.filePath || !fs.existsSync(file.filePath)) return null;
+    return { path: file.filePath, name: file.originalName || path.basename(file.filePath) };
+  };
   const pdfTranslateService = registerPdfTranslateRoutes(app, {
     store,
     getUploadDir: () => currentUploadDir,
@@ -3646,6 +3658,7 @@ export function createApp({
     defaultOptions: DEFAULT_PDF_TRANSLATE_OPTIONS,
     visionComplete,
     visionInfo,
+    resolveAchievementFile,
   });
 
   // ---------- 设置 ----------

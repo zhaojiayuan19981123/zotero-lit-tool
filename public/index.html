@@ -1385,7 +1385,7 @@
         <button id="prToggleMd" class="btn btn-ghost hidden" title="在 Markdown 译文与原文 PDF 之间切换">📑 查看译文</button>
         <button id="prToggleNote" class="btn btn-ghost" title="笔记模式：左侧原文 / 中间划词翻译 / 右侧笔记（Markdown + 思维导图）">📓 笔记模式</button>
       </div>
-      <div class="pr-tools">
+      <div class="pr-tools" id="prColorTools">
         <span class="tb-label">高亮色</span>
         <div class="pr-colors">
           <button class="pr-color active" data-color="yellow" style="background:#ffe08a"></button>
@@ -1580,8 +1580,8 @@
         <div class="pr-tabs" id="prTabs">
           <button class="pr-tab active" data-prtab="translate">🌐 划词翻译</button>
           <button class="pr-tab" data-prtab="fulltext">📄 全文翻译</button>
-          <button class="pr-tab" data-prtab="analysis">📋 解析结果</button>
-          <button class="pr-tab" data-prtab="chat">🤖 AI 对话</button>
+          <button class="pr-tab" data-prtab="analysis" id="prTabAnalysis">📋 解析结果</button>
+          <button class="pr-tab" data-prtab="chat" id="prTabChat">🤖 AI 对话</button>
         </div>
 
         <!-- ---------- 划词翻译 ---------- -->
@@ -1613,13 +1613,17 @@
           <div id="prTransResult" class="pr-trans-box">
             <div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>
           </div>
-          <div class="pr-panel-sep"></div>
-          <div class="pr-panel-sub">💭 我的思考 <span class="side-count" id="prThoughtsState"></span></div>
-          <textarea id="prThoughts" class="pr-src pr-thoughts" placeholder="阅读时随手记录自己的小想法：疑问、灵感、与课题的联系…保存后写入文献库的「我的思考」字段"></textarea>
-          <button id="btnPrThoughtsSave" class="btn btn-primary w100" style="margin-top:6px">保存思考</button>
-          <div class="pr-panel-sep"></div>
-          <div class="pr-panel-sub">📝 笔记与高亮 <span class="side-count" id="prNotesCount">0</span></div>
-          <div id="prNotesList" class="pr-notes-list"></div>
+          <!-- 下面两块依赖「文献库记录」（写入 thoughts 字段 / paper-notes.json）；
+               阅读成果管理里的附件时没有对应记录，按来源整块隐藏（见 app.js 的 applyReaderMode）。 -->
+          <div id="prLitOnly">
+            <div class="pr-panel-sep"></div>
+            <div class="pr-panel-sub">💭 我的思考 <span class="side-count" id="prThoughtsState"></span></div>
+            <textarea id="prThoughts" class="pr-src pr-thoughts" placeholder="阅读时随手记录自己的小想法：疑问、灵感、与课题的联系…保存后写入文献库的「我的思考」字段"></textarea>
+            <button id="btnPrThoughtsSave" class="btn btn-primary w100" style="margin-top:6px">保存思考</button>
+            <div class="pr-panel-sep"></div>
+            <div class="pr-panel-sub">📝 笔记与高亮 <span class="side-count" id="prNotesCount">0</span></div>
+            <div id="prNotesList" class="pr-notes-list"></div>
+          </div>
         </div>
 
         <!-- ---------- 全文翻译（整篇 PDF：解析版式 → 分段翻译 → 回写 PDF） ---------- -->
@@ -1755,10 +1759,12 @@
     <!-- 划词操作工具条（白色圆角浮层 + 图标风格） -->
     <div id="prSelectionToolbar" class="pr-selection-toolbar hidden">
       <button class="pr-sel-btn" data-sel="copy" title="复制选中文字"><span class="pr-sel-ico">⧉</span>复制</button>
-      <span class="pr-sel-sep"></span>
-      <button class="pr-sel-btn" data-sel="highlight" title="高亮选中文字"><span class="pr-sel-ico">🖍️</span>高亮</button>
-      <button class="pr-sel-btn" data-sel="underline" title="给选中文字加下划线"><span class="pr-sel-ico pr-ico-u">U</span>下划线</button>
-      <button class="pr-sel-btn" data-sel="note" title="写笔记"><span class="pr-sel-ico">📝</span>笔记</button>
+      <!-- 高亮 / 下划线 / 笔记都会写回「文献库」的 annotations 字段；成果管理的附件没有文献记录，
+           按来源整体隐藏（见 app.js 的 applyReaderMode），只保留「复制 / 翻译」。 -->
+      <span class="pr-sel-sep" data-litonly></span>
+      <button class="pr-sel-btn" data-sel="highlight" data-litonly title="高亮选中文字"><span class="pr-sel-ico">🖍️</span>高亮</button>
+      <button class="pr-sel-btn" data-sel="underline" data-litonly title="给选中文字加下划线"><span class="pr-sel-ico pr-ico-u">U</span>下划线</button>
+      <button class="pr-sel-btn" data-sel="note" data-litonly title="写笔记"><span class="pr-sel-ico">📝</span>笔记</button>
       <span class="pr-sel-sep"></span>
       <button class="pr-sel-btn" data-sel="translate" title="翻译选中文字"><span class="pr-sel-ico">🌐</span>翻译</button>
     </div>

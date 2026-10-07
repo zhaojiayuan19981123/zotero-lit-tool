@@ -2642,8 +2642,19 @@
     fullTextCache: null, // {forId, text} 解析全文缓存，供 AI 对话作为上下文
     fullTextLoading: false,
     meta: null,          // 打开阅读器时缓存的文献记录快照（列表过期时兜底）
+    // 当前阅读来源。两种：
+    //   { kind:'literature',  id }                                       —— 文献中心（默认）
+    //   { kind:'achievement', achievementId, fileId, name }              —— 成果管理里的附件（科研人员自己的论文）
+    // 成果论文也走同一个阅读器（划词翻译 + 全文翻译），只是按 achievementId/fileId 定位 PDF，
+    // 且不提供依赖文献记录的「解析结果 / AI 对话 / 笔记」这些页签。
+    source: null,
   };
   const prChatImages = []; // 待发送图片 [{name, dataUrl}]（按论文重置）
+
+  /** 当前阅读的是否为文献中心里的文献（决定文献专属面板是否可用） */
+  function isLiteratureSource() {
+    return pr.source?.kind === 'literature';
+  }
 
   function getPageExtraRotation(pageNum) {
     return pdfReaderUtils.normalizeRotation(pr.pageRotations.get(pageNum) || 0);
@@ -2822,9 +2833,32 @@
   }
 
   // ---------- 预估 ----------
-  async function estimateFullText() {
+  /**
+   * 全文翻译的「来源」请求体：文献中心传 literatureId，成果管理附件传 achievementId + fileId。
+   * 服务端两者都认（见 src/pdfTranslate/routes.js 的 resolveSourceFile），走同一条翻译流水线，
+   * 只是成果附件由服务端按 id 自己解析磁盘路径（不向前端暴露真实路径）。
+   */
+  function ftSourceBody() {
+    if (pr.source?.kind === 'achievement') {
+      if (!pr.source.achievementId || !pr.source.fileId) return null;
+      return { achievementId: pr.source.achievementId, fileId: pr.source.fileId };
+    }
     const it = items.find((x) => x.id === pr.recordId);
-    if (!it) { toast('未找到当前文献', 'error'); return; }
+    return it ? { literatureId: it.id } : null;
+  }
+
+  /** 翻译历史只显示「当前这篇」的作业（按来源匹配，避免成果论文串到文献的记录） */
+  function ftJobBelongsToCurrent(job) {
+    if (pr.source?.kind === 'achievement') {
+      return String(job?.achievementId || '') === String(pr.source.achievementId)
+        && String(job?.fileId || '') === String(pr.source.fileId);
+    }
+    return job?.literatureId === pr.recordId;
+  }
+
+  async function estimateFullText() {
+    const src = ftSourceBody();
+    if (!src) { toast('未找到当前文献', 'error'); return; }
     const info = ftEl('ftEstimateInfo');
     info.classList.remove('hidden');
     info.textContent = '正在解析版面…';
@@ -2832,7 +2866,7 @@
       const r = await api('/api/pdf-translate/estimate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ literatureId: it.id, options: ftOptions() }),
+        body: JSON.stringify({ ...src, options: ftOptions() }),
       });
       const outs = (r.outputs || []).map((o) => o.label).join(' + ');
       // fontFamily 是服务端按原文推断后的结果（auto 已解析成 sans / serif）
@@ -2849,9 +2883,12 @@
   // ---------- 开始翻译 ----------
   async function startFullText() {
     if (ft.busy) return;
-    const it = items.find((x) => x.id === pr.recordId);
-    if (!it) { toast('未找到当前文献', 'error'); return; }
-    if (!it.filename) { toast('该文献没有 PDF 附件', 'error'); return; }
+    const src = ftSourceBody();
+    if (!src) { toast('未找到当前文献', 'error'); return; }
+    if (src.literatureId) {
+      const it = items.find((x) => x.id === src.literatureId);
+      if (!it?.filename) { toast('该文献没有 PDF 附件', 'error'); return; }
+    }
     const options = ftOptions();
     const eng = ft.meta?.engine || {};
     // 只在用户「显式选了某个引擎」时做前置检查；auto 交给服务端按划词设置决定
@@ -2872,7 +2909,7 @@
       } else {
         setFtBusy(true);
         ftEl('ftStage').textContent = '正在逐页渲染页面截图…';
-        pages = await collectPageImages(it, options.pageRange);
+        pages = await collectPageImages(options.pageRange);
         if (!pages?.length) {
           toast('页面截图生成失败，本次将回退文本层提取', 'error');
           options.vision = false;
@@ -2887,7 +2924,7 @@
       const job = await api('/api/pdf-translate/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ literatureId: it.id, options, pages: pages || undefined }),
+        body: JSON.stringify({ ...src, options, pages: pages || undefined }),
       });
       ft.job = job;
       renderFtJob(job);
@@ -2927,11 +2964,13 @@
    *   现在提到 2200px 宽（约 200 DPI）并降低 JPEG 压缩，标题与斜体副标题清晰可读。
    * 始终从「原文 PDF」取图——左侧此刻预览的可能已经是译文 PDF，不能拿错。
    */
-  async function collectPageImages(it, pageRange) {
+  async function collectPageImages(pageRange) {
     try {
       const lib = await loadPdfJs();
-      const url = '/uploads/' + encodeURIComponent(it.filename);
-      const doc = pr.docUrl === url && pr.doc ? pr.doc : await lib.getDocument({ url }).promise;
+      // 用阅读器已加载的那份 PDF（文献中心是 /uploads/xxx，成果附件是成果的 raw 接口）
+      const url = pr.docUrl;
+      if (!url) return null;
+      const doc = pr.doc || await lib.getDocument({ url }).promise;
       const targets = parseClientPageRange(pageRange, doc.numPages)
         || Array.from({ length: doc.numPages }, (_, i) => i + 1);
       const MAX_VISION_PAGES = 60;
@@ -3185,7 +3224,7 @@
   async function refreshFtHistory() {
     try {
       const list = await api('/api/pdf-translate/jobs');
-      const mine = (Array.isArray(list) ? list : []).filter((j) => j.literatureId === pr.recordId);
+      const mine = (Array.isArray(list) ? list : []).filter(ftJobBelongsToCurrent);
       ftEl('ftHistoryCount').textContent = String(mine.length);
       // 本篇还有在跑的作业（例如中途切走了文献）→ 重新接上进度
       const active = mine.find((j) => j.status === 'running' || j.status === 'queued');
@@ -5156,14 +5195,22 @@
     if (pr.chatAbort) { try { pr.chatAbort.abort(); } catch (_) { /* ignore */ } }
   }
 
-  function openPdfReader(id) {
-    const it = items.find((x) => x.id === id);
-    if (!it?.filename) { toast('该文献还没有 PDF 附件', 'error'); return; }
-    pr.recordId = id;
+  /**
+   * 打开阅读器的公共外壳：文献中心与成果管理附件共用这一套。
+   * 只做「清掉上一位阅读者的残留 → 显示 → 载入 PDF」，不含任何文献专属初始化。
+   */
+  async function openReaderShell({ pdfUrl, title, source }) {
+    // 上一位读者若还开着「笔记模式」，先按**旧的** recordId 正常退出（内部会把未落盘的
+    // 笔记写盘）。必须放在改写 pr.recordId 之前，否则笔记会存到新记录上。
+    if (pn.on) { try { await closePnNoteMode(); } catch (_) { /* ignore */ } }
+    pr.source = source;
+    // 文献来源才记 recordId；成果附件没有文献库记录（相关面板会被隐藏）
+    pr.recordId = source?.kind === 'literature' ? source.id : null;
+    // 成果附件是从「详情抽屉」（z-index 860）里点进来的，阅读器默认 90 会被抽屉盖住，
+    // 这里打标把它提到最上层（见 achievements.css）。文献中心路径不受影响。
+    document.body.classList.toggle('ac-reading', source?.kind === 'achievement');
     pr.open = true;
-    // 缓存记录快照：AI 上下文用它兜底，列表刷新前也不会丢论文信息
-    pr.meta = it;
-    // 切换文献时终止上一篇的流式生成，并重置待发图片（对话是「按论文」的）
+    // 切换阅读对象时终止上一篇的流式生成，并重置待发图片（对话是「按论文」的）
     stopPrChat();
     pr.chatBusy = false;
     setPrChatBusyUI(false);
@@ -5175,13 +5222,9 @@
     pr.fullTextCache = null;
     pr.fullTextLoading = false;
     $('pdfReader').classList.remove('hidden');
-    $('prFilename').textContent = it.originalName || '';
+    $('prFilename').textContent = title || '';
     resetSelectionTranslation({ preserveMode: false, clearBrowserSelection: false });
-    $('prThoughts').value = it.thoughts || '';
-    $('prThoughtsState').textContent = it.thoughts ? '已保存' : '';
-    // 右侧「解析结果」与正在阅读的文献同步刷新
-    renderPrAnalysis();
-    // 全文翻译面板：切文献时清掉上一篇的进度与成品，避免串台（在跑的服务端作业不会被取消）
+    // 全文翻译面板：切记录时清掉上一篇的进度与成品，避免串台（在跑的服务端作业不会被取消）
     ft.job = null;
     closeFtStream();
     setFtBusy(false);
@@ -5196,19 +5239,89 @@
     closeMdTranslation();
     // 划词面板的「翻译源」下拉（跟随设置 / 指定大模型 / 指定免费接口）
     loadTranslateSources();
-    switchPrTab(pr.tab || 'translate');
+    applyReaderMode();
+    // 文献中心记得上次停在哪个页签；成果附件固定从「划词翻译」开始
+    switchPrTab(isLiteratureSource() ? (pr.tab || 'translate') : 'translate');
+    loadPdfDocument(pdfUrl);
+  }
+
+  /**
+   * 按来源切换阅读器的能力边界。
+   *
+   * 成果管理里的附件（科研人员自己的 PDF）没有「文献库记录」——不能写 thoughts 字段、
+   * 没有 paper-chats / paper-notes，所以隐藏「解析结果 / AI 对话 / 我的思考 / 笔记与高亮 /
+   * 笔记模式」这些依赖文献记录的面板，只保留「阅读 + 划词翻译 + 全文翻译」。
+   * 划词翻译与全文翻译走的是与文献中心完全相同的接口与翻译源，逻辑一致。
+   */
+  function applyReaderMode() {
+    const lit = isLiteratureSource();
+    const show = (el, on) => { if (el) el.classList.toggle('hidden', !on); };
+    show($('prTabAnalysis'), lit);
+    show($('prTabChat'), lit);
+    show($('prLitOnly'), lit);
+    show($('prToggleNote'), lit);
+    show($('prColorTools'), lit);
+    // 划词工具条里的「高亮 / 下划线 / 笔记」都会写回文献库，成果附件没有文献记录 → 隐藏，
+    // 只留「复制 / 翻译」（翻译不依赖文献记录，与文献中心同一条接口）。
+    document.querySelectorAll('#prSelectionToolbar [data-litonly]')
+      .forEach((el) => el.classList.toggle('hidden', !lit));
+    // 万一切换时浮层还停在屏幕上（比如刚划过词就切了记录），一并收起
+    if (!lit) {
+      $('prSelectionToolbar')?.classList.add('hidden');
+      $('prPopover')?.classList.add('hidden');
+    }
+    const nameEl = $('prFilename');
+    if (nameEl) nameEl.title = lit ? '' : '来自「成果管理」的附件';
+  }
+
+  async function openPdfReader(id) {
+    const it = items.find((x) => x.id === id);
+    if (!it?.filename) { toast('该文献还没有 PDF 附件', 'error'); return; }
+    // 缓存记录快照：AI 上下文用它兜底，列表刷新前也不会丢论文信息
+    pr.meta = it;
+    $('prThoughts').value = it.thoughts || '';
+    $('prThoughtsState').textContent = it.thoughts ? '已保存' : '';
+    await openReaderShell({
+      pdfUrl: '/uploads/' + encodeURIComponent(it.filename),
+      title: it.originalName || '',
+      source: { kind: 'literature', id },
+    });
+    // 右侧「解析结果」与正在阅读的文献同步刷新
+    renderPrAnalysis();
     // 笔记模式：换文献要重置正文/导图并重新拉这一篇的笔记
     if (pn.on) resetPnForRecord(id).catch(() => {});
     else { pn.md = ''; pn.mindmap = null; pn.loadedFor = null; }
     // 对话记录：拉回历史（不阻塞 PDF 渲染）
     loadPrChat(id).catch(() => {});
-    loadPdfDocument('/uploads/' + encodeURIComponent(it.filename));
+  }
+
+  /**
+   * 在终端内阅读「成果管理」里的 PDF 附件（科研人员自己的论文，多为英文）。
+   * 与文献中心共用同一个阅读器：左侧连续页 + 右侧划词翻译 / 全文翻译。
+   * @param {{pdfUrl:string, title:string, achievementId:string, fileId:string}} opts
+   */
+  async function openAchievementPdfReader(opts) {
+    const o = opts || {};
+    if (!o.pdfUrl) { toast('找不到可阅读的附件', 'error'); return; }
+    pr.meta = null; // 成果附件不是文献库记录
+    await openReaderShell({
+      pdfUrl: o.pdfUrl,
+      title: o.title || '',
+      source: {
+        kind: 'achievement',
+        achievementId: o.achievementId || '',
+        fileId: o.fileId || '',
+        name: o.title || '',
+      },
+    });
   }
 
   function closePdfReader() {
     pr.open = false;
     pr.doc = null;
+    pr.source = null;
     pr.currentSelection = null;
+    document.body.classList.remove('ac-reading');
     pr.lastJoinedSelectionKey = '';
     pr.pageRotations.clear();
     pr.rendered.clear();
@@ -8414,6 +8527,8 @@
   };
   // 调试/自动化钩子：直接打开某篇文献的 PDF 阅读器、切换右侧页签、读取当前模型
   window.__openReader = (id) => openPdfReader(id);
+  // 成果管理调用：在终端内阅读自己上传的 PDF 附件（同一套阅读器 + 划词/全文翻译）
+  window.__openReaderExternal = (opts) => openAchievementPdfReader(opts);
   window.__setPrTab = (t) => switchPrTab(t);
   window.__activeModel = () => ({
     activeProfileId, active: activeModelInfo,

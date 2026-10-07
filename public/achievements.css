@@ -190,6 +190,13 @@
 }
 .ac-mini:hover { color: var(--primary); border-color: var(--primary-light); }
 .ac-mini.danger:hover { color: var(--red); border-color: var(--red); }
+/* 「📖 阅读」：从一堆附件操作里凸显出来 */
+.ac-mini.accent { color: var(--primary); border-color: var(--primary-light); font-weight: 600; }
+
+/* ---------- 从成果管理进入「终端内阅读」时的层级 ---------- */
+/* 阅读器（.pdf-reader）默认 z-index:90，而成果详情抽屉是 860 —— 直接打开会被抽屉盖住。
+   阅读成果附件时给 body 打标，把阅读器提到最上层；文献中心路径不受影响。 */
+body.ac-reading .pdf-reader { z-index: 1000; }
 
 /* ---------- 弹窗 ---------- */
 .ac-mask { position: fixed; inset: 0; z-index: 880; background: rgba(15,42,35,.42); display: flex; align-items: center; justify-content: center; }

@@ -162,6 +162,31 @@
     return `/api/achievements/${encodeURIComponent(item.id)}/files/${encodeURIComponent(file.id)}/${tail}`;
   }
 
+  /** 只有 PDF 能进终端阅读器（阅读器基于 pdf.js） */
+  function isPdfFile(f) {
+    return String(f?.ext || '').toLowerCase() === 'pdf' || /\.pdf$/i.test(String(f?.originalName || ''));
+  }
+
+  /**
+   * 在终端内阅读这个附件。
+   * 复用文献中心那套阅读器（左侧连续页 + 右侧划词翻译 / 全文翻译），
+   * 阅读器由 app.js 提供（window.__openReaderExternal），成果管理只交出 PDF 地址与来源标识。
+   * 翻译走的是与文献中心完全相同的接口与翻译源，所以英文论文在这里也能边读边译。
+   */
+  function readInTerminal(item, file) {
+    const open = window.__openReaderExternal;
+    if (typeof open !== 'function') {
+      toast('阅读器未就绪，请刷新页面后重试', 'error');
+      return;
+    }
+    open({
+      pdfUrl: fileUrl(item, file, 'raw'),
+      title: file.originalName || '',
+      achievementId: item.id,
+      fileId: file.id,
+    });
+  }
+
   // ==================== 视图骨架 ====================
 
   function buildDom() {
@@ -443,6 +468,7 @@
         <span class="ac-fkind">${esc(fkLabel(f.kind))}</span>
         <span class="ac-fname">${esc(f.originalName)}<div class="ac-fmeta">${fmtSize(f.fileSize)}${f.ext ? ` · .${esc(f.ext)}` : ''}${f.appHint ? ` · 通常用 ${esc(f.appHint)} 打开` : ''}</div></span>
         <span class="ac-facts">
+          ${isPdfFile(f) ? `<button class="ac-mini accent" data-fread="${esc(f.id)}" title="在终端内阅读：连续翻页 + 划词翻译 + 全文翻译（英文论文可边读边译）">📖 阅读</button>` : ''}
           <button class="ac-mini" data-fopen="${esc(f.id)}" data-mode="default" title="用系统默认程序打开">打开</button>
           <button class="ac-mini" data-fopen="${esc(f.id)}" data-mode="pick" title="自己选择打开程序">用其它程序…</button>
           <button class="ac-mini" data-fprev="${esc(f.id)}" title="在应用内预览">预览</button>
@@ -1161,6 +1187,12 @@
 
       const item = detailItem();
       if (!item) return;
+      const fread = t.closest('[data-fread]');
+      if (fread) {
+        const file = item.files.find((f) => f.id === fread.dataset.fread);
+        if (file) readInTerminal(item, file);
+        return;
+      }
       const fopen = t.closest('[data-fopen]');
       if (fopen) {
         const file = item.files.find((f) => f.id === fopen.dataset.fopen);
