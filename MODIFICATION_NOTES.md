@@ -1,3 +1,208 @@
+## v1.20.0：新增「🏆 成果管理」——自己的成果统一归档（二级侧边栏 / 识别字段 / 任意格式附件 / 在投进度与草稿 / 文件夹 / 导出 ZIP）（2026-10-08）
+
+需求原话：*「支持科研人员自己的成果管理。可以再展开二级侧边栏（可以收回），分为论文、专利、证书、
+教材、项目证明等，可以集成到论文进度中，用户上传自己的论文，如果是已经完成出版发行的，
+和文献中心一样识别应有的字段，而且还要支持科研人员上传 PDF、上传检索报告，而且还要支持导出这些文件。
+如果是在投的论文，支持填写进度、支持保存草稿、支持自定义文件夹、还要支持新建文件夹……
+而且里面的内容支持打开，比如 docx 文件就链接到 word 打开，pptx 就链接到 ppt 打开，xlsx 就链接到 excel 打开」*，
+并补充：*「包括代码什么的，都要支持用户在电脑上选择程序打开」*。
+
+做法：**再开一个与文献中心、学位论文阅读并列的独立模块**（数据文件、字段表、前端 DOM 全部自建），
+`server.js` 只加一行注册、`app.js` 只加视图映射与一次挂载，既有功能零改动。
+
+### 一、数据层与字段表（新增 `src/achievementStore.js` / `src/achievementFields.js`）
+
+- **数据文件**（都在当前数据目录下，随备份 / 迁移 / 导出一起走）：
+  `achievements.json`（成果记录，含附件清单）、`achievement-folders.json`（自定义文件夹）。
+- `achievementFields.js` 是**唯一真相**：五类型（`paper` / `patent` / `certificate` / `textbook` / `project`）
+  各自的**表格列**（`COLUMNS`）、**详情分组**（`DETAIL_GROUPS`）、**字段中文标签**（`FIELD_LABELS`）、
+  **两条阶段说法**（`STAGE_LABELS`，论文是「已出版发行 / 在投中」，专利是「已授权 / 申请中」……）。
+  前端通过 `GET /api/achievements/meta` 拿同一份定义，避免两边各写一套然后慢慢跑偏。
+  **有单测守住「详情里出现的字段一定在字段总表里」**（漏一个就会「表单渲染不出值、保存又被白名单丢掉」）。
+- **论文的识别字段直接复用文献中心那套**（`import { FIELDS } from './aiExtractor.js'`），
+  外加卷 / 期 / 页码 / 出版社 / ISSN；所以同一篇论文在两处识别出来的字段是一致的一套。
+- **在投进度状态复用「论文进度」的流水线词表**（构思中 / 撰写中 / … / 撤稿，`PROGRESS_STATUSES`），
+  同步过去不用做映射翻译。
+- `advanceStore.blankAchievement()` 把**所有文本字段初始化为空串**（不留 `undefined`）；
+  `normalizeFile()` 在 `ext` / `appHint` 缺失时**按文件名推**（调用方漏传也不至于界面显示不出「通常用 Word 打开」）。
+- **默认文件夹**：`folderId === ''` 即「数据文件夹」，由 `listFoldersWithDefault()` 永远排在第一、
+  不可重命名 / 删除；**删文件夹时里面的成果回到默认文件夹，绝不连带删成果**（有单测）。
+- `PATCH_WHITELIST` 与 `patchAchievement`：`filePath` / `files` / `status` / `id` **一律改不动**
+  （附件清单只能走附件接口，`status` 只由识别流程改）；`progressPercent` 走 `sanitizePercent` 夹到 0–100，
+  `year` 顺手清洗成 4 位。
+- `publicRecord()` 对外**剥掉磁盘路径**（前端只需要「叫什么、能不能打开」）。
+
+### 二、HTTP 接口（新增 `src/achievementRoutes.js`，约 700 行）
+
+- 记录：`GET/POST /api/achievements`、`GET/PATCH/DELETE /api/achievements/:id`、`batch-delete`、`batch-update`。
+- 文件夹：`GET/POST /api/achievement-folders`、`PATCH/DELETE /api/achievement-folders/:id`
+  （重名拒绝、「数据文件夹」这个名字不许被占用）。
+- **附件**：`POST /api/achievements/:id/files`（**任意格式**，multer 单独建了一条 storage，
+  不复用那个「只收 PDF」的 upload）、`DELETE .../files/:fileId`、
+  `GET .../files/:fileId/download`（按原名导出）、`.../raw`（应用内预览）。
+- **打开附件三模式** `POST .../files/:fileId/open`：
+  - `mode=default` → `openPath`（Electron `shell.openPath`），docx→Word、pptx→PowerPoint、xlsx→Excel；
+  - `mode=pick` → `openWith`（**弹出系统对话框让用户自己挑程序**，代码文件 / 无关联格式靠这条）；
+  - `mode=folder` → `revealFile`（`shell.showItemInFolder` 定位文件）。
+  **没有系统能力时返回 409 + `fallback: 'download'`**，前端据此自动改为下载并提示，
+  而不是静默失败；系统「没有关联程序」时（`openPath` 返回错误说明）也返回可读原因 + 下载兜底。
+- **字段识别** `POST /api/achievements/:id/parse`（`source=main|searchReport`）与 `batch-parse`：
+  PDF 走 `extractPdfText`、DOCX 走 `mammoth`；AI 走 `resolveRequestModel` + `fetchModelCompletion`
+  （复用模型路由与故障转移）；**AI 不可用时退 `extractByRules` 规则解析**（与文献中心同一套兜底）；
+  识别结果**只覆盖有值的字段**，并把 `folderId` / `tags` / `progressStatus` 等**控制类字段挡在外面**
+  （防模型幻觉把记录改乱）。
+- **进度与草稿**：`POST /api/achievements/:id/progress`（追加一条进度历史，**同状态同说明不重复记**，
+  自动把阶段落到「进行中」，可同时更新投稿 / 返修日期与完成度）、`POST /api/achievements/:id/draft`
+  （保存草稿，打 `isDraft` 标记）。
+- **与论文进度集成** `POST /api/achievements/:id/sync-paper`：直接在 `papers` 里创建 / 原地更新，
+  历史里写「由「成果管理」同步创建 / 更新」，并在成果上记 `paperId`；
+  **重复同步不会堆出重复卡片**（有 HTTP 端到端断言守住）。
+- **导出**：`GET /api/achievements/export`（CSV 带 BOM / JSON）、
+  `POST /api/achievements/export-zip`（每条成果一个文件夹，附件按原名 + `meta.json` + `成果清单.csv`，
+  缺文件时附 `导出说明.txt`）。
+- **踩坑记录（值得留着）**：`GET /api/achievements/export` **必须注册在 `/api/achievements/:id` 之前** ——
+  Express 按注册顺序匹配，放在后面的话 `"export"` 会被当成一个成果 id，永远 404。
+  代码里已就地写了注释，勿再调换顺序。
+
+### 三、导出用 ZIP：自己写，不引依赖（新增 `src/zip.js`）
+
+- 为了「导出这些文件」去装一个 archiver / jszip，会牵动 `package-lock`、安装包体积与 CI 构建时间 —— 不划算。
+  ZIP 的 **store（不压缩）**格式本身很简单：本地头 + 数据 + 中央目录 + 结尾记录，80 行搞定，
+  而且论文 PDF 本来就是压缩过的，不压缩反而更快。
+- 通用标志位 `0x0800` 标记 **UTF-8 文件名**（Windows 资源管理器 / 7-Zip / bsdtar 都能正常解出中文名）。
+- `sanitizeZipName()` **剥掉绝对路径与 `..`**（防解压时写到目标目录外），非法字符替换；
+  `uniqueName()` 同名自动加 `(2)(3)`。
+- 单测**独立实现了一个 ZIP 读取器**把字节解回来核对文件名 / CRC / 大小 / 内容，
+  并拿 `"123456789"` 的标准 CRC32（`0xCBF43926`）与 `zlib.crc32` 双向对齐 ——
+  防止「自己写自己读」的自洽式假验证。
+
+### 四、前端（新增 `public/achievements.js` / `achievements.css`）
+
+- **可收起的二级侧边栏**：类型（含数量）+ 文件夹（含数量）+ 底部「＋ 新建文件夹」；
+  `«` / `»` 收起（收起后只留图标，状态存 `localStorage`），窄屏（<1080px）默认收起。
+- **表格**：列随类型变化（全部视图用统一列），支持搜索（名称 / 作者 / 期刊 / DOI / 专利号 / 证书编号…）、
+  阶段筛选（已完成 / 进行中 / 草稿）、排序与升降序、多选与批量操作（识别 / 移动文件夹 / 导出 / 删除）。
+  列表里**直接点附件名就是用默认程序打开**。
+- **详情抽屉**：按 `DETAIL_GROUPS` 渲染表单（长文本自动用多行框），顶部可改类型 / 阶段 / 文件夹；
+  含「🧠 字段识别」卡、「🚀 在投进度」卡（仅论文，带进度条与时间线）、「📎 附件」卡；
+  底部「导出这条（含附件）」「💾 保存草稿」「保存」。
+- **新建成果弹窗**：选类型 + 名称 + 阶段 + 文件夹，并明确提示「没选文件夹会放在数据文件夹」；
+  「⬆ 上传成果文件（自动建档）」支持**一次选一批 PDF/Word 批量建档 + 上传 + 自动识别**。
+- 弹窗一律用**应用内输入弹窗**，不用 `window.prompt`（打包版 Electron 里被禁用会直接报错 —— 这是
+  学位论文那轮踩过的坑）；`Esc` 依次关预览 → 弹窗 → 详情抽屉。
+- 浏览器模式下的降级：`open` 接口返回 409 时自动改为下载并提示「当前运行方式不能直接调起本地程序」。
+
+### 五、接线与系统能力
+
+- `public/index.html`：导航加 `data-view="achievements"`（🏆 成果管理，排在「论文进度」之后）、
+  空 `<section id="viewAchievements">` 挂载点、引入 `achievements.css` / `achievements.js`。
+- `public/app.js`：`switchView` 的 `map` 加一项、主区加 `ac-mode`、离开时 `AchievementView.close()`、
+  进入时 `AchievementView.mount()`。
+- `server.js`：`import { registerAchievementRoutes }` + 一处注册（注入 store / 上传目录 / 文件名修复 /
+  `openPath` / `openWith` / `revealFile` / 模型调用）。
+- `electron/main.cjs`：新增两项系统能力 ——
+  `openWith`（`dialog.showOpenDialog` 挑程序后 `spawn` 打开；macOS 走 `open -a`，`.lnk` 走 `cmd /c start`），
+  `revealFile`（`shell.showItemInFolder`）。
+- **顺手修掉一个真 bug**：`/api/open-datadir` 里 `const err = openPath(dir); if (err)` ——
+  Electron 的 `shell.openPath` 返回的是 **Promise**（永远为真），所以「打开数据目录」**必然报 500
+  `[object Promise]`**。已改成 `await` 并兜住异常。同一个坑在这个模块里不会再犯（所有系统调用都 await）。
+
+### 六、测试
+
+- 单元测试 **355 → 382 项全绿**（本轮新增 **27 项**）：
+  - `test/achievement-store.test.mjs`（10 项）：字段初始化、默认文件夹、白名单（`filePath` 改不动）、
+    完成度 / 年份清洗、删文件夹不连带删成果、附件清单与公开输出、删除返回待删物理文件、summary 统计；
+  - `test/achievement-fields.test.mjs`（9 项）：五类齐全、**每类详情里的字段都在字段总表里**、
+    论文识别字段与文献中心对齐、进度词表与论文进度一致、DOI / 年份 / 完成度归一化、垃圾输入不抛错、
+    扩展名 → 程序提示、提示词点名所有要提取的字段；
+  - `test/zip.test.mjs`（5 项）：**独立解包核对文件名 / CRC / 内容**、空内容与二进制、
+    CRC 与标准值 + `zlib.crc32` 双向对齐、路径逃逸防护、同名去重；
+  - `test/achievements-http.test.mjs`（3 项）：真实 HTTP 端到端 ——
+    建档（不选文件夹落默认）→ 上传 PDF / 检索报告 / 代码 / 压缩包 → 下载字节一致 →
+    三种打开模式与「无系统能力 409 降级」「系统无关联程序 500 降级」→ AI 识别（含幻觉字段被丢弃、
+    DOI / 年份清洗）→ 白名单 → 进度（重复不重复记）→ 草稿 → 同步论文进度（不堆重复卡片）→
+    CSV BOM + ZIP 解包核对 → 删除；另有「无模型时规则解析兜底」「换数据目录不丢数据」。
+- 全量 `node --test`：**382 项全绿**，既有功能无回退。
+
+### 七、文档与版本
+
+- `package.json` / `package-lock.json`（2 处）版本号 `1.19.2 → 1.20.0`；
+- `README.md`：功能表加「成果管理」一行、新增「## 成果管理」章节（二级侧边栏 / 识别字段 / 附件与打开方式 /
+  在投进度与草稿 / 同步论文进度 / 导出 / 常见问题）、项目结构补齐新文件；
+- `.github/release-body.md`：写入 v1.20.0 正文，v1.19.2 归入历史。
+
+### 八、真实浏览器验证（Playwright）发现的三个缺陷
+
+`node --check` 过了、382 项单测也全绿，但接上真实 Chromium 走一遍 UI，**还是抓到三处只有真实渲染才
+会暴露的问题**。三个都是单测与 HTTP 级测试结构上碰不到的（后端接口本身是对的），记在这里：
+
+1. **`#acNewFolder` 一个 id 用了两次** —— 侧边栏底部「＋ 新建文件夹」按钮与新建成果弹窗里的
+   文件夹下拉撞了 id。`$('#acNewFolder')` 取到的是 DOM 里靠前的那个**按钮**，于是
+   `folderId: $('#acNewFolder').value` 恒为 `undefined`（按钮没有 value）——
+   **用户在新建弹窗里选的文件夹永远不生效，成果一律落回「数据文件夹」**。
+   这正是用户需求里明确要的「支持自定义文件夹」，功能看起来在、实际是坏的。
+   → 修：按钮改 `acBtnNewFolder`，下拉改 `acNewFolderSel`，读取处写明注释。
+   → 回归断言：「新建时选中的自定义文件夹真的生效（id 撞车回归）」，比对该条成果落库的 `folderId`。
+   变异验证：把读取处改回 `#acNewFolder` 或撤掉按钮改名，该断言分别以「值不符」与「元素找不到」变红。
+
+2. **`bindDetail is not defined`** —— `renderDetail()` 末尾残留一句 `bindDetail(item)`，而该函数
+   并不存在。详情里的按钮早已改为 `bindList()` 中的事件委托，这行是重构漏删。后果是
+   **每次打开详情都抛 ReferenceError**（控制台报错、中断 renderDetail 收尾），
+   只是因为 DOM 已写入、事件走委托，功能表面正常，静态检查与单测都看不到。
+   → 修：删掉该行并加注释说明详情事件由委托处理，禁止加回。
+   → 回归断言：「无 JS 运行时错误」（收集 `pageerror` / `console.error`）。
+
+3. **侧边栏计数停在旧值** —— `renderSide()` 用的是 `S.summary` / `S.folders[].count` 这两份
+   **上一次请求的快照**。新建成果（或改文件夹）后只调 `renderSide()` 不重新拉取，
+   于是「2026 年投稿」里明明进了一条，侧边栏还显示 `0`——用户会以为没放进去。
+   → 修：分类数与文件夹数一律按当前 `S.items` 实时算（`countByCat` / `countByFolder`），
+     并在新建成功后 `await refresh()` 让顶部统计也跟上。
+   → 回归断言：「侧边栏该文件夹计数变为 1」+「刷新后成果数据仍在」。
+
+**E2E 覆盖**：49 项断言，含导航与视图切换（渲染产物非空白、主区尺寸非 0）、二级侧边栏收起/展开
+与 localStorage 持久化、分类筛选、文件夹新建、新建成果（默认夹与自定义夹两条路径）、
+详情抽屉字段编辑落库（读后端确认）、在投进度与保存草稿、附件上传、
+「打开 / 用其它程序」在无系统能力时降级为下载、导出附件与导出 ZIP（校验魔数 `50 4b 03 04` 与
+内部文件名）、CSV 带 BOM、同步到论文进度且重复同步不堆卡片、刷新持久化、跨视图切换回归。
+结果 **49/49 全绿、0 条 JS 运行时错误**。验证脚本与输出留档于
+`~/.workbuddy/achievement-e2e-evidence/`（临时目录 `.debug/` 跑完已删）。
+
+### 九、发版自检：只在 Node 20 下暴露的上游流适配缺陷（`src/proxiedFetch.js`）
+
+发版前按流程用 **Node 20 与 Node 22 各跑一次**全量单测：Node 22 全绿，**Node 20 红 1 项** ——
+
+```
+not ok 126 - probeProxy：隧道通就算可用（不要求状态码是 2xx）；端口没人监听则不可用
+  failureType: 'uncaughtException'
+  error: 'Invalid state: Controller is already closed'
+  code: 'ERR_INVALID_STATE'
+    ReadableStreamDefaultController.close (node:internal/webstreams/readablestream:1058:13)
+    IncomingMessage.<anonymous> (node:internal/webstreams/adapters:454:16)
+    IncomingMessage.onclose (node:internal/streams/end-of-stream:162:14)
+```
+
+**这是上游（v1.18.0 引入）就存在的缺陷，与本次成果管理改动无关**；但它会让 CI 的 Windows 作业
+（Node 20.19.0）变红 → `release` 作业被 skip → **Release 一个都发不出来**，所以必须一并修掉。
+
+- **根因**：`toResponse()` 用 `Readable.toWeb(nodeRes)` 包装上游响应。`probeProxy` 拿到状态码就
+  `body.cancel()`，而 Node 20 的适配层在 `IncomingMessage` 的 `onclose` 里**对已经 close 的
+  controller 再调一次 `close()`** → 抛 `ERR_INVALID_STATE`。该异常发生在微任务里，逃出了
+  `cancel()` 的 `try/catch` → 变成 uncaughtException → 测试进程判负。
+  **Node 22 时序不同，多数情况不触发** —— 所以「本地 Node 22 全绿」骗过了一轮。
+- **修法**：新增 `nodeStreamToWeb()`，自己把 `IncomingMessage` 的 `data / end / error / close`
+  接成 `ReadableStream`：所有收尾都过 `finish()`，用 `done` 闸门保证**只收尾一次**（二次收尾直接忽略）；
+  `desiredSize <= 0` 时 `pause()` 上游、`pull()` 时 `resume()` 保留背压；`cancel()` 时 `destroy()` 上游。
+  **不要再改回 `Readable.toWeb`。**
+- **修后**：Node 20 与 Node 22 各自 **382 项全绿**。
+
+**环境教训（跑 `verify-features.mjs` 必读）**：该脚本第 230 行是**直接 import 仓库的 `src/store.js`**
+往**默认数据目录**塞种子会话的，所以被测实例**必须也用默认数据目录**（即直接 `node server.js`）。
+我一开始为了让验证「不碰真实数据」而给实例指了隔离 / 副本数据目录，结果脚本写进去的会话服务端读不到，
+第 4 项必红（`{"ok":false,"count":0,"bubbles":0}`）—— 这是**脚手架配置问题，不是产品缺陷**。
+换成默认数据目录后 **75/75 全绿**。脚本自带 cleanup，跑完 `data/` 与备份逐字节一致。
+
+---
+
 ## v1.19.2：学位论文阅读六项体验修正——排序 / 分层解析 / 分级评级 / 笔记插图 / 扫描件识别 / 弹窗可关（2026-09-25）
 
 针对用户反馈的六条：①排序选择不够用 ②解析还是慢（每次传 3 页图）③评级看着只能标 5 星

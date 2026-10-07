@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="vendor/simple-mind-map/simpleMindMap.min.css" />
   <link rel="stylesheet" href="style.css" />
   <link rel="stylesheet" href="thesis.css" />
+  <link rel="stylesheet" href="achievements.css" />
 </head>
 <body>
   <!-- 顶栏 -->
@@ -69,6 +70,7 @@
         <div class="nav-item" data-view="projects"><span class="nav-ico">📂</span>项目管理</div>
         <div class="nav-item" data-view="tasks"><span class="nav-ico">✅</span>任务安排</div>
         <div class="nav-item" data-view="papers"><span class="nav-ico">📮</span>论文进度</div>
+        <div class="nav-item" data-view="achievements"><span class="nav-ico">🏆</span>成果管理</div>
         <div class="nav-item" data-view="mail"><span class="nav-ico">📧</span>邮箱<span id="navMailBadge" class="nav-badge hidden">0</span></div>
         <div class="nav-section-label">写作与思考</div>
         <div class="nav-item" data-view="notes"><span class="nav-ico">🧪</span>研究记录</div>
@@ -265,6 +267,10 @@
       <!-- ===== 视图：学位论文阅读（表格 + 书签栏阅读器 + 检索增强问答） ===== -->
       <!-- 内部 DOM 由 thesis.js 的 buildDom() 生成，这里只留挂载点 -->
       <section id="viewThesis" class="view hidden"></section>
+
+      <!-- ===== 视图：成果管理（自己的论文 / 专利 / 证书 / 教材 / 项目证明） ===== -->
+      <!-- 内部 DOM 由 achievements.js 的 buildDom() 生成（含可收起的二级侧边栏），这里只留挂载点 -->
+      <section id="viewAchievements" class="view hidden"></section>
 
       <section id="viewTopJournals" class="view hidden top-journal-view">
         <div class="top-journal-head">
@@ -1791,6 +1797,7 @@
   <script src="paper-note-utils.js"></script>
   <script src="doi-utils.js"></script>
   <script src="thesis.js"></script>
+  <script src="achievements.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

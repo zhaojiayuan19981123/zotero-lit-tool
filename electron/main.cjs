@@ -4,6 +4,7 @@ const { autoUpdater } = require('electron-updater');
 const { shouldPrompt, PROMPT_SKIP, PROMPT_IN_APP } = require('./update-prompt.cjs');
 const path = require('path');
 const { pathToFileURL } = require('url');
+const { spawn } = require('child_process');
 const fs = require('fs');
 
 // Windows 上桌面通知必须设置 AppUserModelID，否则系统不会显示气泡通知。
@@ -482,6 +483,41 @@ async function startBackend() {
     onDataDirChange: (dir) => writeAppConfig({ dataDir: dir === defaultDataDir ? '' : dir }),
     // 「打开数据目录」按钮：交给系统文件管理器
     openPath: (dir) => shell.openPath(dir),
+    /**
+     * 成果管理的附件「用其它程序打开」：弹系统对话框让用户**自己挑一个程序**。
+     *
+     * 为什么需要：装 docx/pptx/xlsx 有系统关联、直接打开就行，但代码文件、Stata 的 .do、
+     * 学科专用格式往往没有关联；还有些用户装了 WPS 却想用 Office 打开。
+     * 这时唯一的出路是让用户自己指定程序 —— Windows 的资源管理器右键「打开方式」就是这个意思。
+     */
+    openWith: async (filePath) => {
+      const isMac = process.platform === 'darwin';
+      const choice = await dialog.showOpenDialog(mainWindow || undefined, {
+        title: `选择打开「${path.basename(filePath)}」的程序`,
+        buttonLabel: '用这个程序打开',
+        properties: isMac ? ['openFile', 'openDirectory'] : ['openFile'],
+        filters: isMac
+          ? [{ name: '应用程序', extensions: ['app'] }, { name: '所有文件', extensions: ['*'] }]
+          : [
+            { name: '程序', extensions: ['exe', 'bat', 'cmd', 'com', 'lnk'] },
+            { name: '所有文件', extensions: ['*'] },
+          ],
+      });
+      if (choice.canceled || !choice.filePaths || !choice.filePaths.length) return { canceled: true };
+      const target = choice.filePaths[0];
+      if (isMac) {
+        // macOS 的「程序」是 .app 包，必须用 open -a 启动，直接 spawn 会失败
+        spawn('open', ['-a', target, filePath], { detached: true, stdio: 'ignore' }).unref();
+      } else if (/\.lnk$/i.test(target)) {
+        // 快捷方式交给 cmd 转一手，否则会被当成普通文件
+        spawn('cmd', ['/c', 'start', '', target, filePath], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      } else {
+        spawn(target, [filePath], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      }
+      return { canceled: false, app: target };
+    },
+    // 「打开所在文件夹」：在资源管理器里定位并选中这个附件
+    revealFile: (filePath) => { try { shell.showItemInFolder(filePath); } catch (_) { /* ignore */ } },
     saveTextFile: async ({ filename, data }) => {
       const choice = await dialog.showSaveDialog(mainWindow || undefined, {
         title: '导出 Markdown 笔记', defaultPath: filename,

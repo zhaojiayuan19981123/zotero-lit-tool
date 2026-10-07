@@ -6908,7 +6908,7 @@
   async function switchView(v) {
     view = v;
     document.querySelectorAll('.nav-item[data-view]').forEach((n) => n.classList.toggle('active', n.dataset.view === v));
-    const map = { home: 'viewHome', library: 'viewLibrary', thesis: 'viewThesis', topjournals: 'viewTopJournals', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', markdown: 'viewMarkdown', ideas: 'viewIdeas', reviewer: 'viewReviewer', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
+    const map = { home: 'viewHome', library: 'viewLibrary', thesis: 'viewThesis', achievements: 'viewAchievements', topjournals: 'viewTopJournals', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', markdown: 'viewMarkdown', ideas: 'viewIdeas', reviewer: 'viewReviewer', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
     for (const [key, id] of Object.entries(map)) $(id).classList.toggle('hidden', key !== v);
     const isLib = v === 'library';
     // 文献中心：主区固定不滚动，表格容器内滚动（横向滚动条贴可视区底部）
@@ -6919,9 +6919,12 @@
     document.querySelector('.main-area').classList.toggle('reviewer-mode', v === 'reviewer');
     // 学位论文阅读：与文献中心同构，主区固定不滚动，表格/阅读器内部各自滚动
     document.querySelector('.main-area').classList.toggle('th-mode', v === 'thesis');
+    // 成果管理：二级侧边栏 + 主区铺满，主区自己不滚动（表格容器内滚动）
+    document.querySelector('.main-area').classList.toggle('ac-mode', v === 'achievements');
     // 离开该视图时把自建的浮层（阅读器 / 解析详情 / 素材库）收起来，
     // 否则它们挂在 body 上会一直盖着别的视图
     if (v !== 'thesis') window.ThesisView?.close?.();
+    if (v !== 'achievements') window.AchievementView?.close?.();
     $('searchInput').classList.toggle('hidden', !isLib);
     $('btnParseAll').classList.toggle('hidden', !isLib);
     $('btnRefreshRanks').classList.toggle('hidden', !isLib);
@@ -6941,6 +6944,8 @@
     if (v === 'mail') await enterMailView();
     // 学位论文阅读：面板 DOM 由 thesis.js 自建，这里只负责首次挂载
     if (v === 'thesis') await window.ThesisView?.mount();
+    // 成果管理：DOM 同样由 achievements.js 自建（含可收起的二级侧边栏）
+    if (v === 'achievements') await window.AchievementView?.mount();
     // 带 AI 能力的视图统一补上「模型切换」下拉（放在最后，保证容器已经显示）
     if (['ai', 'ideas', 'reviewer', 'notes', 'topjournals', 'papers'].includes(v)) renderAiModelRows();
     if (v === 'ai') {

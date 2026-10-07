@@ -18,6 +18,7 @@ import { TRANSLATE_PROVIDERS } from './src/translateProviders.js';
 import { registerMailRoutes } from './src/mailRoutes.js';
 import { registerPdfTranslateRoutes } from './src/pdfTranslate/routes.js';
 import { registerThesisRoutes } from './src/thesisRoutes.js';
+import { registerAchievementRoutes } from './src/achievementRoutes.js';
 import { DEFAULT_PDF_TRANSLATE_OPTIONS } from './src/pdfTranslate/index.js';
 import { pruneConnections } from './src/mail.js';
 import * as catalog from './src/modelCatalog.js';
@@ -1152,6 +1153,8 @@ export function createApp({
   defaultUploadDir = null, // 默认上传目录
   onDataDirChange = null,  // 数据目录切换成功后的回调（Electron 用于持久化引导配置）
   openPath = null,         // 在系统文件管理器中打开目录（Electron 注入 shell.openPath）
+  openWith = null,         // 弹出「选择程序」对话框，用用户挑的程序打开文件（成果管理的附件用）
+  revealFile = null,       // 在文件管理器里定位并选中某个文件（Electron 注入 shell.showItemInFolder）
   installDir = null,       // 应用安装目录（用于拦截「把数据放进安装目录」这一危险操作）
   saveTextFile = null,     // Electron 注入系统另存为对话框
   exportPdf = null,        // Electron 注入 PDF 打印与另存为
@@ -3269,11 +3272,14 @@ export function createApp({
 
   // 在系统文件管理器中打开数据目录（由 Electron 主进程注入 openPath 实现；
   // 纯浏览器运行时会话下没有该能力，返回明确提示而不是静默失败）
-  app.post('/api/open-datadir', (req, res) => {
+  app.post('/api/open-datadir', async (req, res) => {
     const dir = String(req.body?.dir || store.getDataDir() || '');
     if (!dir) return res.status(400).json({ error: '未指定目录' });
     if (typeof openPath === 'function') {
-      const err = openPath(dir);
+      // Electron 的 shell.openPath 是异步的：成功 resolve('')，失败 resolve(错误说明)。
+      // 早期这里没 await，拿到的是一个 Promise 对象（永远为真），于是「打开数据目录」必然报 500。
+      let err = '';
+      try { err = await openPath(dir); } catch (e) { err = e?.message || String(e); }
       if (err) return res.status(500).json({ error: String(err) });
       return res.json({ ok: true });
     }
@@ -3894,6 +3900,22 @@ export function createApp({
     sseEnd,
   });
 
+  // ---------- 成果管理（科研人员自己的成果：论文 / 专利 / 证书 / 教材 / 项目证明） ----------
+  // 同样是与文献中心、学位论文阅读并列的独立模块：自己的数据文件 + 自己的字段表，
+  // 附件支持任意格式并可由系统程序打开（docx→Word、pptx→PowerPoint、xlsx→Excel…）。
+  registerAchievementRoutes(app, {
+    store,
+    getUploadDir: () => currentUploadDir,
+    fixFileName,
+    // 系统能力：默认程序打开 / 用户自选程序打开 / 在文件管理器里定位
+    openPath,
+    openWith,
+    revealFile,
+    resolveRequestModel,
+    fetchModelCompletion,
+    readLLMResponse,
+  });
+
   // 静态：上传目录（动态）+ 前端页面
   app.use('/uploads', (req, res, next) => express.static(currentUploadDir)(req, res, next));
 
@@ -3917,14 +3939,16 @@ export async function startServer(options = {}) {
   const {
     dataDir, uploadDir, port = 0,
     publicDir = path.join(__dirname, 'public'),
-    defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir, saveTextFile, exportPdf, updateService,
+    defaultDataDir, defaultUploadDir, onDataDirChange, openPath, openWith, revealFile,
+    installDir, saveTextFile, exportPdf, updateService,
     // 本地 OpenAI 兼容端口：默认**不启动**，避免测试 / 多实例之间抢占 15721。
     // 桌面版（electron/main.cjs）与 CLI 会显式传 true。
     startGateway = false,
   } = options;
   if (dataDir) store.configure({ dataDir });
   const { app } = createApp({
-    uploadDir, defaultDataDir, defaultUploadDir, onDataDirChange, openPath, installDir, saveTextFile, exportPdf, updateService,
+    uploadDir, defaultDataDir, defaultUploadDir, onDataDirChange, openPath, openWith, revealFile,
+    installDir, saveTextFile, exportPdf, updateService,
   });
 
   // 启动时自动做一份数据快照：覆盖安装 / 升级 / 误操作后都能从「设置 → 数据备份」找回。

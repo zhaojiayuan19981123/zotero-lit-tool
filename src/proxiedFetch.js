@@ -13,7 +13,6 @@
 import http from 'node:http';
 import https from 'node:https';
 import tls from 'node:tls';
-import { Readable } from 'node:stream';
 
 /**
  * 建一个「先 CONNECT 到代理、再在被授予的 socket 上做 TLS」的 https.Agent。
@@ -76,6 +75,59 @@ function bodyToBuffer(body) {
 }
 
 /**
+ * 把 node 的 IncomingMessage 接成标准 ReadableStream（带背压）。
+ *
+ * ★ 刻意**不用** `Readable.toWeb(nodeRes)`：Node 20 的适配层在「流已经被销毁」之后
+ *   收尾时，会对着已经 close 的 controller 再调一次 close()，抛
+ *   `TypeError [ERR_INVALID_STATE]: Invalid state: Controller is already closed`
+ *   （栈顶是 `internal/webstreams/adapters.js` 的 `IncomingMessage.onclose`）。
+ *   这个异常发生在微任务里、**逃出了 `body.cancel()` 的 try/catch** → 变成
+ *   uncaughtException，把整个测试进程判负 —— CI 的 Windows 作业（Node 20.19.0）就是这么红的。
+ *   Node 22 时序不同，多数情况侥幸不触发，所以「本地全绿」骗过了一轮。
+ *
+ * 这里自己接线：所有收尾都过 finish()，用 `done` 闸门保证**只收尾一次**，二次收尾直接忽略。
+ * 背压靠 `desiredSize`：缓冲满了 pause 上游，消费者 read 触发 pull 时再 resume。
+ */
+function nodeStreamToWeb(nodeRes) {
+  let controller = null;
+  let done = false;
+  const finish = (err) => {
+    if (done) return;
+    done = true;
+    try { if (err) controller.error(err); else controller.close(); } catch (_) { /* 已收尾，忽略 */ }
+  };
+  return new ReadableStream({
+    start(c) {
+      controller = c;
+      nodeRes.on('data', (chunk) => {
+        if (done) return;
+        try {
+          controller.enqueue(chunk);
+        } catch (_) {
+          // 消费者已经取消：别再读了（cancel 里已经 destroy 过，这里兜底）
+          done = true;
+          try { nodeRes.destroy(); } catch (_) { /* ignore */ }
+          return;
+        }
+        const size = controller.desiredSize;
+        if (size !== null && size <= 0) nodeRes.pause();
+      });
+      nodeRes.on('end', () => finish(null));
+      nodeRes.on('error', (e) => finish(e));
+      // 'close' 会在 end / abort / destroy 之后再触发一次；done 闸门保证幂等
+      nodeRes.on('close', () => finish(null));
+    },
+    pull() {
+      if (!done) nodeRes.resume();
+    },
+    cancel() {
+      done = true;
+      try { nodeRes.destroy(); } catch (_) { /* ignore */ }
+    },
+  }, { highWaterMark: 16 });
+}
+
+/**
  * 把 node 的 IncomingMessage 包成标准 Response，使 readLLMResponse / .text() / .body.getReader() 都能用。
  */
 function toResponse(nodeRes) {
@@ -86,7 +138,7 @@ function toResponse(nodeRes) {
     nodeRes.resume();
     return new Response(null, { status, statusText: nodeRes.statusMessage, headers });
   }
-  return new Response(Readable.toWeb(nodeRes), { status, statusText: nodeRes.statusMessage, headers });
+  return new Response(nodeStreamToWeb(nodeRes), { status, statusText: nodeRes.statusMessage, headers });
 }
 
 /**
