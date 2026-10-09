@@ -9921,7 +9921,7 @@ a { color: #176b87; }
       emoji: '📊', title: '第 3 步 · 期刊等级 & 翻译',
       desc: '仍在「⚙ 设置」里，往下还有两项可选配置，让文献管理更强大。',
       points: [
-        { ico: '🏅', html: '<b>easyScholar SecretKey</b>：在 easyScholar 官网免费申请，填后点「期刊等级」按钮可自动查询中科院 / ABS / SSCI 分区' },
+        { ico: '🏅', html: '<b>easyScholar SecretKey</b>：在 easyScholar 官网免费申请，填后点「期刊等级」按钮可自动查询中科院 / 新锐 / ABS / UTD24 / SSCI / FMS / CSSCI 等分区' },
         { ico: '🈶', html: '<b>翻译提供方</b>：默认用上方 API Key（DeepSeek）；不想配密钥可改选「免费接口」' },
         { ico: '💾', html: '<b>数据保存目录</b>：默认存在<b>系统用户数据目录</b>（升级不丢失），想换位置再填，如 <code>D:\\文献库</code>，留空用默认' },
         { ico: '💡', html: '填完点弹窗底部<b>「保存设置」</b>生效' },

@@ -19,8 +19,9 @@ const RANK_LABELS = {
   ahci: 'A&HCI', esi: 'ESI学科分类',
 };
 
-// 只保留这 4 类期刊等级（用户要求）
-// sciUp→中科院分区, xrTop/xr→新锐分区, ajg→ABS分区, ssci→SSCI分区
+// 只保留这几类期刊等级（用户要求）
+// sciUp→中科院分区, xrTop/xr→新锐分区, ajg→ABS分区, utd24→UTD24分区,
+// ssci→SSCI分区, fms→FMS分区, cssci→CSSCI（官方数据集里叫「南大核心」）
 const KEEP_RANKS = [
   { key: 'sciUp', label: '中科院分区' },
   { key: 'xrTop', label: '新锐分区' },
@@ -28,6 +29,8 @@ const KEEP_RANKS = [
   { key: 'ajg', label: 'ABS' },
   { key: 'utd24', label: 'UTD24' },
   { key: 'ssci', label: 'SSCI' },
+  { key: 'fms', label: 'FMS' },
+  { key: 'cssci', label: 'CSSCI' },
 ];
 
 const RANK_LEVEL_KEYS = ['', 'oneRankText', 'twoRankText', 'threeRankText', 'fourRankText', 'fiveRankText'];
@@ -60,7 +63,8 @@ export async function queryPublicationRank(publicationName, secretKey) {
 }
 
 /**
- * 把 easyScholar 返回结果格式化为易读的结构（仅保留 4 类等级）
+ * 把 easyScholar 返回结果格式化为易读的结构
+ * （仅保留约定的几类等级：中科院分区 / 新锐分区 / ABS / UTD24 / SSCI / FMS / CSSCI）
  * @param {object} data 返回的 data 字段
  * @returns {{summary: string, items: Array<{label:string, value:string}>}}
  */
@@ -75,9 +79,9 @@ export function formatRank(data) {
     items.push({ label, value: String(val) });
   }
 
-  // 若 4 类等级均无数据，返回明确占位，避免 summary 为空字符串被前端/后端误判为「未查询」而反复请求
+  // 若这些等级均无数据，返回明确占位，避免 summary 为空字符串被前端/后端误判为「未查询」而反复请求
   if (!items.length) {
-    return { summary: '未收录于中科院/新锐/ABS/UTD24/SSCI 分区', items: [] };
+    return { summary: '未收录于中科院/新锐/ABS/UTD24/SSCI/FMS/CSSCI 分区', items: [] };
   }
 
   return {
