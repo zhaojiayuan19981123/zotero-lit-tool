@@ -635,13 +635,27 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .star.on { color: var(--star); }
 .star:hover { transform: scale(1.2); }
 
-/* 期刊等级 */
+/* 期刊等级：标签底色按档位区分（配色由 public/rank-utils.js 计算，见该文件顶部口径）
+   正红=最高档 / 淡红 / 黄 / 蓝 / 绿 / 灰=兜底。色档类名由 rankChips() 拼上。 */
 .rank-chip {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 2px 8px; border-radius: 6px; font-size: 12px;
-  background: #fff7e6; color: #854f0b; white-space: nowrap;
+  background: #eef2ef; color: #59665f; white-space: nowrap;
 }
-.rank-chip b { font-weight: 600; color: #633806; }
+.rank-chip b { font-weight: 600; color: #3f4a44; }
+/* 正红：实心红底，与淡红拉开层次（两者若都用浅底会分不清） */
+.rank-chip-red { background: var(--red); color: #fff; }
+.rank-chip-red b { color: #fff; }
+.rank-chip-pink { background: #fdecec; color: #b3262f; }
+.rank-chip-pink b { color: #8f1b23; }
+.rank-chip-yellow { background: #fdf3d7; color: #8a6400; }
+.rank-chip-yellow b { color: #6b4d00; }
+.rank-chip-blue { background: #e8f1fb; color: #1b5fa8; }
+.rank-chip-blue b { color: #14497f; }
+.rank-chip-green { background: #e6f6ec; color: #177d49; }
+.rank-chip-green b { color: #0f5f37; }
+.rank-chip-gray { background: #eef2ef; color: #59665f; }
+.rank-chip-gray b { color: #3f4a44; }
 .rank-cell { display: flex; flex-wrap: wrap; gap: 4px; }
 /* 等级单元格：右上角悬浮「单独更新」按钮（lit- 前缀避免与论文卡片 .rank-refresh 冲突） */
 .rank-pos { position: relative; }

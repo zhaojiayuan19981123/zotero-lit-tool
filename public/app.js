@@ -682,9 +682,15 @@
     if (inList) out.push('</ul>');
     return out.join('');
   }
+  // 期刊等级标签：每个 chip 按「体系 + 取值」上色（配色口径见 public/rank-utils.js）。
+  // 所有出现期刊等级的地方都走这里，保证同一等级在表格 / 抽屉 / 审稿页 / 小论文卡片颜色一致。
   function rankChips(detail) {
     if (!Array.isArray(detail) || !detail.length) return esc('—');
-    return detail.map((d) => `<span class="rank-chip">${esc(d.label)} <b>${esc(d.value)}</b></span>`).join('');
+    const toneOf = (window.RankUtils && window.RankUtils.rankSystemTone) || (() => 'gray');
+    return detail.map((d) => {
+      const tone = toneOf(d.label, d.value);
+      return `<span class="rank-chip rank-chip-${tone}">${esc(d.label)} <b>${esc(d.value)}</b></span>`;
+    }).join('');
   }
 
   // ============ PDF 缩略图 ============
@@ -6415,7 +6421,9 @@
     $('reviewExpertise').value = active.expertise || '';
     $('reviewJournal').value = active.targetJournal || '';
     $('reviewCustomPrompt').value = active.customPrompt || '';
-    $('reviewRank').textContent = active.journalRank || '尚未查询 EasyScholar 等级';
+    // 有明细就铺彩色标签（与文献中心同款），只有摘要文本时退回纯文本
+    if (active.journalRankDetail?.length) $('reviewRank').innerHTML = rankChips(active.journalRankDetail);
+    else $('reviewRank').textContent = active.journalRank || '尚未查询 EasyScholar 等级';
     $('reviewMeta').textContent = `${active.originalName || ''}${active.pages ? ` · ${active.pages} 页` : ''}${active.truncated ? ` · 已截取前 80,000 字符（原文 ${active.textLength} 字符）` : ''}`;
     const busy = reviewingIds.has(active.id) || active.status === 'reviewing';
     const error = reviewErrors.get(active.id) || '';
@@ -7731,7 +7739,9 @@
     try {
       const rank = await api('/api/journal-rank?name=' + encodeURIComponent(name));
       paperDraft.rank = rank;
-      $('paperRankChips').innerHTML = `<span class="rank-ok">✓ ${esc(rank.summary)}</span>`;
+      $('paperRankChips').innerHTML = rank.items?.length
+        ? rankChips(rank.items)
+        : `<span class="rank-ok">✓ ${esc(rank.summary)}</span>`;
       toast('期刊等级查询成功', 'success');
     } catch (e) {
       paperDraft.rank = null;
