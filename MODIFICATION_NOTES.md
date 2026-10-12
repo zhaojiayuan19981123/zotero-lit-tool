@@ -1,3 +1,83 @@
+## v1.21.3：阅读器内置「论文目录」（就地换篇）+ 学位论文导入去重（2026-10-12）
+
+需求原话：*「在读文献的界面中增加一个目录，让用户可以跳转其他论文，不用用户需要先返回再打开，优化流程」*
+/ *「学位论文阅读中要支持避免重复导入」*。
+
+### 一、两个阅读器都能就地换篇
+
+**文献中心阅读器**：顶栏加「📚 目录」按钮，阅读区左侧滑出一个目录抽屉
+（`#prDir`），按文库分组列出**所有带 PDF 的文献**，带搜索框、当前正在读的那篇自动高亮置顶。
+点任意条目 → 直接调既有的 `openPdfReader(id)`，**不离开阅读器、URL 不变**，
+翻译 / 笔记 / 对话 / 分析面板全部按新的一篇重新走一遍。
+
+目录数据源是内存里的 `items`（不新增接口），只列 `filename` 非空的记录 ——
+没有附件的点开也读不了，列出来只会误导。
+
+**学位论文阅读器**：左侧栏原本只有「书签栏」，现在加了一组**页签**：
+
+```
+┌──────────────┐
+│ 📑 章节 │ 📚 论文 │   ← 同一个区域，只显示一份
+├──────────────┤
+│ 目录 / 书签      │
+└──────────────┘
+```
+
+切到「📚 论文」就是全库有 PDF 的学位论文列表（同样带搜索、当前篇高亮），
+点一下即换篇。这样没有额外占用任何版面。
+
+### 二、切篇前必须先「拆干净」上一篇（本版最关键的修复）
+
+`openReader()` 原先是靠 `closeReader()` 来销毁 pdf 文档、落盘笔记的，**不关闭就直接换篇**
+会漏掉这一步。本版抽出 `teardownReaderBody()`，`closeReader()` 与「切到另一篇」共用它：
+断开 observer、`clearQueue()`、`R.doc.destroy()`、`saveNote()`、`saveReadPos(true)`。
+
+⚠️ **由此暴露出一个真实的数据损坏 bug，浏览器 E2E 真的抓到了**：
+`saveReadPos()` 把「哪一篇」写在**响应回调里**读（`findIndex((x) => x.id === R.id)`）。
+切篇时 `teardownReaderBody()` 会为上一篇立刻发一次位置落盘，而 `openReader()` 紧接着就把
+`R.id` 改成新的一篇 —— 等响应回来时 `findIndex(R.id)` 找到的是**新一篇**的下标，
+于是把上一篇的记录（含 `id` / 附件名 / 页数）**整条盖到新一篇头上**。
+现象：目录里少一篇、另一篇重复（E2E 输出 `目录 3 条 / 去重后 2 条 / 服务端 3 篇`）。
+
+修法：**「哪一篇」在发请求时就锁住**。`saveReadPos` / `addBookmark` / `removeBookmark` /
+`saveField`（thesis.js）与 `saveAnnotations` / 「我的思考」保存（app.js）共 6 处一并改掉；
+并在 `loadOutline` / `loadChatHistory` / `loadQuotes` / `ensureNote` 的每个 `await` 之后加
+`if (R.id !== id) return;` —— 否则上一篇的章节 / 对话 / 摘录 / 笔记会串到当前这篇上。
+
+### 三、学位论文导入去重（三层防线）
+
+1. **纯规则模块** `public/thesis-import-utils.js`（`window.ThesisImportUtils`）：
+   `sha256Hex()` 算内容指纹、`matchExisting()` 判定、`partitionDuplicates()` 分组。
+2. **前端预检**：导入前先算指纹、刷新一次库、比对 → 有重复弹自绘确认框
+   （`#thConfirm`，`askConfirm()`）说明是哪几个文件：
+   「跳过重复」只导其余，「仍然导入」为它们各再建一份（`allowDuplicate: true`）。
+   —— 这一层是为了避免把几十 MB 的文件白传一遍。
+3. **服务端兜底**（权威）：`POST /api/theses` 命中重复时返回
+   `409 { duplicate: true, reason, existing }`；指纹由服务端从磁盘流式 `sha256` 现算，
+   **不信任客户端传来的 `fileHash`**。附件上传成功后把 `fileHash` 写进记录。
+
+判定规则：**指纹优先**（有指纹的记录命中即判重）；老记录（v1.21.3 之前导入、无 `fileHash`）
+退回「体积 + 归一化文件名**两者都相同**」才算重复 —— 宁可漏判，不可误杀。
+`normalizeFileName()` 会去掉空白 / 下划线 / 连字符并转小写。
+
+### 四、其他
+
+- 成果管理里读自己的论文时，「📚 目录」按钮与抽屉**整体收起** ——
+  否则会在读自己论文时浮出一份不相干的文献列表。
+- `sha256Hex` 用 `Object.prototype.toString.call(data) === '[object ArrayBuffer]'` 做品牌检查，
+  不用 `instanceof`（跨 vm / iframe realm 时会失效，单测里就踩到过）。
+
+### 五、测试
+
+- 单测 **436 项**（新增 `test/thesis-import-utils.test.mjs` 11 项、`thesis-store` +5 项、
+  `thesis-http` 去重块、`test/reader-directory.test.mjs` 10 项），Node 20 与 Node 22 各跑一次均全绿。
+- 新增浏览器 E2E `verify-reader-dir.mjs` **40 项**（两个目录的展开 / 搜索 / 高亮 / 就地换篇、
+  PDF **真的重载**（用 3/5/7 页 PDF 的页数变化证明）、成果附件收起目录、
+  导入去重的两条路径、「换篇没有写坏库里的记录」）。
+- 既有基线无回归：`verify-features.mjs` 75 / 75、`verify-thesis.mjs` 170 / 170。
+- 变异验证：把 `saveReadPos` 改回「响应回来才读 R.id」→ 新单测红 + E2E 报
+  `目录 3 条 / 去重后 2 条`；删掉服务端去重拦截 → `thesis-http` 红。
+
 ## v1.21.2：期刊等级标签按档次着色（所有展示位置统一生效）（2026-10-10）
 
 需求原话：*「不同的期刊等级标签使用不同的颜色……是所有涉及期刊等级显示的都要这样」*。

@@ -2648,6 +2648,7 @@
     fullTextCache: null, // {forId, text} 解析全文缓存，供 AI 对话作为上下文
     fullTextLoading: false,
     meta: null,          // 打开阅读器时缓存的文献记录快照（列表过期时兜底）
+    dirOpen: false,      // 左侧「论文目录」抽屉是否展开（只在文献来源下可用）
     // 当前阅读来源。两种：
     //   { kind:'literature',  id }                                       —— 文献中心（默认）
     //   { kind:'achievement', achievementId, fileId, name }              —— 成果管理里的附件（科研人员自己的论文）
@@ -5201,6 +5202,74 @@
     if (pr.chatAbort) { try { pr.chatAbort.abort(); } catch (_) { /* ignore */ } }
   }
 
+  // ---------- 阅读器里的「论文目录」：直接跳到另一篇，不必先返回列表 ----------
+  // 只列「有 PDF 的文献」——没有附件的条目点开也读不了，放进来只会让人白点一下。
+  const PR_DIR_LIB_ORDER = ['empirical', 'model'];
+
+  /** 按文库分组 + 关键词过滤后的目录条目 */
+  function prDirEntries() {
+    const q = ($('prDirSearch')?.value || '').trim().toLowerCase();
+    const groups = [];
+    for (const type of PR_DIR_LIB_ORDER) {
+      let list = items.filter((i) => (i.docType || 'empirical') === type && i.filename);
+      if (q) {
+        list = list.filter((i) => [i.title, i.authors, i.journal, i.year, i.originalName]
+          .map((v) => String(v || '')).join(' ').toLowerCase().includes(q));
+      }
+      list = list.slice().sort((a, b) => String(a.title || a.originalName || '')
+        .localeCompare(String(b.title || b.originalName || ''), 'zh'));
+      if (list.length) groups.push({ type, list });
+    }
+    return groups;
+  }
+
+  function renderPrDir() {
+    const box = $('prDirList');
+    if (!box) return;
+    const groups = prDirEntries();
+    const total = groups.reduce((n, g) => n + g.list.length, 0);
+    if ($('prDirCount')) $('prDirCount').textContent = String(total);
+    if (!total) {
+      box.innerHTML = `<div class="pr-dir-empty">${items.some((i) => i.filename)
+        ? '没有匹配的文献'
+        : '文献库里还没有可阅读的 PDF'}</div>`;
+      if ($('prDirFoot')) $('prDirFoot').textContent = '';
+      return;
+    }
+    const curId = pr.source?.kind === 'literature' ? pr.source.id : '';
+    box.innerHTML = groups.map(({ type, list }) => `
+      <div class="pr-dir-group">${esc(LIB_META[type]?.label || '文献')}</div>
+      ${list.map((it) => {
+        const sub = [it.authors, it.journal, it.year].map((v) => String(v || '').trim()).filter(Boolean).join(' · ');
+        return `<div class="pr-dir-item${it.id === curId ? ' active' : ''}" data-prdir-id="${esc(it.id)}" title="${esc(it.title || it.originalName || '')}">
+          <div class="pr-dir-name">${esc(it.title || it.originalName || '未命名')}</div>
+          ${sub ? `<div class="pr-dir-sub">${esc(sub)}</div>` : ''}
+        </div>`;
+      }).join('')}
+    `).join('');
+    if ($('prDirFoot')) $('prDirFoot').textContent = `共 ${total} 篇 · 点标题即可切换阅读`;
+  }
+
+  function setPrDir(on) {
+    pr.dirOpen = !!on;
+    $('prDir')?.classList.toggle('hidden', !pr.dirOpen);
+    $('prDirToggle')?.classList.toggle('active', pr.dirOpen);
+    if (pr.dirOpen) renderPrDir();
+  }
+
+  function bindPrDir() {
+    $('prDirToggle')?.addEventListener('click', () => setPrDir(!pr.dirOpen));
+    $('prDirSearch')?.addEventListener('input', renderPrDir);
+    $('prDirList')?.addEventListener('click', async (e) => {
+      const row = e.target.closest('[data-prdir-id]');
+      if (!row) return;
+      const id = row.dataset.prdirId;
+      if (id === (pr.source?.kind === 'literature' ? pr.source.id : '')) return; // 已经是当前这篇
+      await openPdfReader(id);
+      renderPrDir(); // 切完重新高亮
+    });
+  }
+
   /**
    * 打开阅读器的公共外壳：文献中心与成果管理附件共用这一套。
    * 只做「清掉上一位阅读者的残留 → 显示 → 载入 PDF」，不含任何文献专属初始化。
@@ -5248,6 +5317,8 @@
     applyReaderMode();
     // 文献中心记得上次停在哪个页签；成果附件固定从「划词翻译」开始
     switchPrTab(isLiteratureSource() ? (pr.tab || 'translate') : 'translate');
+    // 目录开着的话跟着当前这篇刷新高亮（切篇后自己是哪一条要看得出来）
+    if (pr.dirOpen) renderPrDir();
     loadPdfDocument(pdfUrl);
   }
 
@@ -5267,6 +5338,10 @@
     show($('prLitOnly'), lit);
     show($('prToggleNote'), lit);
     show($('prColorTools'), lit);
+    // 「论文目录」列的是文献库里的文献，成果附件没有这一层 → 按钮收起，已展开的抽屉一并关掉，
+    // 否则会在读自己的论文时浮出一份文献列表。
+    show($('prDirToggle'), lit);
+    if (!lit) setPrDir(false);
     // 划词工具条里的「高亮 / 下划线 / 笔记」都会写回文献库，成果附件没有文献记录 → 隐藏，
     // 只留「复制 / 翻译」（翻译不依赖文献记录，与文献中心同一条接口）。
     document.querySelectorAll('#prSelectionToolbar [data-litonly]')
@@ -5607,10 +5682,15 @@
   }
 
   async function saveAnnotations(anns) {
-    const updated = await api('/api/literature/' + pr.recordId, {
+    // 发请求时就把「这一篇」锁住：在阅读器目录里点一下就会换篇，等响应回来时
+    // pr.recordId 已经是新的一篇了，再拿它去 findIndex 会把上一篇的记录写到新一篇的槽位上，
+    // 把阅读器里的列表缓存弄坏（标题 / 附件名会对不上）。
+    const litId = pr.recordId;
+    if (!litId) return;
+    const updated = await api('/api/literature/' + litId, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ annotations: anns }),
     });
-    const idx = items.findIndex((x) => x.id === pr.recordId);
+    const idx = items.findIndex((x) => x.id === litId);
     if (idx >= 0) items[idx] = updated;
   }
 
@@ -5817,6 +5897,9 @@
   function bindPdfReader() {
     $('prClose').addEventListener('click', closePdfReader);
 
+    // 论文目录：展开 / 收起 + 搜索 + 点条目直接切篇
+    bindPrDir();
+
     // 笔记模式（三栏）：绑定分隔条、页签与导图工具栏
     initPnNoteMode();
 
@@ -5977,10 +6060,11 @@
     // 我的思考：PDF 阅读器侧栏直接写，保存到文献库 thoughts 字段
     $('btnPrThoughtsSave').addEventListener('click', async () => {
       const v = $('prThoughts').value.trim();
+      const litId = pr.recordId;   // 同上：切篇后再读 pr.recordId 会认错人
       try {
-        const updated = await api('/api/literature/' + pr.recordId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ thoughts: v }) });
-        const idx = items.findIndex((x) => x.id === pr.recordId); if (idx >= 0) items[idx] = updated;
-        $('prThoughtsState').textContent = v ? '已保存' : '';
+        const updated = await api('/api/literature/' + litId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ thoughts: v }) });
+        const idx = items.findIndex((x) => x.id === litId); if (idx >= 0) items[idx] = updated;
+        if (pr.recordId === litId) $('prThoughtsState').textContent = v ? '已保存' : '';
         toast('我的思考已保存', 'success');
       } catch (e2) { toast('保存失败：' + e2.message, 'error'); }
     });

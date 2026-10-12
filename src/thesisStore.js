@@ -63,6 +63,9 @@ export function blankThesis(overrides = {}) {
     id: store.newId(),
     // 附件
     originalName: '', filename: '', filePath: '', fileSize: 0,
+    // 附件内容指纹（sha256，上传时由服务端算）——「避免重复导入」靠它判定同一份 PDF。
+    // 老记录没有这个字段，导入去重时退回「体积 + 文件名」兜底（见 findDuplicateThesis）。
+    fileHash: '',
     numPages: 0, charCount: 0, importedAt: now,
     // 解析状态
     status: 'pending', error: '', source: '', parsedAt: '',
@@ -132,6 +135,56 @@ export function getThesis(id) {
   const key = String(id || '').trim();
   if (!key) return null;
   return listTheses().find((it) => it.id === key) || null;
+}
+
+/**
+ * 文件名归一化：判断「是不是同一个文件」时，大小写、空格、下划线、连字符的差异都不该算数。
+ * 只保留真实字符（中文会被原样留下），避免「短视频 研究.pdf」与「短视频_研究.pdf」被当成两份。
+ */
+export function normalizeFileName(name) {
+  return String(name == null ? '' : name)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_\-]+/g, '');
+}
+
+/**
+ * 在库中找「与本次要导入的 PDF 是同一个文件」的记录（学位论文导入去重）。
+ *
+ * 两条判据，优先级从高到低：
+ *   1) **内容指纹（sha256）一致** —— 最可靠。只要两边都有指纹就认定重复，不做体积/名字的比较。
+ *   2) **旧记录还没指纹**（本次版本之前导入的）—— 退回「体积相同 + 文件名归一化后相同」。
+ *      两个条件同时满足几乎只可能是同一个文件；只满足其一会误伤，所以两条都要。
+ *
+ * 注意：带指纹的记录**不参与**第 2 条兜底。否则「同一份 PDF 换了个名字重导」会因为在库里
+ * 找不到同名的旧记录而放行，反而漏判。
+ *
+ * @param {{fileHash?:string, fileSize?:number, originalName?:string}} candidate
+ * @param {{excludeId?:string}} [opts] 排除自己（例如给已有论文换附件时不该算作重复）
+ * @returns {{record:object, reason:'hash'|'name-size'}|null}
+ */
+export function findDuplicateThesis(candidate, opts = {}) {
+  const excludeId = String(opts?.excludeId || '');
+  const hash = String(candidate?.fileHash || '').trim().toLowerCase();
+  const size = Math.max(0, Number(candidate?.fileSize) || 0);
+  const name = normalizeFileName(candidate?.originalName || candidate?.name);
+  if (!hash && !(size > 0 && name)) return null;
+
+  const all = listTheses().filter((it) => !excludeId || it.id !== excludeId);
+
+  if (hash) {
+    const byHash = all.find((it) => String(it.fileHash || '').trim().toLowerCase() === hash);
+    if (byHash) return { record: byHash, reason: 'hash' };
+  }
+  if (size > 0 && name) {
+    const byNameSize = all.find((it) => {
+      if (String(it.fileHash || '').trim()) return false; // 有指纹的走上面那条，不参与兜底
+      const isize = Math.max(0, Number(it.fileSize) || 0);
+      return isize > 0 && isize === size && normalizeFileName(it.originalName) === name;
+    });
+    if (byNameSize) return { record: byNameSize, reason: 'name-size' };
+  }
+  return null;
 }
 
 export function upsertThesis(record) {

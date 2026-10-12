@@ -7,6 +7,7 @@
 // 避免本模块反过来 import server.js 造成循环依赖。
 
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import * as thesisStore from './thesisStore.js';
 import * as thesisPdf from './thesisPdf.js';
 import * as thesisOutline from './thesisOutline.js';
@@ -17,6 +18,22 @@ import * as thesisFields from './thesisFields.js';
 // 索引缓存的指纹：附件换了（文件名或体积变了）就重建
 function fingerprintOf(record) {
   return `${record?.filename || ''}:${record?.fileSize || 0}`;
+}
+
+/**
+ * 算附件的内容指纹（sha256 十六进制）。流式读，几十 MB 的学位论文也不会把内存顶起来。
+ * 算不出来（文件被删 / 读失败）时返回空串 —— 去重会退回「体积 + 文件名」兜底，不影响导入。
+ */
+function sha256File(filePath) {
+  return new Promise((resolve) => {
+    try {
+      const h = crypto.createHash('sha256');
+      const rs = fs.createReadStream(filePath);
+      rs.on('error', () => resolve(''));
+      rs.on('data', (chunk) => h.update(chunk));
+      rs.on('end', () => resolve(h.digest('hex')));
+    } catch (_) { resolve(''); }
+  });
 }
 
 function indexPayload(record, built) {
@@ -126,9 +143,31 @@ export function registerThesisRoutes(app, ctx) {
   });
 
   app.post('/api/theses', (req, res) => {
+    const body = req.body || {};
+    // 去重：同一份 PDF 已经在库里就不再建第二条。
+    // 前端导入前也会先拦一道（拿得到文件、能给出「跳过了哪几个」的提示），这里是服务端兜底，
+    // 保证「无论谁调这个接口」都不会把同一份文件收两遍。
+    // allowDuplicate=true 是用户在前端明确选了「仍然导入」时传的（例如两份同名同体积但确实不同的文件）。
+    const candidate = {
+      fileHash: String(body.fileHash || '').slice(0, 80),
+      fileSize: Math.max(0, Number(body.fileSize) || 0),
+      originalName: String(body.originalName || '').slice(0, 300),
+    };
+    if (!body.allowDuplicate) {
+      const dup = thesisStore.findDuplicateThesis(candidate);
+      if (dup) {
+        const label = dup.record.title || dup.record.originalName || '未命名';
+        return res.status(409).json({
+          error: `这篇论文已经在库中：${label}`,
+          duplicate: true,
+          reason: dup.reason,
+          existing: { id: dup.record.id, title: label },
+        });
+      }
+    }
     const record = thesisStore.blankThesis({
-      collectionId: String(req.body?.collectionId || ''),
-      title: String(req.body?.title || '').slice(0, 300),
+      collectionId: String(body.collectionId || ''),
+      title: String(body.title || '').slice(0, 300),
     });
     thesisStore.upsertThesis(record);
     res.json(record);
@@ -190,18 +229,21 @@ export function registerThesisRoutes(app, ctx) {
 
   // ==================== 附件 ====================
 
-  app.post('/api/theses/:id/attachment', upload.single('file'), (req, res) => {
+  app.post('/api/theses/:id/attachment', upload.single('file'), async (req, res) => {
     const item = thesisStore.getThesis(req.params.id);
     if (!item) return res.status(404).json({ error: '论文不存在' });
     const f = req.file;
     if (!f) return res.status(400).json({ error: '未收到 PDF 文件' });
     if (item.filePath) { try { fs.unlinkSync(item.filePath); } catch (_) { /* ignore */ } }
+    // 内容指纹由服务端从落盘的文件算出（不信前端传的值），供「避免重复导入」判定
+    const fileHash = await sha256File(f.path);
     const updated = {
       ...item,
       originalName: fixFileName(f.originalname),
       filename: f.filename,
       filePath: `${getUploadDir()}/${f.filename}`,
       fileSize: f.size,
+      fileHash,
       status: 'pending', error: '', source: '', parsedAt: '',
       numPages: 0, charCount: 0, readPage: 0, lastPage: 1,
       indexStatus: 'none', indexError: '', indexedAt: '', outlineSource: '', outlineCount: 0,
@@ -219,7 +261,7 @@ export function registerThesisRoutes(app, ctx) {
     if (item.filePath) { try { fs.unlinkSync(item.filePath); } catch (_) { /* ignore */ } }
     const updated = {
       ...item,
-      originalName: '', filename: '', filePath: '', fileSize: 0,
+      originalName: '', filename: '', filePath: '', fileSize: 0, fileHash: '',
       status: 'pending', error: '', source: '', parsedAt: '',
       numPages: 0, charCount: 0, readPage: 0, lastPage: 1,
       indexStatus: 'none', indexError: '', indexedAt: '', outlineSource: '', outlineCount: 0,

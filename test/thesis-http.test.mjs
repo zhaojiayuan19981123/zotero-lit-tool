@@ -6,7 +6,8 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -226,6 +227,35 @@ test('学位论文全链路：上传 → 解析 → 建索引 → 书签栏 → 
     const uploaded = await json(await fetch(`${base}/api/theses/${rec.id}/attachment`, { method: 'POST', body: fd }));
     assert.equal(uploaded.originalName, 'thesis.pdf');
     assert.equal(uploaded.numPages, 0, '上传时还没解析，页数待索引阶段补上');
+
+    // ---------- ①′ 导入去重：同一份 PDF 不该在库里变成两条 ----------
+    // 指纹必须由**服务端从落盘的文件**算出（前端传什么都不能作数）
+    const onDisk = await readFile(uploaded.filePath);
+    const realHash = createHash('sha256').update(onDisk).digest('hex');
+    assert.equal(uploaded.fileHash, realHash, '附件的内容指纹要按落盘字节算出来');
+
+    // 前端导入前也会算指纹并传上来，服务端拿同一套规则再拦一道
+    const dupPost = await post('/api/theses', {
+      title: 'thesis', originalName: 'thesis.pdf', fileSize: uploaded.fileSize, fileHash: realHash,
+    });
+    assert.equal(dupPost.status, 409, '同一份 PDF 再导一次要被拦下');
+    const dupBody = await json(dupPost);
+    assert.equal(dupBody.duplicate, true);
+    assert.equal(dupBody.reason, 'hash', '指纹一致是最硬的判据');
+    assert.equal(dupBody.existing.id, rec.id, '要告诉前端拦在了哪一条上');
+    assert.match(dupBody.error, /已经在库中/);
+
+    // 用户明确选了「仍然导入」时可以放行（同名同体积但确实是两份不同的文件）
+    const forced = await json(await post('/api/theses', {
+      title: 'forced', originalName: 'thesis.pdf', fileSize: uploaded.fileSize, fileHash: realHash, allowDuplicate: true,
+    }));
+    assert.ok(forced.id && forced.id !== rec.id, 'allowDuplicate=true 时照常建记录');
+    await fetch(`${base}/api/theses/${forced.id}`, { method: 'DELETE', headers: { Connection: 'close' } });
+
+    // 没有任何指纹线索的普通新建（先建记录、稍后再传附件）不受影响
+    const blank = await json(await post('/api/theses', { title: '只有标题' }));
+    assert.ok(blank.id);
+    await fetch(`${base}/api/theses/${blank.id}`, { method: 'DELETE', headers: { Connection: 'close' } });
 
     // ---------- ② AI 读封面填字段（两段式：先第 1 页，不够再补 2–3 页） ----------
     // 2a）不带图片 → 走「文本」兜底，而且只读第 1 页

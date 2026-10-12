@@ -14,6 +14,11 @@
 (function () {
   'use strict';
 
+  // 「避免重复导入」的判定规则（纯函数模块，独立成文件便于单测；
+  // 服务端 POST /api/theses 用同一套规则兜底）
+  const importUtils = window.ThesisImportUtils;
+  if (!importUtils) throw new Error('学位论文导入工具加载失败');
+
   // ==================== 常量 ====================
 
   // 默认 12 列 = 用户勾选的那 12 项（学位类型 / 年份 就在默认列里，可在「字段配置」里关掉）
@@ -97,6 +102,7 @@
     id: '', record: null, doc: null, numPages: 0, scale: 1.2, pageW: 0, pageH: 0,
     page: 1, outline: [], outlineSource: '', chat: [], note: '', noteLoaded: false,
     tab: 'analysis', noteMode: false, busy: false, observer: null, scrollRaf: 0,
+    pane: 'outline',      // 左侧栏当前页签：'outline' 章节 / 'papers' 论文目录
     saveTimer: 0, noteTimer: 0, renderTimer: 0, quotes: [],
     // 渲染队列：只渲染视口附近、且**一次只跑一页**，见 pumpRenderQueue
     queue: [], queued: new Set(), pumping: false, tasks: new Map(),
@@ -969,27 +975,81 @@
 
   // ==================== 导入 ====================
 
+  /**
+   * 导入学位论文 PDF。
+   *
+   * 【避免重复导入】同一个文件再导一次不该在库里变成两条。做法：
+   *   1. 先在本地算每个文件的 sha256，和库里的记录比一遍（纯前端，不传文件就能判定）；
+   *   2. 有重复就问一句：默认「跳过重复」，也可选「仍然导入」（同名同体积但确实不同的文件）；
+   *   3. 服务端 POST /api/theses 还会用同一套规则再拦一道，保证接口层面也收不进重复的。
+   * 老记录（本版本之前导入的）没有指纹，退回「体积 + 文件名」兜底 —— 所以升级前的重复也能认出来。
+   */
   async function importFiles(files) {
-    const pdfs = files.filter((f) => /\.pdf$/i.test(f.name));
+    const pdfs = files.filter((f) => importUtils.isPdfName(f.name));
     if (!pdfs.length) { toast('请选择 PDF 文件', true); return; }
-    const ids = [];
-    toast(`正在导入 ${pdfs.length} 个文件…`);
+
+    // ① 算内容指纹（算不出就留空，后面退回体积+文件名）
+    toast(`正在检查 ${pdfs.length} 个文件是否已在库中…`);
+    const cands = [];
     for (const f of pdfs) {
+      let hash = '';
+      try {
+        const buf = await f.arrayBuffer();
+        hash = await importUtils.sha256Hex(buf);
+      } catch (_) { hash = ''; }
+      cands.push({ file: f, name: f.name, size: f.size, hash });
+    }
+
+    // ② 和库里现有记录比一遍（先刷新，保证拿到的是最新的库）
+    await refresh();
+    const { dupes, fresh } = importUtils.partitionDuplicates(S.items, cands);
+    let targets = fresh;
+    if (dupes.length) {
+      const names = dupes.map((d) => `· ${d.candidate.name}`).join('\n');
+      const keep = await askConfirm({
+        title: '检测到重复导入',
+        hint: `下面 ${dupes.length} 个文件已经在库里了：\n${names}\n\n`
+          + `选「跳过重复」只导入其余 ${fresh.length} 个；选「仍然导入」会为它们再各建一份记录。`,
+        okText: `仍然导入（${dupes.length}）`,
+        cancelText: `跳过重复（${fresh.length}）`,
+      });
+      if (keep === true) targets = cands;
+    }
+    if (!targets.length) {
+      toast(`这 ${dupes.length} 个文件都已在库中，已跳过（没有新增）`);
+      return;
+    }
+
+    // ③ 建记录 + 传附件
+    const ids = [];
+    let skipped = 0;
+    toast(`正在导入 ${targets.length} 个文件…`);
+    for (const c of targets) {
       try {
         const rec = await api('/api/theses', {
           method: 'POST',
-          body: { title: f.name.replace(/\.pdf$/i, ''), collectionId: S.filter.collectionId === '__all__' ? '' : S.filter.collectionId },
+          body: {
+            title: c.name.replace(/\.pdf$/i, ''),
+            collectionId: S.filter.collectionId === '__all__' ? '' : S.filter.collectionId,
+            originalName: c.name,
+            fileSize: c.size,
+            fileHash: c.hash,
+            allowDuplicate: targets === cands,
+          },
         });
         const fd = new FormData();
-        fd.append('file', f, f.name);
+        fd.append('file', c.file, c.name);
         const res = await fetch(`/api/theses/${rec.id}/attachment`, { method: 'POST', body: fd });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || '上传失败');
         ids.push(rec.id);
       } catch (err) {
-        toast(`${f.name}：${err.message}`, true);
+        // 服务端兜底拦下的重复（409）也算「跳过」，不该弹成错误
+        if (/已经在库中/.test(err.message || '')) skipped += 1;
+        else toast(`${c.name}：${err.message}`, true);
       }
     }
     await refresh();
+    if (skipped) toast(`另有 ${skipped} 个文件已在库中，已跳过`);
     if (!ids.length) return;
     const recs = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
     await parseMany(recs);
@@ -1124,12 +1184,22 @@
       <div class="thr-body">
         <aside class="thr-outline" id="thrOutline">
           <div class="thr-out-head">
-            <input class="tb-input thr-out-search" id="thrOutSearch" type="search" placeholder="搜索章节 / 书签" />
-            <div class="thr-out-actions">
-              <button class="tb-btn" id="thrAddBookmark">＋ 在当前位置加书签</button>
+            <div class="thr-out-seg" id="thrOutSeg">
+              <button class="thr-out-seg-btn active" data-thrpanel="outline" title="本篇的章节与书签">📑 章节</button>
+              <button class="thr-out-seg-btn" data-thrpanel="papers" title="全部学位论文 —— 点一下直接切过去，不必先返回列表">📚 论文</button>
+            </div>
+            <div class="thr-out-pane" id="thrOutlinePane">
+              <input class="tb-input thr-out-search" id="thrOutSearch" type="search" placeholder="搜索章节 / 书签" />
+              <div class="thr-out-actions">
+                <button class="tb-btn" id="thrAddBookmark">＋ 在当前位置加书签</button>
+              </div>
+            </div>
+            <div class="thr-out-pane hidden" id="thrPapersPane">
+              <input class="tb-input thr-out-search" id="thrPaperSearch" type="search" placeholder="搜索标题 / 作者 / 学校" />
             </div>
           </div>
           <div class="thr-out-list" id="thrOutList"></div>
+          <div class="thr-out-list hidden" id="thrPaperList"></div>
         </aside>
         <div class="thr-stage" id="thrStage">
           <div class="thr-scroll" id="thrScroll"><div class="thr-pages" id="thrPages"></div></div>
@@ -1196,6 +1266,9 @@
   // ==================== 阅读器：打开 / 关闭 ====================
 
   async function openReader(id) {
+    // 从「论文目录」切到另一篇：先把上一篇的阅读现场拆干净（销毁 pdf 文档、落盘笔记与阅读位置），
+    // 否则旧文档不释放会累积内存，且防抖队列里没写完的笔记 / 翻到的页会丢。
+    if (R.id && R.id !== id) teardownReaderBody();
     closeDetail();
     buildReaderDom();
     R.noteRatio = Number(readJson(LS.noteRatio, 0.44)) || 0.44;
@@ -1226,6 +1299,10 @@
     try { $('#thrBudget').value = String(readJson(LS.budget, 40000)); } catch (_) { /* ignore */ }
     $('#thrAttach').checked = readJson(LS.attach, true) !== false;
 
+    // 左侧「论文目录」高亮当前这篇（页签切过去时直接就是对的）
+    setReaderPane(R.pane);
+    renderReaderDir();
+
     // 书签栏 + 对话记录先出来，PDF 与索引并行加载
     await Promise.all([loadOutline(), loadChatHistory(), loadQuotes()]);
     try {
@@ -1238,7 +1315,11 @@
     }
   }
 
-  function closeReader() {
+  /**
+   * 拆掉「当前这篇」的阅读现场：停渲染队列、销毁 pdf 文档、把还在防抖里的笔记与阅读位置落盘。
+   * 关闭阅读器、以及在目录里切到另一篇，都要走这里 —— 两处漏一处就会漏内存或丢笔记。
+   */
+  function teardownReaderBody() {
     R.observer?.disconnect();
     R.observer = null;
     R.recycleObs?.disconnect();
@@ -1248,17 +1329,21 @@
     R.pumping = false;
     try { R.doc?.destroy?.(); } catch (_) { /* ignore */ }
     R.doc = null;
-    $('#thr')?.classList.add('hidden');
-    $('#thr')?.classList.remove('note-mode');
     $('#thrSelbar').style.display = 'none';
     cancelOcr();
     hideOcrPanel();
-    // 关之前把还在防抖队列里的东西落盘，避免「刚写的笔记 / 刚翻到的页」丢掉
+    // 先落盘再切，避免「刚写的笔记 / 刚翻到的页」丢掉
     if (R.id) {
       clearTimeout(R.noteTimer);
       saveNote();
       saveReadPos(true);
     }
+  }
+
+  function closeReader() {
+    teardownReaderBody();
+    $('#thr')?.classList.add('hidden');
+    $('#thr')?.classList.remove('note-mode');
     R.id = '';
     R.record = null;
   }
@@ -1490,11 +1575,17 @@
 
   function saveReadPos(immediate) {
     clearTimeout(R.saveTimer);
+    // ⚠️ 「哪一篇」必须在发起请求时就锁住，不能在响应回来时再读 R.id：
+    // 在目录里切篇时，teardownReaderBody() 会为上一篇立刻发一次位置落盘，而 openReader()
+    // 紧接着就把 R.id 改成新的一篇；等响应回来时再去 findIndex(R.id) 就会找到**新一篇**的下标，
+    // 于是把上一篇的记录（含 id / 附件 / 页数）整条盖到新一篇头上，把库里的记录写坏。
+    const id = R.id;
+    const page = R.page;
+    if (!id) return;
     const run = () => {
-      if (!R.id) return;
-      api(`/api/theses/${R.id}`, { method: 'PATCH', body: { readPage: R.page, lastPage: R.page } })
+      api(`/api/theses/${id}`, { method: 'PATCH', body: { readPage: page, lastPage: page } })
         .then((updated) => {
-          const idx = S.items.findIndex((x) => x.id === R.id);
+          const idx = S.items.findIndex((x) => x.id === id);
           if (idx >= 0 && updated) S.items[idx] = { ...S.items[idx], ...updated };
         })
         .catch(() => { /* 位置记不上不是大事 */ });
@@ -1506,14 +1597,19 @@
   // ==================== 阅读器：书签栏 ====================
 
   async function loadOutline() {
+    // 在目录里切篇会让 R.id 立刻变成另一篇；下面每个 await 之后都要确认「还是同一篇」，
+    // 否则会把上一篇的章节 / 书签贴到当前这篇的书签栏上。
+    const id = R.id;
     try {
-      const data = await api(`/api/theses/${R.id}/outline`);
+      const data = await api(`/api/theses/${id}/outline`);
+      if (R.id !== id) return;
       R.outline = data.items || [];
       R.outlineSource = data.source || '';
       if (!R.outline.length) {
         // 还没有索引：后台建一次（首次会慢几秒），建好再刷新书签栏
         renderOutline('正在识别章节结构…');
-        streamPost(`/api/theses/${R.id}/index`, {}, (ev) => {
+        streamPost(`/api/theses/${id}/index`, {}, (ev) => {
+          if (R.id !== id) return;
           if (ev.message) renderOutline(ev.message);
           if (ev.error) renderOutline(`章节识别失败：${ev.error}`);
           if (ev.done) loadOutline();
@@ -1521,6 +1617,7 @@
         return;
       }
     } catch (err) {
+      if (R.id !== id) return;
       R.outline = [];
       renderOutline(err.message);
       return;
@@ -1583,6 +1680,51 @@
     }
   }
 
+  // ==================== 阅读器：论文目录（在读界面里直接切到另一篇） ====================
+  // 左侧栏的第二个页签：列出库里全部学位论文，点一下就地换文献 ——
+  // 不必「返回 → 找到那一篇 → 再点开」，读综述类文献时来回跳省掉三次操作。
+
+  /** 切左侧栏页签：章节 / 论文 */
+  function setReaderPane(name) {
+    R.pane = name === 'papers' ? 'papers' : 'outline';
+    $$('#thrOutSeg .thr-out-seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.thrpanel === R.pane));
+    $('#thrOutlinePane')?.classList.toggle('hidden', R.pane !== 'outline');
+    $('#thrPapersPane')?.classList.toggle('hidden', R.pane !== 'papers');
+    $('#thrOutList')?.classList.toggle('hidden', R.pane !== 'outline');
+    $('#thrPaperList')?.classList.toggle('hidden', R.pane !== 'papers');
+    if (R.pane === 'papers') renderReaderDir();
+  }
+
+  /** 论文目录只列「有 PDF 的」——没有附件的点开也读不了；总是置顶当前这篇 */
+  function renderReaderDir() {
+    const box = $('#thrPaperList');
+    if (!box) return;
+    const q = ($('#thrPaperSearch')?.value || '').trim().toLowerCase();
+    let list = S.items.filter((it) => it.filename);
+    if (q) {
+      list = list.filter((it) => [it.title, it.authors, it.school, it.originalName, it.year]
+        .map((v) => String(v || '')).join(' ').toLowerCase().includes(q));
+    }
+    list = list.slice().sort((a, b) => String(a.title || a.originalName || '')
+      .localeCompare(String(b.title || b.originalName || ''), 'zh'));
+    if (!list.length) {
+      box.innerHTML = `<div class="thr-out-empty">${S.items.some((it) => it.filename)
+        ? '没有匹配的论文'
+        : '库里还没有可阅读的 PDF'}</div>`;
+      return;
+    }
+    const colName = (id) => S.collections.find((c) => c.id === id)?.name || '';
+    box.innerHTML = list.map((it) => {
+      const sub = [it.school || colName(it.collectionId), it.year].map((v) => String(v || '').trim()).filter(Boolean).join(' · ');
+      return `<div class="thr-paper-item${it.id === R.id ? ' active' : ''}" data-paper-id="${esc(it.id)}" title="${esc(it.title || it.originalName || '')}">
+        <div class="thr-paper-name">${esc(it.title || it.originalName || '未命名')}</div>
+        ${sub ? `<div class="thr-paper-sub">${esc(sub)}</div>` : ''}
+      </div>`;
+    }).join('');
+    const cur = box.querySelector('.thr-paper-item.active');
+    if (cur) box.scrollTop = Math.max(0, cur.offsetTop - box.clientHeight / 2);
+  }
+
   /**
    * 轻量文本输入弹窗。
    * 刻意不用 window.prompt：Electron 的渲染进程里 prompt 被禁用（调用会直接抛错），
@@ -1635,6 +1777,53 @@
     });
   }
 
+  /**
+   * 二选一确认弹窗（比 window.confirm 多一件事：两个按钮的文字可以自定义，
+   * 这样「跳过重复 / 仍然导入」这种带后果的选择才说得清楚）。
+   * @returns {Promise<boolean|null>} true = 点了确认按钮；false / null = 取消、Esc 或点遮罩关掉
+   */
+  function askConfirm({ title = '确认', hint = '', okText = '确定', cancelText = '取消' } = {}) {
+    return new Promise((resolve) => {
+      let el = $('#thConfirm');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'thConfirm';
+        el.className = 'th-modal hidden';
+        el.innerHTML = `<div class="th-modal-box th-ask-box">
+          <div class="th-modal-head"><h3 id="thConfirmTitle">确认</h3></div>
+          <div class="th-modal-body"><div class="th-confirm-hint" id="thConfirmHint"></div></div>
+          <div class="th-modal-foot">
+            <button class="tb-btn" id="thConfirmCancel">取消</button>
+            <button class="tb-btn accent" id="thConfirmOk">确定</button>
+          </div>
+        </div>`;
+        document.body.appendChild(el);
+      }
+      $('#thConfirmTitle').textContent = title;
+      $('#thConfirmHint').textContent = hint;
+      $('#thConfirmOk').textContent = okText;
+      $('#thConfirmCancel').textContent = cancelText;
+      el.classList.remove('hidden');
+
+      const cleanup = () => {
+        el.classList.add('hidden');
+        $('#thConfirmOk').removeEventListener('click', done);
+        $('#thConfirmCancel').removeEventListener('click', cancel);
+        el.removeEventListener('click', onBackdrop);
+        document.removeEventListener('keydown', onKey);
+      };
+      const done = () => { cleanup(); resolve(true); };
+      const cancel = () => { cleanup(); resolve(false); };
+      const onBackdrop = (e) => { if (e.target === el) cancel(); };
+      const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); cancel(); } };
+      $('#thConfirmOk').addEventListener('click', done);
+      $('#thConfirmCancel').addEventListener('click', cancel);
+      el.addEventListener('click', onBackdrop);
+      document.addEventListener('keydown', onKey);
+      setTimeout(() => $('#thConfirmOk')?.focus(), 30);
+    });
+  }
+
   // ==================== 书签（我的书签） ====================
 
   async function addBookmark() {
@@ -1649,18 +1838,20 @@
     if (note === null) return;
     const list = bookmarks().slice();
     list.push({ id: `b${Date.now().toString(36)}`, page: R.page, note: (note || '').trim() || fallback });
-    const updated = await api(`/api/theses/${R.id}`, { method: 'PATCH', body: { bookmarks: list } });
-    R.record = updated;
-    const idx = S.items.findIndex((x) => x.id === R.id);
+    // 同 saveReadPos：先在发请求时锁住 id，避免切篇后把响应写到另一篇头上
+    const id = R.id;
+    const updated = await api(`/api/theses/${id}`, { method: 'PATCH', body: { bookmarks: list } });
+    if (R.id === id) R.record = updated;
+    const idx = S.items.findIndex((x) => x.id === id);
     if (idx >= 0) S.items[idx] = { ...S.items[idx], ...updated };
-    renderOutline();
+    if (R.id === id) renderOutline();
   }
 
   async function removeBookmark(id) {
     const list = bookmarks().filter((b) => b.id !== id);
-    const updated = await api(`/api/theses/${R.id}`, { method: 'PATCH', body: { bookmarks: list } });
-    R.record = updated;
-    renderOutline();
+    const curId = R.id;
+    const updated = await api(`/api/theses/${curId}`, { method: 'PATCH', body: { bookmarks: list } });
+    if (R.id === curId) { R.record = updated; renderOutline(); }
   }
 
   // ==================== 阅读器：字段面板 ====================
@@ -1713,13 +1904,12 @@
   }
 
   async function saveField(field, value) {
+    // patchItem 内部已按显式 id 写回 S.items / renderTable；这里只在「还是同一篇」时同步 R.record，
+    // 免得响应回来时 R.id 已经换成另一篇、把上一篇的字段塞进当前记录。
+    const id = R.id;
     const patch = { [field]: value };
-    const updated = await patchItem(R.id, patch);
-    if (updated) {
-      R.record = updated;
-      const idx = S.items.findIndex((x) => x.id === R.id);
-      if (idx >= 0) S.items[idx] = updated;
-    }
+    const updated = await patchItem(id, patch);
+    if (updated && R.id === id) R.record = updated;
   }
 
   // ==================== 阅读器：标签页 / 笔记模式 ====================
@@ -1823,10 +2013,15 @@
   async function ensureNote() {
     if (R.noteLoaded) return;
     R.noteLoaded = true;
+    const id = R.id;                       // 同上：切篇后旧笔记不能落到现在这篇的 textarea 里
     try {
-      const data = await api(`/api/paper-notes/${R.id}`);
+      const data = await api(`/api/paper-notes/${id}`);
+      if (R.id !== id) return;
       R.note = data.md || '';
-    } catch (_) { R.note = ''; }
+    } catch (_) {
+      if (R.id !== id) return;
+      R.note = '';
+    }
     const md = $('#thrMd');
     if (md && !md.value) md.value = R.note;
     setNoteState('已保存');
@@ -1946,10 +2141,12 @@
   }
 
   async function loadChatHistory() {
+    const id = R.id;                       // 同上：响应回来时可能已经切篇了
     try {
-      const data = await api(`/api/paper-chat/${R.id}`);
+      const data = await api(`/api/paper-chat/${id}`);
+      if (R.id !== id) return;
       R.chat = (data.messages || []).map((m) => ({ role: m.role, content: m.content }));
-    } catch (_) { R.chat = []; }
+    } catch (_) { if (R.id !== id) return; R.chat = []; }
     renderChat();
   }
 
@@ -2086,6 +2283,21 @@
   function bindReader() {
     $('#thrBack')?.addEventListener('click', closeReader);
     $('#thrOutlineToggle')?.addEventListener('click', () => $('#thrOutline')?.classList.toggle('collapsed'));
+
+    // 左侧栏页签：章节 / 论文目录
+    $('#thrOutSeg')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('.thr-out-seg-btn');
+      if (btn) setReaderPane(btn.dataset.thrpanel);
+    });
+    $('#thrPaperSearch')?.addEventListener('input', renderReaderDir);
+    $('#thrPaperList')?.addEventListener('click', async (e) => {
+      const row = e.target.closest('[data-paper-id]');
+      if (!row) return;
+      const id = row.dataset.paperId;
+      if (!id || id === R.id) return;   // 点的就是当前这篇，别白重载一遍
+      await openReader(id);
+      renderReaderDir();                // 换完重新高亮
+    });
     $('#thrNoteMode')?.addEventListener('click', toggleNoteMode);
     $('#thrQuotesBtn')?.addEventListener('click', () => openQuotesDrawer());
     $('#thrOcr')?.addEventListener('click', () => startOcr());
@@ -2498,8 +2710,12 @@
   }
 
   async function loadQuotes() {
-    try { S.quotes = (await api('/api/thesis-quotes')).filter((q) => q.thesisId === R.id); }
-    catch (_) { S.quotes = []; }
+    const id = R.id;                       // 摘录按当前这篇过滤；切篇后旧结果不能覆盖
+    try {
+      const list = (await api('/api/thesis-quotes')).filter((q) => q.thesisId === id);
+      if (R.id !== id) return;
+      S.quotes = list;
+    } catch (_) { if (R.id === id) S.quotes = []; }
   }
 
   function openQuotesDrawer() {

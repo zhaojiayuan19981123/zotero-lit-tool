@@ -972,6 +972,33 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .pr-body { flex: 1; display: flex; overflow: hidden; }
 .pr-main { flex: 1; min-width: 0; overflow: hidden; display: flex; position: relative; }
 
+/* ---------- 论文目录（阅读器最左侧：点一下直接跳到另一篇，不必先返回列表） ---------- */
+.pr-dir {
+  width: 264px; flex: none; display: flex; flex-direction: column; min-height: 0;
+  background: var(--surface); border-right: 1px solid var(--border);
+}
+.pr-dir.hidden { display: none; }
+.pr-dir-head { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.pr-dir-title { font-size: 12.5px; font-weight: 600; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
+.pr-dir-search {
+  width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+  font-size: 12.5px; background: var(--surface); color: var(--text);
+}
+.pr-dir-list { flex: 1; overflow-y: auto; padding: 6px 6px 16px; }
+.pr-dir-group { padding: 8px 8px 4px; font-size: 11.5px; color: var(--text-3); letter-spacing: .04em; }
+.pr-dir-item { padding: 5px 8px; border-radius: 6px; cursor: pointer; line-height: 1.35; }
+.pr-dir-item:hover { background: var(--panel-2); }
+.pr-dir-item.active { background: var(--primary-soft); }
+.pr-dir-item.active .pr-dir-name { color: var(--primary); font-weight: 600; }
+.pr-dir-name {
+  font-size: 12.5px; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.pr-dir-sub { font-size: 11.5px; color: var(--text-3); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr-dir-empty { padding: 16px 12px; font-size: 12.5px; color: var(--text-3); line-height: 1.7; text-align: center; }
+.pr-dir-foot { padding: 8px 12px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-3); }
+#prDirToggle.active { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+
 /* ---------- Markdown 译文查看器（覆盖在 PDF 页面上方） ---------- */
 .pr-md-viewer {
   position: absolute; inset: 0; z-index: 30;

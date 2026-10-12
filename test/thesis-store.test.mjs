@@ -207,3 +207,55 @@ test('字段瘦身：AI 只留 5 个书目前提字段，废弃字段全部清�
   assert.equal(after.suggestedRating, undefined);
   assert.equal(after.title, '老数据', '清理不能误伤正常字段');
 });
+
+// ---------------- 导入去重（避免同一份 PDF 在库里出现两次） ----------------
+
+test('blankThesis 带空的 fileHash（老记录没有这个字段，读出来是 undefined 也算正常）', () => {
+  assert.equal(thesisStore.blankThesis().fileHash, '');
+});
+
+test('normalizeFileName 抹掉大小写 / 空格 / 下划线 / 连字符，保留扩展名', () => {
+  assert.equal(thesisStore.normalizeFileName(' 论文 终稿.PDF '), '论文终稿.pdf');
+  assert.equal(thesisStore.normalizeFileName('论文_终稿.pdf'), '论文终稿.pdf');
+  assert.equal(thesisStore.normalizeFileName('论文-终稿.pdf'), '论文终稿.pdf');
+  assert.equal(thesisStore.normalizeFileName(null), '');
+  assert.notEqual(thesisStore.normalizeFileName('a.pdf'), thesisStore.normalizeFileName('a.docx'));
+});
+
+test('findDuplicateThesis：指纹一致即重复，文件名不同也认（且大小写不敏感）', () => {
+  const rec = thesisStore.upsertThesis(thesisStore.blankThesis({
+    title: '重复判定-指纹', originalName: '原件.pdf', fileSize: 100, fileHash: 'ABC123',
+  }));
+  const hit = thesisStore.findDuplicateThesis({ fileHash: 'abc123', fileSize: 999, originalName: '改过名.pdf' });
+  assert.ok(hit, '指纹相同就该判重复');
+  assert.equal(hit.reason, 'hash');
+  assert.equal(hit.record.id, rec.id);
+  // 排除自己：给这篇换附件时不该把自己算成重复
+  assert.equal(thesisStore.findDuplicateThesis({ fileHash: 'ABC123' }, { excludeId: rec.id }), null);
+  // 指纹不同 → 不是重复，哪怕体积、名字都像
+  assert.equal(thesisStore.findDuplicateThesis({ fileHash: 'OTHER', fileSize: 100, originalName: '原件.pdf' }), null);
+});
+
+test('findDuplicateThesis：老记录没有指纹时，退回「体积 + 文件名」（两个都要满足）', () => {
+  const legacy = thesisStore.upsertThesis(thesisStore.blankThesis({
+    title: '重复判定-老记录', originalName: '老论文.pdf', fileSize: 54321,
+  }));
+  assert.equal(legacy.fileHash, '');
+  const hit = thesisStore.findDuplicateThesis({ fileHash: '', fileSize: 54321, originalName: ' 老论文 .PDF' });
+  assert.ok(hit, '同名同体积的旧记录应被判重复');
+  assert.equal(hit.reason, 'name-size');
+  assert.equal(thesisStore.findDuplicateThesis({ fileHash: '', fileSize: 1, originalName: '老论文.pdf' }), null, '体积不同不判重复');
+  assert.equal(thesisStore.findDuplicateThesis({ fileHash: '', fileSize: 54321, originalName: '别的论文.pdf' }), null, '文件名不同不判重复');
+});
+
+test('findDuplicateThesis：带指纹的记录不参与「体积+文件名」兜底；没有线索时一律返回 null', () => {
+  thesisStore.upsertThesis(thesisStore.blankThesis({
+    title: '重复判定-有指纹', originalName: '有指纹.pdf', fileSize: 777, fileHash: 'HAS_HASH',
+  }));
+  // 名字体积都对得上，但库里那条有指纹、这次没算出指纹 → 不下结论，交给别的记录比
+  assert.equal(thesisStore.findDuplicateThesis({ fileHash: '', fileSize: 777, originalName: '有指纹.pdf' }), null);
+
+  assert.equal(thesisStore.findDuplicateThesis({}), null);
+  assert.equal(thesisStore.findDuplicateThesis(null), null);
+  assert.equal(thesisStore.findDuplicateThesis({ fileHash: '', fileSize: 0, originalName: '' }), null);
+});

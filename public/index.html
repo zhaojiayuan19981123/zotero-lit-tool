@@ -1369,6 +1369,7 @@
   <div id="pdfReader" class="pdf-reader hidden">
     <div class="pr-toolbar">
       <button id="prClose" class="btn">← 返回</button>
+      <button id="prDirToggle" class="btn btn-ghost" title="展开 / 收起论文目录 —— 不必先返回列表，直接跳到另一篇">📚 目录</button>
       <span id="prFilename" class="pr-filename"></span>
       <div class="pr-nav">
         <input type="number" id="prPageInput" class="pr-page-input" value="1" min="1" />
@@ -1564,6 +1565,15 @@
     </div>
 
     <div class="pr-body">
+      <!-- 最左：论文目录（点一下直接跳到另一篇，不必先返回列表再打开） -->
+      <aside id="prDir" class="pr-dir hidden">
+        <div class="pr-dir-head">
+          <div class="pr-dir-title">论文目录 <span class="side-count" id="prDirCount">0</span></div>
+          <input id="prDirSearch" class="pr-dir-search" type="search" placeholder="搜索标题 / 作者 / 期刊" />
+        </div>
+        <div class="pr-dir-list" id="prDirList"></div>
+        <div class="pr-dir-foot" id="prDirFoot">点标题即可切换阅读</div>
+      </aside>
       <!-- 左：PDF 连续页面（Markdown 译文打开后以覆盖层形式盖在页面上方） -->
       <div class="pr-main">
         <div id="prMdViewer" class="pr-md-viewer hidden">
@@ -1803,6 +1813,7 @@
   <script src="paper-note-utils.js"></script>
   <script src="doi-utils.js"></script>
   <script src="rank-utils.js"></script>
+  <script src="thesis-import-utils.js"></script>
   <script src="thesis.js"></script>
   <script src="achievements.js"></script>
   <script src="app.js"></script>
