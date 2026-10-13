@@ -5,8 +5,9 @@
 //   2) 输出模式：both / all 这类别名的展开规则（前端下拉、作业编排、成品命名都靠它）
 //   3) 重排：阅读顺序（双栏不能交错）、首行缩进、页眉页脚必须丢掉
 //   4) 并发池：顺畅要提速、限流要立刻降速（「大模型翻译慢」的解法是否真的生效）
-//   5) 前端静态一致：JS 里 ftEl('xxx') 引用的每个 id 必须真的在 index.html 里，
-//      否则面板会静默失灵（历史上就踩过一次：事件没绑定，点了没反应）
+//   5) 前端静态一致：翻译面板改版后最容易出的两类静默 bug ——
+//      ① 面板删了但代码只删一半（残留 ftEl('xxx') 之类的引用）；
+//      ② 新的唯一入口「对照精读」四区骨架缺件，界面塌一角却没人报错
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -442,42 +443,49 @@ test('旋转页：双语成品画布尺寸按「显示尺寸」翻倍，且不�
 
 // ==================== 前端静态一致性 ====================
 
-test('前端：app.js 引用的每个 ft 元素 id 都必须存在于 index.html', () => {
+test('前端：全文翻译面板已整体移除，设置页的翻译源仍必须留着', () => {
   const js = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf-8');
   const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf-8');
-  const ids = new Set();
-  for (const m of js.matchAll(/ftEl\('([A-Za-z0-9_-]+)'\)/g)) ids.add(m[1]);
-  assert.ok(ids.size >= 10, `只解析到 ${ids.size} 个 id，正则可能失效了`);
-  const missing = [...ids].filter((id) => !new RegExp(`id=["']${id}["']`).test(html));
-  assert.deepEqual(missing, [], `这些 id 在 index.html 里找不到：${missing.join(', ')}`);
-});
-
-test('前端：输出成品下拉必须覆盖服务端认可的所有模式', () => {
-  const js = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf-8');
-  const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf-8');
-  const select = html.match(/<select id="ftMode"[\s\S]*?<\/select>/);
-  assert.ok(select, 'index.html 里找不到 ftMode 下拉');
-  const values = [...select[0].matchAll(/value="([^"]+)"/g)].map((m) => m[1]);
-  for (const m of MODES) {
-    assert.ok(values.includes(m), `ftMode 缺少模式 ${m}`);
-  }
-  // 这三种成品都要有中文短名，否则历史记录里会显示英文 key
-  for (const k of ['mono', 'dual', 'reflow']) {
-    assert.ok(js.includes(`'${k}'`) || js.includes(`${k}:`), `app.js 缺少 ${k} 的展示名`);
+  // 面板删掉后不该再有任何 ft 开头的控件，也不该留 ftEl() / ftOptions() 的残骸 ——
+  // 这种「删了一半」最容易变成点了没反应的静默 bug。
+  assert.doesNotMatch(html, /id=["']ft[A-Za-z]/, 'index.html 里还有 ft 开头的控件残留');
+  assert.doesNotMatch(js, /\bftEl\(|function ftOptions\(/, 'app.js 里还有全文翻译面板的残骸');
+  // 但设置页的翻译源 / 源语言 / 目标语言必须留着：
+  // 对照精读的单段翻译、划词译文浮层、笔记模式都读它们（全应用共用）。
+  for (const id of ['prTranslateSource', 'prLangFrom', 'prLangTo']) {
+    assert.match(html, new RegExp(`id=["']${id}["']`), `设置页缺少 ${id}`);
   }
 });
 
-test('前端：新增的观感控件（字体族 / 字重 / 字号 / 并发）都在表单里', () => {
+test('前端：整篇翻译目前唯一入口是对照精读，四区骨架齐备', () => {
   const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf-8');
-  for (const id of ['ftFontFamily', 'ftFontWeight', 'ftFontSize', 'ftConcurrency',
-    'ftRespectBold', 'ftReflowKeepFigures', 'ftReflowIndent', 'ftSaveDefaults']) {
-    assert.ok(new RegExp(`id=["']${id}["']`).test(html), `index.html 缺少控件 ${id}`);
+  const js = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf-8');
+  // 左侧大纲 / 中间左原文 PDF / 中间右译文 / 最右 AI 助读，加顶部工具条与启动卡。
+  for (const id of ['cmpStage', 'cmpBar', 'cmpPanes', 'cmpOutlineList', 'cmpPdfHost',
+    'cmpTransFlow', 'cmpAssistHost', 'cmpViewSeg', 'cmpEngine', 'cmpStartBtn']) {
+    assert.match(html, new RegExp(`id=["']${id}["']`), `index.html 缺少对照精读元素 ${id}`);
+  }
+  // #prPages 必须能在三种阅读形态之间搬家（普通 / 笔记 / 对照精读），
+  // 所以既要有搬进对照精读的入口，也要有搬回去的收尾，缺一个就回不了普通阅读。
+  for (const fn of ['adoptCmpPdfHost', 'restoreCmpPdfHost', 'fitWidth']) {
+    assert.match(js, new RegExp(`function ${fn}\\(`), `app.js 缺少 ${fn}()`);
+  }
+});
+
+test('前端：划词工具条六项动作与划词译文浮层都在', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf-8');
+  const tb = html.match(/<div id="prSelectionToolbar"[\s\S]*?<\/div>/);
+  assert.ok(tb, 'index.html 里找不到 #prSelectionToolbar');
+  const actions = [...tb[0].matchAll(/data-sel="([^"]+)"/g)].map((m) => m[1]);
+  for (const a of ['copy', 'highlight', 'underline', 'note', 'cite', 'translate']) {
+    assert.ok(actions.includes(a), `划词工具条缺少动作 ${a}`);
+  }
+  // 划词「翻译」的结果就地显示，不再往已删除的右栏面板里送
+  for (const id of ['prSelTrans', 'prSelTransBody', 'prSelTransCopy', 'prSelTransClose']) {
+    assert.match(html, new RegExp(`id=["']${id}["']`), `index.html 缺少划词译文浮层部件 ${id}`);
   }
   const js = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf-8');
-  const opts = js.match(/function ftOptions\(\)[\s\S]*?\n  }/);
-  assert.ok(opts, '找不到 ftOptions()');
-  for (const key of ['fontFamily', 'fontWeight', 'fontSize', 'respectBold',
-    'reflowKeepFigures', 'reflowIndent', 'concurrency']) {
-    assert.ok(opts[0].includes(key), `ftOptions() 没有把 ${key} 提交给服务端`);
+  for (const fn of ['showSelTrans', 'hideSelTrans', 'placeSelTrans']) {
+    assert.match(js, new RegExp(`function ${fn}\\(`), `app.js 缺少 ${fn}()`);
   }
 });

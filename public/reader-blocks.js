@@ -126,6 +126,9 @@
   function hideHover() {
     state.activeId = null;
     state.point = null;
+    // 顺手把命中结果也清掉。否则「先悬停 A 块，再点到空白处」时 activeBlock 还是 A，
+    // 点击就会拿着上一块的上下文去响应（打开不相干的预览）。
+    state.activeBlock = null;
     if (state.hoverEl?.parentElement) state.hoverEl.remove();
     if (state.badgeEl?.parentElement) state.badgeEl.remove();
     state.hoverWrap = null;
@@ -199,7 +202,7 @@
     if (!state.enabled) return;
     // 点在链接 / 按钮 / 输入框上时不抢事件
     if (event.target?.closest?.('a, button, input, textarea, select, [role="button"]')) return;
-    // 刚划完词（有选区）说明用户不是想点块
+    // 刚划完词（有选区）说明用户不是想点块 —— 划词永远优先
     if (window.getSelection()?.toString().trim()) return;
     const host = $('prPages');
     const wrap = event.target?.closest?.('.pr-page-wrap');
@@ -207,8 +210,18 @@
     // 触屏或快速点击时 hover 可能还没跑，这里按坐标现算一次
     applyPoint(wrap, event.clientX, event.clientY);
     const block = state.activeBlock;
-    // 只有带裁图的块（图表 / 表格 / 公式）响应点击；正文块交给划词，不抢交互
-    if (!block || !isAsset(block)) return;
+    if (!block) return;
+    // onPick 由调用方注入：对照精读用它做「点原文哪里，译文就跳到哪」，
+    // 那时正文块也要能点。没注入 onPick 时保持原行为 —— 只有带裁图的块
+    // （图表 / 表格 / 公式）响应点击，正文块留给划词。
+    if (state.hooks.onPick) {
+      event.preventDefault();
+      event.stopPropagation();
+      state.hooks.onPick(block, { asset: isAsset(block), label: labelOf(block) });
+      return;
+    }
+    // 只有带裁图的块响应点击；正文块交给划词，不抢交互
+    if (!isAsset(block)) return;
     event.preventDefault();
     event.stopPropagation();
     state.hooks.onActivate?.(block, { asset: true, label: labelOf(block) });

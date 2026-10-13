@@ -1205,9 +1205,31 @@
         <label class="field tr-field hidden" data-tr-for="tencent"><span>腾讯云密钥（格式：SecretId#SecretKey）</span><input id="setTencentKey" class="tb-input" type="password" placeholder="在腾讯云「访问管理 → API 密钥管理」获取" /></label>
         <label class="field tr-field hidden" data-tr-for="tencent"><span>腾讯云地域（可选）</span><input id="setTencentRegion" class="tb-input" placeholder="默认 ap-shanghai" /></label>
         <div class="field-sep"></div>
+        <p class="modal-desc">阅读器里的<b>翻译源</b>与<b>目标语言</b>：对照精读的整篇翻译与「点段落即译」、笔记模式、邮件翻译都读这一组设置。
+          对照精读界面里也有一份同样的选择器，改那边只影响那一次阅读。</p>
+        <label class="field"><span>翻译源（单段 / 对照精读的默认值）</span>
+          <select id="prTranslateSource" class="tb-select w100" title="局部翻译使用的翻译源；整篇翻译在对照精读里单独选">
+            <option value="auto">跟随上方「翻译提供方」设置</option>
+          </select>
+        </label>
+        <label class="field"><span>语言方向</span>
+          <div class="pr-lang-row">
+            <select id="prLangFrom" class="tb-select">
+              <option value="auto">自动检测</option>
+              <option value="en">English</option>
+              <option value="zh">中文</option>
+            </select>
+            <span class="pr-lang-arrow">→</span>
+            <select id="prLangTo" class="tb-select">
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+        </label>
+        <div class="field-sep"></div>
         <label class="field"><span>全文翻译中文字体（可选）</span><input id="setPdfFontPath" class="tb-input" placeholder="留空 = 自动探测系统字体，找不到会自动下载 Noto Sans SC" /></label>
-        <p class="modal-desc">译文的字体家族（黑体系 / 宋体系 / 跟随原文）、粗细、字号与并发数，在阅读器左侧
-          <b>「📄 全文翻译」</b>面板里按篇调整，并可用「存为默认」持久化。这里只需在需要指定某个特定字体文件时填写。</p>
+        <p class="modal-desc">译文的字体家族（黑体系 / 宋体系 / 跟随原文）、粗细、字号与并发数，在
+          <b>对照精读</b>的「🌐 全文翻译」面板里按篇调整，并可用「存为默认」持久化。这里只需在需要指定某个特定字体文件时填写。</p>
         <div class="field-sep"></div>
         <p class="modal-desc" style="background:var(--primary-soft)">主题配色会同步应用于主操作、选中状态、链接与侧边栏；语义状态色保持稳定，以保证信息识别和阅读对比度。</p>
         <label class="field"><span>预设配色</span>
@@ -1642,45 +1664,45 @@
         </div>
       </div>
 
-      <!-- 常驻工具条：视图切换 / 全文翻译入口 / 状态。
+      <!-- 常驻工具条：视图切换 / 整篇翻译入口 / 状态。
            刻意放在四区之上，而不是某一栏的栏头里 —— 若挂在「原文」栏头上，
            切到「仅译文」时原文栏连同切换按钮一起被隐藏，用户就被卡死在那个视图里。 -->
       <div class="cmp-bar" id="cmpBar">
         <div class="pn-seg pn-seg-sm" id="cmpViewSeg">
-          <button class="pn-seg-btn active" data-cmpview="split" title="左原文右译文，两侧同步滚动">分栏对照</button>
-          <button class="pn-seg-btn" data-cmpview="inline" title="只在原文栏里，每段下面挂它的译文">同栏对照</button>
+          <button class="pn-seg-btn" data-cmpview="pdf" title="只看原文 PDF">仅原文</button>
+          <button class="pn-seg-btn active" data-cmpview="split" title="左原文 PDF 右译文，两侧同步滚动">原文译文</button>
           <button class="pn-seg-btn" data-cmpview="trans" title="只看译文，用于快速通读">仅译文</button>
         </div>
-        <button id="cmpStartToggle" class="btn btn-ghost btn-sm" title="选择翻译引擎，把整篇按版面块逐段翻译">🌐 全文翻译</button>
         <span class="cmp-engine-state" id="cmpEngineState"></span>
         <span class="cmp-hint" id="cmpSyncHint"></span>
+        <span class="cmp-bar-spacer"></span>
+        <button id="cmpStartToggle" class="cmp-bar-btn" title="选择翻译引擎，把整篇按版面块逐段翻译">🌐 整篇翻译</button>
       </div>
 
       <div class="cmp-panes" id="cmpPanes">
         <!-- ---------- 最左：本文大纲 ---------- -->
         <aside class="cmp-pane cmp-outline" data-cmp="outline">
-          <div class="pn-head">
-            <span class="pn-head-title">本文大纲 <span class="side-count" id="cmpOutlineCount">0</span></span>
-            <input id="cmpOutlineSearch" class="pr-dir-search cmp-outline-search" type="search" placeholder="搜索章节" />
+          <div class="cmp-pane-head">
+            <span class="cmp-pane-title">目录</span>
+            <input id="cmpOutlineSearch" class="cmp-outline-search" type="search" placeholder="搜索" />
           </div>
           <div class="cmp-outline-list" id="cmpOutlineList"></div>
-          <div class="cmp-outline-foot" id="cmpOutlineFoot">点章节即可跳到该段</div>
         </aside>
-        <div class="pn-resizer" data-cmpresize="outline" title="拖动调整大纲宽度"></div>
+        <div class="pn-resizer" data-cmpresize="outline" title="拖动调整目录宽度"></div>
 
-        <!-- ---------- 中左：原文流 ---------- -->
+        <!-- ---------- 中左：原文 PDF。宿主容器：进入对照精读时把 #prPages 整个搬进来，
+             退出时搬回 .pr-main —— 与笔记模式复用 #prPages 是同一个手法。
+             所以缩放 / 旋转 / 跳页 / 文本层划词 / 批注高亮全部沿用，不需要第二套 PDF 渲染。 ---------- -->
         <section class="cmp-pane cmp-src" data-cmp="src">
-          <div class="pn-head">
-            <span class="pn-head-title">原文 <span class="side-count" id="cmpSrcCount">0</span></span>
-          </div>
-          <div class="cmp-flow" id="cmpSrcFlow"></div>
+          <div class="cmp-pdf-host" id="cmpPdfHost"></div>
         </section>
         <div class="pn-resizer" data-cmpresize="trans" title="拖动调整原文 / 译文宽度"></div>
 
         <!-- ---------- 中右：译文流 ---------- -->
         <section class="cmp-pane cmp-trans" data-cmp="trans">
-          <div class="pn-head">
-            <span class="pn-head-title">译文 <span class="side-count" id="cmpTransCount">0</span></span>
+          <div class="cmp-pane-head">
+            <span class="cmp-pane-title">译文</span>
+            <span class="side-count" id="cmpTransCount">0</span>
           </div>
           <div class="cmp-flow" id="cmpTransFlow"></div>
         </section>
@@ -1728,45 +1750,17 @@
       <!-- 右：功能面板（划词翻译 / 解析结果 / AI 对话） -->
       <aside class="pr-trans-panel">
         <div class="pr-tabs" id="prTabs">
-          <button class="pr-tab active" data-prtab="translate">🌐 划词翻译</button>
-          <button class="pr-tab" data-prtab="fulltext" id="prTabFulltext">📄 全文翻译</button>
-          <button class="pr-tab" data-prtab="analysis" id="prTabAnalysis">📋 解析结果</button>
-          <button class="pr-tab" data-prtab="chat" id="prTabChat">🤖 AI 对话</button>
+          <button class="pr-tab active" data-prtab="analysis" id="prTabAnalysis">📋 解析结果</button>
+          <button class="pr-tab" data-prtab="notes" id="prTabNotes">📝 笔记</button>
+          <button class="pr-tab" data-prtab="chat" id="prTabChat">🤖 AI 助读</button>
         </div>
 
-        <!-- ---------- 划词翻译 ---------- -->
-        <div class="pr-panel-body pr-pane" data-prpane="translate">
-          <textarea id="prSourceText" class="pr-src" placeholder="在左侧 PDF 中选中文字即可自动翻译；也可在此直接粘贴文本…"></textarea>
-          <div class="pr-selection-options">
-            <span>选区：</span>
-            <label class="pr-join-label"><input id="prJoinMode" type="checkbox" /> 拼接模式</label>
-            <button id="prClearSelection" class="btn btn-ghost btn-sm" type="button" title="清空已拼接的选区与译文">清空</button>
-          </div>
-          <div class="pr-lang-row">
-            <select id="prTranslateSource" class="tb-select w100" title="本次翻译使用的翻译源（只影响划词翻译）">
-              <option value="auto">翻译源：跟随全局设置</option>
-            </select>
-          </div>
-          <div class="pr-lang-row">
-            <select id="prLangFrom" class="tb-select">
-              <option value="auto">自动检测</option>
-              <option value="en">English</option>
-              <option value="zh">中文</option>
-            </select>
-            <span class="pr-lang-arrow">→</span>
-            <select id="prLangTo" class="tb-select">
-              <option value="zh">中文</option>
-              <option value="en">English</option>
-            </select>
-          </div>
-          <button id="prDoTranslate" class="btn btn-primary w100">翻 译</button>
-          <div id="prTransResult" class="pr-trans-box">
-            <div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>
-          </div>
-          <!-- 下面两块依赖「文献库记录」（写入 thoughts 字段 / paper-notes.json）；
-               阅读成果管理里的附件时没有对应记录，按来源整块隐藏（见 app.js 的 applyReaderMode）。 -->
+        <!-- ---------- 笔记与高亮（我的思考 + 批注列表） ---------- -->
+        <!-- 原「划词翻译」页签已删除：翻译统一走「对照精读」。
+             这一页留下的两块依赖「文献库记录」（写入 thoughts 字段 / paper-notes.json）；
+             阅读成果管理里的附件时没有对应记录，按来源整块隐藏（见 app.js 的 applyReaderMode）。 -->
+        <div class="pr-panel-body pr-pane hidden" data-prpane="notes">
           <div id="prLitOnly">
-            <div class="pr-panel-sep"></div>
             <div class="pr-panel-sub">💭 我的思考 <span class="side-count" id="prThoughtsState"></span></div>
             <textarea id="prThoughts" class="pr-src pr-thoughts" placeholder="阅读时随手记录自己的小想法：疑问、灵感、与课题的联系…保存后写入文献库的「我的思考」字段"></textarea>
             <button id="btnPrThoughtsSave" class="btn btn-primary w100" style="margin-top:6px">保存思考</button>
@@ -1800,108 +1794,6 @@
             </div>
             <div id="prNotesList" class="pr-notes-list"></div>
           </div>
-        </div>
-
-        <!-- ---------- 全文翻译（整篇 PDF：解析版式 → 分段翻译 → 回写 PDF） ---------- -->
-        <div class="pr-panel-body pr-pane hidden" data-prpane="fulltext">
-          <div class="ft-head">
-            <span class="ft-title">整篇文献翻译</span>
-            <span id="ftEngineState" class="ft-badge"></span>
-          </div>
-          <p class="ft-note">按段落翻译整篇 PDF。默认产出 <b>Markdown 译文</b>：按阅读顺序重排、公式 / 表格原样保留，可在左侧阅读器内随时<b>与原文 PDF 对照切换</b>。也可选产出 <b>单语译文版</b>（保留原版面原位覆盖）、<b>双语对照版</b>（左原文右译文）、<b>重排版</b>（A4 单栏 PDF）。</p>
-
-          <div class="ft-grid">
-            <label class="ft-field"><span>翻译引擎</span>
-              <select id="ftEngine" class="tb-select w100">
-                <option value="auto">跟随划词翻译设置</option>
-                <option value="llm">大模型</option>
-                <option value="deepl">DeepL</option>
-              </select>
-            </label>
-            <label class="ft-field"><span>目标语言</span>
-              <select id="ftTarget" class="tb-select w100"></select>
-            </label>
-            <label class="ft-field"><span>输出成品</span>
-              <select id="ftMode" class="tb-select w100">
-                <option value="md">Markdown 译文（推荐）</option>
-                <option value="both">单语译文版 + 双语对照版</option>
-                <option value="all">Markdown + 重排版 + 单语 + 双语</option>
-                <option value="reflow">只要重排版</option>
-                <option value="mono">只要单语译文版</option>
-                <option value="dual">只要双语对照版</option>
-              </select>
-            </label>
-            <label class="ft-field"><span>页码范围</span>
-              <input id="ftPages" class="tb-input w100" placeholder="留空 = 全部（例：1-5,8,12-）" />
-            </label>
-            <label class="ft-field"><span>字体家族</span>
-              <select id="ftFontFamily" class="tb-select w100">
-                <option value="auto">跟随原文（推荐）</option>
-                <option value="sans">黑体系（雅黑 / 苹方 / Noto Sans）</option>
-                <option value="serif">宋体系（宋体 / 宋体-简 / Noto Serif）</option>
-              </select>
-            </label>
-            <label class="ft-field"><span>译文粗细</span>
-              <select id="ftFontWeight" class="tb-select w100">
-                <option value="medium">偏清晰（推荐）</option>
-                <option value="regular">常规</option>
-                <option value="bold">加粗</option>
-              </select>
-            </label>
-            <label class="ft-field"><span>译文字号</span>
-              <input id="ftFontSize" class="tb-input w100" type="number" min="0" max="24" step="0.5" placeholder="0 = 跟随原文" />
-            </label>
-            <label class="ft-field"><span>并发请求数</span>
-              <input id="ftConcurrency" class="tb-input w100" type="number" min="1" max="16" step="1" placeholder="1-16，默认 8" />
-            </label>
-          </div>
-
-          <div class="ft-toggles">
-            <label class="ml-switch" title="Markdown 译文可用视觉模型逐页识别版面，双栏/跨栏/公式还原更准（需在 AI 设置中配置视觉模型）"><input type="checkbox" id="ftVision" /> 视觉模型识别版面</label>
-            <label class="ml-switch"><input type="checkbox" id="ftKeepFormulas" checked /> 公式保留原文</label>
-            <label class="ml-switch"><input type="checkbox" id="ftKeepTables" checked /> 表格保留原文</label>
-            <label class="ml-switch"><input type="checkbox" id="ftRefs" /> 翻译参考文献</label>
-            <label class="ml-switch"><input type="checkbox" id="ftRespectBold" checked /> 原文加粗处同步加粗</label>
-            <label class="ml-switch"><input type="checkbox" id="ftReflowKeepFigures" checked /> 重排版保留公式 / 图表</label>
-            <label class="ml-switch"><input type="checkbox" id="ftReflowIndent" checked /> 重排版正文首行缩进</label>
-          </div>
-          <p class="ft-hint-line">「视觉模型识别版面」只作用于 Markdown 译文：逐页截图交给视觉模型转录，双栏与公式还原更好，但更慢；识别不了的页自动回退文本层。并发数越高越快，撞到接口限流会自动降速重试。</p>
-
-          <details class="ft-details">
-            <summary>术语表 <span class="ft-detail-hint">（保证全文译名一致）</span></summary>
-            <textarea id="ftGlossary" class="pr-src ft-glossary" placeholder="每行一条：原文 = 译文&#10;attention = 注意力机制&#10;ablation study = 消融实验"></textarea>
-            <div class="ft-detail-foot">
-              <span id="ftGlossaryCount" class="ft-hint-text"></span>
-              <button id="ftGlossarySave" class="btn btn-ghost btn-sm">存为默认</button>
-            </div>
-          </details>
-
-          <div class="ft-actions">
-            <button id="ftEstimate" class="btn">预估</button>
-            <button id="ftStart" class="btn btn-primary">开始全文翻译</button>
-            <button id="ftSaveDefaults" class="btn btn-ghost" title="把当前面板上的参数存为默认，下次打开自动带上">存为默认</button>
-          </div>
-          <div id="ftEstimateInfo" class="ft-info hidden"></div>
-
-          <div id="ftProgress" class="ft-progress hidden">
-            <div class="ft-bar"><div class="ft-bar-inner" id="ftBarInner"></div></div>
-            <div class="ft-stage-row">
-              <span id="ftStage">排队中</span>
-              <span id="ftPercent">0%</span>
-            </div>
-            <button id="ftCancel" class="btn btn-ghost btn-sm">取消任务</button>
-          </div>
-
-          <div id="ftOutputs" class="ft-outputs"></div>
-
-          <details class="ft-details" id="ftLogWrap" hidden>
-            <summary>运行日志</summary>
-            <pre id="ftLogs" class="ft-logs"></pre>
-          </details>
-
-          <div class="pr-panel-sep"></div>
-          <div class="pr-panel-sub">🕘 翻译记录 <span class="side-count" id="ftHistoryCount">0</span></div>
-          <div id="ftHistory" class="ft-history"></div>
         </div>
 
         <!-- ---------- 解析结果（与左侧阅读的文献同步） ---------- -->
@@ -1962,6 +1854,18 @@
     </div>
     <!-- 笔记输入浮层 -->
     <div id="prPopover" class="pr-popover hidden"></div>
+
+    <!-- 划词翻译结果浮层。
+         原来的「划词翻译」页签已删除，翻译结果就地显示在选区下方，
+         不必再让用户切到右栏去对照。 -->
+    <div id="prSelTrans" class="pr-sel-trans hidden">
+      <div class="pr-sel-trans-head">
+        <span class="pr-sel-trans-title" id="prSelTransTitle">译文</span>
+        <button class="pr-sel-trans-copy" id="prSelTransCopy" title="复制译文">复制</button>
+        <button class="pr-sel-trans-close" id="prSelTransClose" title="关闭">✕</button>
+      </div>
+      <div class="pr-sel-trans-body" id="prSelTransBody"></div>
+    </div>
 
     <!-- 版面块放大预览：图表 / 表格 / 公式。可缩放，也可交给 AI 解释或转成 LaTeX -->
     <div id="prBlockPreview" class="pbp hidden">

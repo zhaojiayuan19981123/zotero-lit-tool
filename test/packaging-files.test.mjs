@@ -109,3 +109,28 @@ test('各平台不该带上其他平台的原生二进制', () => {
     'Windows 包应当排除 macOS 的 onnxruntime 二进制',
   );
 });
+
+test('打包后清理：本机 data/ uploads/ 与 test/ 不会被塞进安装包', () => {
+  // 为什么这条测试必须存在：build.files 的白名单**实测约束不到 app 目录本身** ——
+  // dist/builder-debug.yml 里 firstOrDefaultFilePatterns 只有默认的 `**/*`，
+  // 自定义那几条只落到了 nodeModuleFilePatterns 上。于是本机打包会把开发者自己的
+  // data/literature.json、conversations.json、settings.json 与 uploads/ 里的 PDF
+  // 一起打进安装包；而多带一份 test/ 又会让 `node --test` 在 dist 里扫出
+  // 一堆「找不到 build/icon.png」的假失败。真正的把关是 afterPack 那一步。
+  const hook = build.afterPack;
+  assert.ok(hook, 'package.json 必须挂 afterPack，否则本机 data/ 会被打进安装包');
+  const script = path.join(ROOT, hook);
+  assert.ok(fs.existsSync(script), `afterPack 指向的脚本不存在：${hook}`);
+
+  const src = fs.readFileSync(script, 'utf8');
+  for (const name of ['data', 'uploads', 'test']) {
+    assert.match(
+      src,
+      new RegExp(`DROP_DIRS[\\s\\S]*?'${name}'`),
+      `after-pack 没有把 ${name} 列为要从产物里移除的目录`,
+    );
+  }
+  // 护栏：只能在「确认是打包产物」之后动手，别把源码目录删了
+  assert.match(src, /function assertLooksLikePackedApp\(/, '缺少「确认这是打包产物」的护栏');
+  assert.match(src, /assertLooksLikePackedApp\(resolveAppDir\(context\)/, 'afterPack 必须走护栏再删');
+});

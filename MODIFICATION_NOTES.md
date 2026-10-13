@@ -1,4 +1,233 @@
+## 阅读器改造：原文栏换成真正的 PDF、两个翻译页签下线、界面重做（2026-10-13，v1.24.0）
+
+> 这一版**取代**了下面 v1.23.0 那条里的一部分设计，主要三处：
+> **①** 原文栏不再是「版面块文本流」，改成搬进来的**真 PDF**（所以「同栏对照」这一档没有了，
+> 视图从 `分栏对照 / 同栏对照 / 仅译文` 变成 `仅原文 / 原文译文 / 仅译文`）；
+> **②** 「划词翻译」「全文翻译」两个页签**整体删除**，翻译入口收敛到对照精读；
+> **③** 界面配色按 reader 改成**黑白灰**。
+
+### 起因
+
+v1.23.0 的对照精读把「原文」做成了一条**版面块文本流**。用户看到后的三条意见是：
+
+> 删除全文翻译和划词翻译。原文部分是要显示原文 pdf，对于选中的原文还要支持添加批注，支持划词。
+> pdf 阅读器要使用 https://github.com/cynicalight/reader 的阅读效果。
+> UI 界面能不能重做一下，现在比较丑。
+
+经确认拆成两件事：**先重做阅读器（含对照精读）**，配色**改成黑白灰（对齐 reader）**。
+
+### 为什么「原文流」这条路走不通
+
+不是审美问题，是三处硬伤：
+
+1. **图表公式只剩占位。** 文本流里放不下裁图，只能写一句「图表」，想看原图得切回普通阅读；
+2. **划不出词。** 文本流是 `<div>` + 文字，**没有 PDF 文本层**，鼠标拖选不出东西 ——
+   也就意味着**批注做不了**，而读文献最常用的动作恰恰是划一句、写一句；
+3. **等于多维护一套呈现。** 同一篇文献既要渲染 PDF，又要渲染文本流，
+   缩放 / 旋转 / 跳页 / 高亮层都要各实现一遍。
+
+### 手法：还是「DOM 搬运」，这次搬的是 `#prPages`
+
+与笔记模式搬运 `#prPages` 完全同一个手法，新增一对函数（`adoptCmpPdfHost` / `restoreCmpPdfHost`），
+把 `.pr-main` 里的 PDF 页面流整个搬进 `#cmpPdfHost`，退出时搬回去。
+
+**为什么这是对的做法**：事件监听是挂在元素本身上的，移动节点不会丢。
+于是缩放 / 旋转 / 跳页 / 文本层划词 / 批注高亮 / 版面块悬停**全部零重复实现**，
+自动跟着容器一起过来 —— 这正是「不要维护第二套呈现」的兑现方式。
+
+**踩到的坑：PDF 的滚动容器必须是 `#prPages` 自己，不能是外层 `#cmpPdfHost`。**
+
+```css
+.cmp-pdf-host { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.cmp-pdf-host .pr-pages { flex: 1; min-height: 0; }   /* 让 #prPages 自己成为 scroller */
+```
+
+理由在 `buildPlaceholders()`：它的懒渲染 `IntersectionObserver` 用 `$('prPages')` 当 **root**。
+只有 `#prPages` 自己就是滚动容器时，「滚到视口附近才渲染这一页」才成立；
+若让外层滚，`#prPages` 的高度会变成整篇内容高度，root 等于整个内容 ——
+几十页会在 `dpr=2` 下一口气全渲染出来。
+
+### 「点原文哪里，译文跳到哪里」为什么不用猜
+
+块 id **三处同源**，命中即查 `Map`：
+
+| 来源 | 产出块 id |
+| --- | --- |
+| `src/layoutTranslate.js` 的 `layoutFromManifest()` | 沿用 manifest 的 `p1-b17` |
+| `buildAlignOutput()` 的 `blocks[].id` | 同上，逐字一致 |
+| `public/reader-blocks.js` 装载的块 | 同上 |
+
+新增 `cmpSyncPdfBlocks()`：把 `PrBlocks` 装载的块集**换成对照流自己的块集**（`cmp.data.blocks`）。
+**为什么必须换**：原 manifest 里含页眉 / 页脚 / 页码 / 印章这些排版块，
+它们在 `layoutFromManifest` 里就被 `DROP_LABELS` 丢掉了，**不会进对照流**；
+若沿用原 manifest，点这些块会「命中一个查不到译文的 id」。换成对照流块集后，
+**能点到的块必然有译文槽**。退出对照精读时再 `loadLayoutFor()` 把完整块集还原。
+
+### `PrBlocks.onPick` 的语义变化（要记得清）
+
+- **注入 `onPick` 后，所有块**（含正文块）的点击都走 `onPick`；
+- **不注入**时保持原行为：只有带裁图的 chart / table / formula 响应 `onActivate`，正文块留给划词。
+
+所以 `installCmpPdfHooks()` 进对照精读时注入，`uninstallCmpPdfHooks()` 退出时必须
+`setHooks({ onPick: null })` 清掉 —— 否则退出后点正文块会误触发对照精读。
+
+### 同步滚动做成单向（PDF → 译文）
+
+`cmpOnPdfScroll` 监听 `#prPages` 的 scroll，用 `cmpTopVisibleBlock()`
+（锚线取 `top + min(96, height*0.2)`，即「视口上方那一块」）找落点，译文栏对应块顶部对齐；
+`cmp.syncing` 加锁 + `cmp.syncTimer` 防回环，`cmp.syncAnchorId` 去重。
+
+**反向刻意不做**：点译文栏某段时靠 `cmpRevealBlockInPdf()` **显式**滚过去（并画出方框）。
+双向互推会来回打架 —— 滚动事件里再触发另一边滚动，很难收敛。
+
+`cmpRevealBlockInPdf()` 里有一条「**已经看得见就不滚**」（整块在视口内直接 return），
+为的是点当前页的段落时不要「抖」一下。
+
+### 两种选中态
+
+- `.cmp-pdf-pick`：画在 PDF 页面上的方框（百分比定位 div，`pointer-events: none`），
+  由 `cmpPaintPdfPick()` 按 `PrBlocks.blockPercent()` + `.pr-page-wrap` 定位；
+- `.cmp-block.active`：译文栏的高亮块；另有更轻的 `.cmp-block.current` 只标「当前读到哪一段」。
+
+**方框会被页面重渲染冲掉**（页面重渲染会把 wrap 的 `innerHTML` 换掉），所以：
+`clearPdfPick()` 走双路清理（记着的元素 + `querySelectorAll('#prPages .cmp-pdf-pick')` 兜底），
+`cmpRepaintPdfPick()` 挂在 `buildPlaceholders()` 与 `renderPageInto()` 末尾补画。
+
+### 划词链路（对照精读里也能划）
+
+`document.mouseup` → `captureSelection()`（只认落在 `.pr-page-wrap` 内的选区）→
+`pr.currentSelection` + `showSelectionToolbar()` → `#prSelectionToolbar` 的 `[data-sel]` 六项分发。
+
+顺手改掉一处：新增 `selectionText(sel)`，把 `Selection.toString()` 的**假换行**按中英边界折掉。
+PDF 文本层里每个 span / 每一行都是独立元素，原始取词会带一堆换行；
+以前靠一个「拼接模式」开关解决，页签删掉后**改成默认行为**（`pdfReaderUtils.joinSelectionText` 重新回到调用链上）。
+
+六项动作里 `translate` 是：笔记模式走 `pnFillFromSelection`，否则收掉工具条 + `showSelTrans()` 就地弹浮层。
+
+### 删掉两个页签，但 `#prTranslateSource` / `#prLangTo` 一个都不能删
+
+「划词翻译」「全文翻译」两个页签**整体删除**（HTML 面板 + `ftEl()` / `ftOptions()` 等一整套 JS）。
+但设置里的 **翻译源 / 源语言 / 目标语言**必须留着 ——
+**对照精读的单段翻译、划词浮层、笔记模式、邮件翻译都读它们**。
+所以把这组控件从「划词翻译」面板**迁到设置页**（`#prTranslateSource` / `#prLangFrom` / `#prLangTo`）。
+
+服务端没动：`src/pdfTranslate/index.js` 的 `MODES` / `resolveModes` / `OUTPUT_META` 全部保留。
+对照精读的作业请求固定 `layoutSource: 'manifest'`，于是产出 `md`（Markdown 译文）+
+`align`（对照数据）两件。**注意**：面板删掉后，「单语 / 双语 / 重排版」这三种**成品 PDF 的导出入口在界面上没有了**
+（服务端仍支持，`resolveModes` 与 `OUTPUT_META` 都还在）—— 属于本次「收敛入口」的已知取舍，
+若要恢复，位置应当是**对照精读的启动面板**（那里已经有引擎 / 目标语言 / 页码范围 / 参考文献开关）。
+
+### UI 重做（黑白灰，对齐 reader）
+
+- `:root` 换成中性灰阶（新增 `--pill / --hair / --ink / --ink-2 / --ink-3` 等），去掉蓝紫渐变与彩色描边；
+- `.pr-toolbar` 压扁成一行（`gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--hair)`），按钮改小；
+- `.pr-dir*`（论文目录）灰阶重写，选中项用 `border-left` 短竖条而非整行染色；
+- `.pdf-reader` 背景 `#e8eaf0` → `var(--bg)`；
+- 对照精读整段 CSS 重写：`.cmp-bar`（44px 常驻工具条）/ `.cmp-panes` / 三档 `[data-view]` /
+  `.cmp-flow` / `.cmp-block`(+`.current`/`.active`/`.flash`) / `.cmp-start*`，配 1400 / 1240 / 940 三个窄屏断点；
+- 新增 `#prSelTrans` 划词译文浮层样式；`.cmp-pdf-pick` 方框样式；
+- 删掉随面板一起下线的死样式（`.ft-out-*` / `.ft-history` / `.ft-hist*`），**保留 `.ft-logs`**（对照精读的 `#cmpLogs` 仍在用）。
+
+### 测试与打包：顺手拔掉的三根刺
+
+**① 假失败：陈旧产物被测试发现机制扫了进来。**
+
+跑全量单测时发现 **7 项失败全是假失败** —— 不是代码坏了，而是 `dist/win-unpacked/resources/app/test/**`
+里的**陈旧产物**被 `node --test` 的无参发现机制扫了进来：那份 app 里没有 `build/icon.png`、
+它的 `package.json` 也没有 `build` 字段，于是「图标透明」「打包排除规则」这些用例在错误的根目录下必然失败，
+把真实结果盖住（原来 11 项失败里有 7 项是它）。
+
+**② 更要紧的：`build.files` 白名单根本约束不到 app 目录 —— 本机打包会把开发者自己的 `data/` 打进安装包。**
+
+顺着①往上游查，才看清真正的机制。`dist/builder-debug.yml` 里写得很明白：
+
+```yaml
+firstOrDefaultFilePatterns:      # ← app 目录实际用的规则
+  - '**/*'
+  - '!**/node_modules'
+  - '!build{,/**/*}'
+  - '!dist{,/**/*}'
+  ...
+nodeModuleFilePatterns:          # ← 我们写的 files 只落到了这里
+  - server.js
+  - src/**/*
+  - ...
+```
+
+也就是说 `build.files` 里那串白名单（`server.js` / `src/**/*` / `public/**/*` …）
+**只作用在 node_modules 的筛选上**，app 目录本身是按 `**/*` 整打的。
+后果是本机打包时：
+
+```
+dist/win-unpacked/resources/app/
+├── data/          ← 3.7MB：literature.json / conversations.json / settings.json / paper-chats.json / backups…
+├── uploads/       ← 105KB：本机上传的 PDF 附件
+├── test/          ← 41 个测试文件（①的元凶）
+├── docs/  scripts/  README.md  MODIFICATION_NOTES.md  MACOS_BUILD.md …
+└── server.js  src/  public/  electron/  processor/  node_modules/  package.json   ← 真正要发的
+```
+
+**`data/` 与 `uploads/` 是用户本地的文献库、对话记录、设置和上传的 PDF** ——
+`.gitignore` 里写得清清楚楚「运行时数据（用户本地文献库与设置，不应上传）」。
+CI 上一直没暴露，只因为 `data/` `uploads/` 都被 gitignore 排除、CI 根本没检出过它们。
+而**本机打包就会把它们一起发给用户**。
+
+先试了往 `build.files` 里加 `!test/**` —— **实测无效**（重建后产物里照样有 `test/`），
+原因就是上面那张表：app 目录不吃这份规则。
+
+于是改用 **`afterPack` 钩子**（新增 `scripts/after-pack.cjs`）：
+
+- 时机是「app 目录已经拷完、NSIS / DMG 还没开始压」之间，所以删掉的东西**不会进安装包**；
+- 比匹配规则**确定**：删什么就是什么，不受 electron-builder 匹配语义变化影响；
+- 移除 `data/ uploads/ test/ docs/ scripts/ .npm-cache/` 与三份开发文档（保留 `LICENSE`，许可证要跟着分发）；
+  实测一次本机打包能少带 **约 4.3MB**（`data/` 3.5MB + `test/` 426KB + 开发文档 234KB + `.npm-cache/` 2.3MB 等）；
+- 带**护栏** `assertLooksLikePackedApp()`：只有在确认「待删目录在 appOutDir 之内」
+  且「里面有 server.js / public / electron」之后才动手，绝不碰源码目录；
+- 顺带把 `!test/**` 这条**没生效的**规则删掉，免得以后有人以为它在起作用 ——
+  并且补了一条回归测试钉住它（`test/packaging-files.test.mjs`）。
+
+**③ 主题色把阅读器的黑白灰盖掉了（截图目测才发现）。**
+
+E2E 的截图里，对照精读的**大纲栏是深青色底、视图选中态也是深青色**，和刚做完的黑白灰完全两回事。
+根因不在样式表，而在 `app.js`：设置页的**主题色**是用 JS 往 `<html>` 上注变量的
+（`deriveTheme()` / `applyTheme()`），而它**连 `--side-1` / `--side-2` 都会算成明度 26 / 18 的深色**
+（默认主题色 `#176B87` 就是深青）。`:root` 里我写的白底在运行时被 `<html>` 的内联变量整体盖掉。
+
+处置：在 `.pdf-reader` 这一层把要用的变量**重新钉一遍**。
+自定义属性就近生效，离元素更近的声明会盖掉 `<html>` 上的内联值 ——
+于是**阅读器内部一定是中性的，阅读器之外的界面照旧跟随用户选的主题色**。
+这比「不让主题色注入」更合适：主题色是给整个界面用的，而阅读器是读文献的地方，
+用户要的就是 reader 那种黑白灰。
+
+之后全量单测 **456 / 456 全绿**（含 Node 20 / Node 22 各一次），E2E 仍然 **69 / 69**，
+截图复核：视图三档（仅原文 / 原文译文 / 仅译文）选中态是黑底白字、大纲列为白底 + 左侧短竖条。
+
+另外把三处**已失效的陈旧断言**更新成本版事实（不是删掉，而是改成钉住新契约）：
+
+- `test/pdf-reader-utils.test.mjs`：`prJoinMode` / `prClearSelection` 断言改成「**不应存在**」
+  （随面板移除），并保留旋转控件与 `joinSelectionText` 仍在调用链上；
+- `test/pdf-translate.test.mjs`：「每个 `ft*` id 都要存在」→「**不许有任何 `ft*` 残留**
+  + 设置页翻译源必须留着」；「成品下拉覆盖所有模式」→「**对照精读四区骨架齐备** + `#prPages` 能进能出」；
+  「观感控件在表单里」→「**划词工具条六项 + 划词浮层三件套齐备**」。
+
+### 验证
+
+- 单测 **456 / 456**；
+- 端到端 **69 / 69**（`D:/work/.wbverify/cmp-e2e.mjs` v2）：真实 PDF → 真实版面模型 → 真实翻译管线 →
+  真实前端交互，只把大模型接口换成本机假模型，**前端一行未改**。关键证据：
+  `#prPages` 已搬进 `#cmpPdfHost`（`canvas=2 span=21`）、译文栏 12 块且原文栏 0 块 DOM、
+  `PrBlocks` 块集 `{"1":8,"2":4}` 与对照流一致、在 PDF 上真实点击 `(432,285) p1` →
+  `p1-b6` 高亮 + 自动单段翻译 + 方框 `{page:1,w:50.4%,h:4.86%}`、
+  对照精读 PDF 上划词能弹六项工具条、划词「翻译」就地出译文、划词「高亮」写回 `annotations=1` 且高亮层 `hl=1`、
+  整篇翻译产出 `md,align` 两件且块 id 与结构版逐条一致、三档视图切换后 PDF 宽度 `仅原文=540 → 分栏=480`、
+  退出后 `PrBlocks` 恢复 `12 == manifest 12`。
+
+---
+
 ## 对照精读：把「版面识别」与「全文翻译」打通成四区对照界面（2026-10-13，v1.23.0）
+
+> ⚠️ 本条的以下部分**已被上面的 v1.24.0 取代**：原文栏「版面块文本流」、「同栏对照」这一档视图、
+> 「划词翻译 / 全文翻译两个页签」。其余（对照数据同源、按需翻译、AI 助读搬 DOM、视觉模型直答图表）仍然有效。
 
 ### 起因：版面识别独立存在时「很鸡肋」
 
