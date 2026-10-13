@@ -1,3 +1,52 @@
+## 发版前加固：版面解析子进程的 Node 20 兼容层 + 桌面端运行时实测（2026-10-13，v1.22.0）
+
+**背景。** 版面解析子进程此前所有验证都是在项目开发用的 Node 22 上做的，而**桌面端实际跑的是
+Electron 33 内置的 Node 20**（实测 `electron 33.4.11 → node 20.18.3 / v8 13.0.245`）。
+发版前补上这道验证，顺带发现并修掉了一处只在旧 Node 下暴露的兼容问题。
+
+### 一、实测方法（可复现）
+
+```bash
+# 1) 看桌面端到底用的哪个运行时
+ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe \
+  -e "console.log(process.versions)"
+
+# 2) 直接用该运行时跑解析子进程（与 src/layout.js 的 spawn 方式一致）
+ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron.exe \
+  processor/dist/main.mjs --input <某篇.pdf> --output <空目录> --model processor/dist/models/*.onnx
+```
+
+结论：**Electron 33 运行时原生可用** —— 整篇 13 页识别出 17 个裁图，与 Node 22 的结果逐页对拍一致
+（每页 region 数完全相同）。下面三个 API 在 Electron 33 里都存在，无需任何补丁：
+`Promise.withResolvers`、`ArrayBuffer.prototype.transferToFixedLength`、`process.getBuiltinModule`。
+
+### 二、顺手补的兼容层（只在 API 缺失时生效）
+
+`pdfjs-dist@6` 声明 `engines: node >=22.13` 并非虚言 —— 在**较旧的 plain Node 20**（本机 20.10.0）上，
+解析会在三个地方依次炸掉，每一处都把下一处遮住，所以是逐个暴露的：
+
+| 顺序 | 报错 | 缺失的 API | 引入版本 |
+| --- | --- | --- | --- |
+| 1 | `Promise.withResolvers is not a function` | `Promise.withResolvers` | V8 12.4 / Node 22（Electron 33 的 V8 13.0 已有） |
+| 2 | `buffer.transferToFixedLength is not a function` | `ArrayBuffer.prototype.transferToFixedLength` | V8 11.4（Electron 33 已有） |
+| 3 | `process.getBuiltinModule is not a function`（`NodeCanvasFactory._createCanvas`） | `process.getBuiltinModule` | Node 22.3（Electron 33 已有） |
+
+已在 `processor/src/main.ts`、`processor/src/repair-text.ts` 顶部，以及对应的 `processor/dist/*.mjs`
+（成品是 `dist/`，CI 不重建）各加一段**守卫式**补丁：`typeof x !== "function"` 才注入，
+**新版运行时不生效**；兼容实现用 `createRequire` 与「按需复制」，对本用途语义等价
+（pdf.js 只在一个局部 `ArrayBuffer` 上调用，不依赖原缓冲被 detach）。
+
+补完后 Node 20.10 也能跑通全篇（13 页 / 17 裁图 / `manifest.json`），与 Node 22、Electron 33 三方结果一致。
+
+### 三、这一条对用户意味着什么
+
+- 桌面端（Windows / macOS 安装包）**本来就是好的** —— 补丁只是把「旧 Node 上开发」这条路也走通。
+- 现在有了**在真实 Electron 运行时上跑通版面解析**的证据；此前只有 Node 22 的证据。
+- 改动同时落在 `processor/src/*.ts` 与 `processor/dist/*.mjs`，**将来重新 `node build.mjs`
+  会从 src 重新生成 dist，两边一致，不会丢补丁**。
+
+---
+
 ## 阅读器整合收尾：批注体系增强（P2）+ AI 助读（P3）（2026-10-13，v1.22.0）
 
 补齐最初确认的四大能力里最后两项。至此「EPUB 阅读 / 批注体系 / PDF 版面解析 / AI 助读」全部落地，
