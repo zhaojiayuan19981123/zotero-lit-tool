@@ -12,6 +12,7 @@ import mammoth from 'mammoth';
 import { extractPdfText } from './src/pdfParser.js';
 import { extract, FIELDS } from './src/aiExtractor.js';
 import * as store from './src/store.js';
+import * as layout from './src/layout.js';
 import { queryPublicationRank, formatRank } from './src/easyscholar.js';
 import { translate } from './src/translate.js';
 import { TRANSLATE_PROVIDERS } from './src/translateProviders.js';
@@ -118,6 +119,9 @@ function blankRecord() {
     id: store.newId(),
     originalName: '', filename: '', filePath: '', fileSize: 0,
     numPages: 0,
+    // 附件的文档格式：'pdf' 走 PDF.js（连续页 + 翻译），'epub' 走 epub.js（流式重排 + 目录）。
+    // 与 docType 无关 —— docType 表示「实证类 / 模型类文库」，是分类维度。
+    fileKind: 'pdf',
     status: 'pending',
     error: null,
     source: null,
@@ -132,7 +136,8 @@ function blankRecord() {
     journalRank: '',
     journalRankDetail: [],
     journalRankError: '',
-    annotations: [], // PDF 阅读器的高亮与笔记
+    annotations: [], // 阅读器批注：PDF 用 page+rect 定位，EPUB 用 cfi 定位，共用这一个数组
+    readPos: null,   // 上次读到的位置：{ kind:'pdf', page } 或 { kind:'epub', cfi, updatedAt }
     thoughts: '',    // 我的思考（用户手写，AI 解析不会覆盖）
     cnkiUrl: '',     // 从知网导入时保留详情页地址
   };
@@ -1385,9 +1390,11 @@ export function createApp({
     limits: { fileSize: 100 * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
       const fixed = fixFileName(file.originalname);
-      const isPdf = /\.pdf$/i.test(fixed) || file.mimetype === 'application/pdf';
-      if (isPdf) cb(null, true);
-      else cb(new Error('ONLY_PDF'));
+      const supported = /\.pdf$/i.test(fixed) || /\.epub$/i.test(fixed)
+        || file.mimetype === 'application/pdf'
+        || file.mimetype === 'application/epub+zip';
+      if (supported) cb(null, true);
+      else cb(new Error('ONLY_PDF_OR_EPUB'));
     },
   });
   const reviewUpload = multer({
@@ -1405,6 +1412,17 @@ export function createApp({
 
   function normalizeDocType(value) {
     return value === 'model' ? 'model' : 'empirical';
+  }
+
+  /**
+   * 从原始文件名 / MIME 判断附件是 PDF 还是 EPUB。
+   * 扩展名优先：部分浏览器给 .epub 的 mimetype 是空的或 application/octet-stream。
+   */
+  function detectFileKind(originalName, mimetype) {
+    const fixed = fixFileName(originalName || '');
+    if (/\.epub$/i.test(fixed)) return 'epub';
+    if (mimetype === 'application/epub+zip') return 'epub';
+    return 'pdf';
   }
 
   function checkedCollection(collectionId, docType) {
@@ -1602,6 +1620,7 @@ export function createApp({
           filename: f.filename,
           filePath: path.join(currentUploadDir, f.filename),
           fileSize: f.size,
+          fileKind: detectFileKind(f.originalname, f.mimetype),
         });
         store.upsertLiterature(record);
         created.push(record);
@@ -1617,14 +1636,17 @@ export function createApp({
     const item = store.getLiterature(req.params.id);
     if (!item) return res.status(404).json({ error: '记录不存在' });
     const f = req.file;
-    if (!f) return res.status(400).json({ error: '未收到 PDF 文件' });
+    if (!f) return res.status(400).json({ error: '未收到 PDF / EPUB 文件' });
     if (item.filePath) { try { fs.unlinkSync(item.filePath); } catch (_) { /* ignore */ } }
+    // 换了 PDF，旧的版面解析结果就失效了
+    try { layout.removeLayout(item.id); } catch (_) { /* ignore */ }
     const updated = {
       ...item,
       originalName: fixFileName(f.originalname),
       filename: f.filename,
       filePath: path.join(currentUploadDir, f.filename),
       fileSize: f.size,
+      fileKind: detectFileKind(f.originalname, f.mimetype),
       status: 'pending', error: null, source: null, numPages: 0, parsedAt: null,
       journalRank: '', journalRankDetail: [], journalRankError: '',
       annotations: [],
@@ -1644,6 +1666,7 @@ export function createApp({
     const item = store.getLiterature(req.params.id);
     if (!item) return res.status(404).json({ error: '记录不存在' });
     if (item.filePath) { try { fs.unlinkSync(item.filePath); } catch (_) { /* ignore */ } }
+    try { layout.removeLayout(item.id); } catch (_) { /* ignore */ }
     const updated = {
       ...item,
       originalName: '', filename: '', filePath: '', fileSize: 0,
@@ -1695,6 +1718,8 @@ export function createApp({
     const ids = req.body?.ids;
     if (Array.isArray(ids) && ids.length) items = items.filter((it) => ids.includes(it.id));
     else items = items.filter((it) => it.status !== 'done' && it.status !== 'parsing');
+    // EPUB 没有 PDF 文本层，AI 解析（提取正文 / 版面 / 图表）不适用，静默跳过
+    items = items.filter((it) => it.fileKind !== 'epub');
 
     const concurrency = Math.max(1, Math.min(8, parseInt(req.body?.concurrency, 10) || 4));
     const results = await runWithConcurrency(items.map((item) => () => parseRecord(item, settings, docType)), concurrency);
@@ -1704,7 +1729,57 @@ export function createApp({
   app.post('/api/literature/:id/parse', async (req, res) => {
     const item = store.getLiterature(req.params.id);
     if (!item) return res.status(404).json({ error: '记录不存在' });
+    if (item.fileKind === 'epub') {
+      return res.status(400).json({ error: 'EPUB 电子书不走 AI 解析（该功能针对 PDF 正文与版面）' });
+    }
     res.json(await parseRecord(item, store.getSettings(), req.body?.docType));
+  });
+
+  // ---------- PDF 版面解析（标题/正文/图表/表格/公式的区域识别） ----------
+  // 这件事只能交给 processor 子进程（onnxruntime 原生推理），一篇长论文要几十秒到几分钟，
+  // 所以接口是「启动任务 + 另开 SSE 看进度」，而不是同步等结果。
+  // 结果落在 <dataDir>/layout/<id>/，删文献时会一并清掉。
+  app.post('/api/literature/:id/layout', (req, res) => {
+    const item = store.getLiterature(req.params.id);
+    if (!item) return res.status(404).json({ error: '记录不存在' });
+    if (item.fileKind === 'epub') {
+      return res.status(400).json({ error: 'EPUB 不走版面解析（该能力针对 PDF 版式）' });
+    }
+    if (!item.filePath) return res.status(400).json({ error: '该文献还没有 PDF 附件' });
+    const result = layout.start(item.id, item.filePath, { force: !!req.body?.force });
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    res.json({ ok: true, ...layout.status(item.id) });
+  });
+
+  app.get('/api/literature/:id/layout', (req, res) => {
+    if (!store.getLiterature(req.params.id)) return res.status(404).json({ error: '记录不存在' });
+    res.json(layout.status(req.params.id));
+  });
+
+  // 进度流：先补一条当前状态，避免「刚订阅时前端还停在旧进度」
+  app.get('/api/literature/:id/layout/stream', (req, res) => {
+    sseStart(res);
+    sseSend(res, layout.status(req.params.id));
+    const unsubscribe = layout.subscribe(req.params.id, (payload) => sseSend(res, payload));
+    // 长论文解析期间可能几十秒没有新事件，定期心跳防止中间层掐连接
+    const ping = setInterval(() => sseSend(res, { ping: true }), 15000);
+    req.on('close', () => { clearInterval(ping); unsubscribe(); });
+  });
+
+  app.delete('/api/literature/:id/layout', (req, res) => {
+    layout.removeLayout(req.params.id);
+    res.json({ ok: true });
+  });
+
+  // 版面裁图（图表/公式/表格）。只允许读 assets 目录下的 png，防路径穿越。
+  app.get('/api/literature/:id/layout/assets/:name', (req, res) => {
+    const item = store.getLiterature(req.params.id);
+    if (!item) return res.status(404).json({ error: '记录不存在' });
+    const name = path.basename(String(req.params.name || ''));
+    if (!/^[A-Za-z0-9._-]+\.png$/i.test(name)) return res.status(400).json({ error: '资源名不合法' });
+    const file = path.join(layout.assetsDir(item.id), name);
+    if (!fs.existsSync(file)) return res.status(404).json({ error: '资源不存在' });
+    res.sendFile(file);
   });
 
   // ---------- easyScholar 期刊等级 ----------
@@ -2023,13 +2098,26 @@ export function createApp({
   });
 
   const EDITABLE = [...FIELDS, 'readingProgress', 'rating', 'thumb', 'docType', 'annotations', 'collectionId', 'title', 'thoughts', 'cnkiUrl',
-    'journalRank', 'journalRankDetail', 'journalRankError', 'importedAt'];
+    'journalRank', 'journalRankDetail', 'journalRankError', 'importedAt', 'fileKind', 'readPos'];
   app.patch('/api/literature/:id', (req, res) => {
     const item = store.getLiterature(req.params.id);
     if (!item) return res.status(404).json({ error: '记录不存在' });
     const patch = {};
     for (const k of EDITABLE) if (k in req.body) patch[k] = req.body[k];
     if ('docType' in patch) patch.docType = normalizeDocType(patch.docType);
+    if ('fileKind' in patch) patch.fileKind = patch.fileKind === 'epub' ? 'epub' : 'pdf';
+    // 阅读位置：只收白名单字段，避免前端顺手塞进来的东西进数据文件
+    if ('readPos' in patch) {
+      const rp = patch.readPos;
+      patch.readPos = (rp && typeof rp === 'object')
+        ? {
+          kind: rp.kind === 'epub' ? 'epub' : 'pdf',
+          cfi: typeof rp.cfi === 'string' ? rp.cfi : '',
+          page: Math.max(1, parseInt(rp.page, 10) || 1),
+          updatedAt: rp.updatedAt || new Date().toISOString(),
+        }
+        : null;
+    }
     const nextDocType = patch.docType || normalizeDocType(item.docType);
     try {
       if ('collectionId' in patch) patch.collectionId = checkedCollection(patch.collectionId, nextDocType);
@@ -2050,6 +2138,8 @@ export function createApp({
     const ok = store.deleteLiterature(req.params.id);
     if (!ok) return res.status(404).json({ error: '记录不存在' });
     try { if (item?.filePath) fs.unlinkSync(item.filePath); } catch (_) { /* ignore */ }
+    // 版面解析产物（几十 MB）跟着文献一起走，不然删了文献磁盘只增不减
+    try { layout.removeLayout(req.params.id); } catch (_) { /* ignore */ }
     res.json({ ok: true });
   });
 
@@ -2068,6 +2158,7 @@ export function createApp({
       if (store.deleteLiterature(id)) {
         deleted.push(id);
         try { if (item.filePath) { fs.unlinkSync(item.filePath); filesRemoved++; } } catch (_) { /* ignore */ }
+        try { layout.removeLayout(id); } catch (_) { /* ignore */ }
       }
     }
     res.json({ ok: true, deleted, notFound, filesRemoved });
@@ -3935,7 +4026,7 @@ export function createApp({
   // 上传错误统一处理
   app.use((err, _req, res, next) => {
     if (err) {
-      if (err.message === 'ONLY_PDF') return res.status(400).json({ error: '仅支持上传 PDF 文件，请移除其他格式文件后重试' });
+      if (err.message === 'ONLY_PDF_OR_EPUB') return res.status(400).json({ error: '仅支持上传 PDF 或 EPUB 文件，请移除其他格式文件后重试' });
       if (err.message === 'ONLY_REVIEW_DOCUMENT') return res.status(400).json({ error: '模拟审稿仅支持 PDF 或 DOCX 文件；旧版 .doc 请先另存为 .docx' });
       if (err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: '文件超过 100MB 大小限制' });
       if (err instanceof multer.MulterError) return res.status(400).json({ error: '文件上传失败：' + err.message });

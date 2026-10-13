@@ -123,9 +123,27 @@ test('阅读器「按来源收敛面板」用到的元素都真的在 index.html
   const bar = html.slice(html.indexOf('id="prSelectionToolbar"'));
   const marked = [...bar.slice(0, bar.indexOf('</div>')).matchAll(/data-sel="(\w+)"[^>]*data-litonly|data-litonly[^>]*data-sel="(\w+)"/g)]
     .map((m) => m[1] || m[2]).sort();
-  assert.deepEqual(marked, ['highlight', 'note', 'underline'],
-    '高亮 / 下划线 / 笔记 会写回文献库，必须标记 data-litonly 以便在成果论文下隐藏');
+  assert.deepEqual(marked, ['cite', 'highlight', 'note', 'underline'],
+    '高亮 / 下划线 / 笔记 / 引用 会写回文献库或 AI 对话，必须标记 data-litonly 以便在成果论文下隐藏');
   assert.ok(/data-sel="translate"/.test(bar), '划词翻译必须保留');
+});
+
+test('批注增强与 AI 助读用到的元素都真的在 index.html 里', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+  // 笔记与高亮：筛选条 + 定位导航 + 导出
+  for (const id of ['prNotesType', 'prNotesColor', 'prNotesTag', 'prNotesSearch',
+    'prNotesPrev', 'prNotesNext', 'prNotesExport', 'prNotesList', 'prNotesCount']) {
+    assert.ok(html.includes(`id="${id}"`), `index.html 里缺少 #${id}（批注筛选 / 导航 / 导出会失效）`);
+  }
+  // AI 引用池 + 章节 / 页总结
+  for (const id of ['prCitePoolWrap', 'prCiteList', 'prCiteCount', 'prCiteAsk', 'prCiteClear',
+    'btnPrChatSummary', 'prSummaryLabel']) {
+    assert.ok(html.includes(`id="${id}"`), `index.html 里缺少 #${id}（AI 引用池 / 总结按钮会失效）`);
+  }
+  // EPUB 内核要暴露「当前章节正文」给「总结本章」用
+  const epub = fs.readFileSync(path.join(ROOT, 'public', 'epub-reader.js'), 'utf8');
+  assert.ok(/currentChapterText/.test(epub) && /currentChapterLabel/.test(epub),
+    'epub-reader.js 需要导出 currentChapterText / currentChapterLabel');
 });
 
 // ==================== 4. HTTP：成果附件真的能进翻译流水线 ====================

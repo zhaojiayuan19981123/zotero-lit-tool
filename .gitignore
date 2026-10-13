@@ -9,6 +9,12 @@ uploads/
 dist/
 *.exe
 
+# 例外：processor 的构建产物与版面模型**必须入库**。
+# CI（.github/workflows/release.yml）只跑 npm ci + electron-builder，不会重新编译 TS；
+# 而 67MB 的 ONNX 模型不在 npm 上，只能随仓库分发，否则打出来的安装包缺模型、功能直接不可用。
+!processor/dist/
+!processor/dist/**
+
 # 缓存与日志
 .npm-cache/
 *.log

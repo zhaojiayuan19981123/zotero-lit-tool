@@ -756,34 +756,51 @@
       dragDepth = 0;
       overlay.classList.add('hidden');
       if (e.target.closest('#viewMarkdown, #mdDropZone, #viewReviewer, #reviewDropZone')) return;
-      const files = [...(e.dataTransfer?.files || [])].filter((f) => /\.pdf$/i.test(f.name));
+      const files = [...(e.dataTransfer?.files || [])].filter(isReadableDoc);
       if (files.length && !e.target.closest('.cell-attach')) handleBatchUpload(files);
     });
   }
+  /**
+   * 阅读器支持的文档格式：PDF（PDF.js 内核）与 EPUB（epub.js 内核）。
+   * 只在「文献附件」这条链路上放开；模拟审稿等其它上传入口不受影响。
+   */
+  function isReadableDoc(file) {
+    const name = String(file?.name || '');
+    if (/\.(pdf|epub)$/i.test(name)) return true;
+    const type = String(file?.type || '');
+    return type === 'application/pdf' || type === 'application/epub+zip';
+  }
+
   async function handleBatchUpload(fileList) {
-    const pdfs = [...fileList].filter((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
-    if (!pdfs.length) { toast('请选择 PDF 文件', 'error'); return; }
+    const docs = [...fileList].filter(isReadableDoc);
+    if (!docs.length) { toast('请选择 PDF 或 EPUB 文件', 'error'); return; }
     const form = new FormData();
-    pdfs.forEach((f) => form.append('files', f));
+    docs.forEach((f) => form.append('files', f));
     form.append('docType', lib.type);
     if (lib.collectionId && lib.collectionId !== UNCLASSIFIED) form.append('collectionId', lib.collectionId);
-    toast(`正在上传 ${pdfs.length} 个 PDF…`);
+    toast(`正在上传 ${docs.length} 个文件…`);
     try {
       const data = await api('/api/upload', { method: 'POST', body: form });
       await loadItems(); await loadCollections();
       if (data.failed.length) toast(`${data.failed.length} 个文件上传失败`, 'error');
-      await parseIds(data.created.map((c) => c.id));
-      data.created.forEach((c) => ensureThumb(c));
+      // EPUB 没有 PDF 版式：不走 AI 解析、也不生成 PDF 缩略图（服务端另有二次拦截）
+      const pdfRecords = data.created.filter((c) => c.fileKind !== 'epub');
+      const epubCount = data.created.length - pdfRecords.length;
+      if (pdfRecords.length) await parseIds(pdfRecords.map((c) => c.id));
+      else if (epubCount) toast(`已导入 ${epubCount} 本 EPUB 电子书`, 'success');
+      pdfRecords.forEach((c) => ensureThumb(c));
     } catch (e) { toast('上传失败：' + e.message, 'error'); }
   }
   async function uploadToCell(id, file) {
-    if (!/\.pdf$/i.test(file.name)) { toast('仅支持 PDF 文件', 'error'); return; }
+    if (!isReadableDoc(file)) { toast('仅支持 PDF 或 EPUB 文件', 'error'); return; }
     const tr = el.tbody.querySelector(`tr[data-id="${id}"]`); tr?.classList.add('uploading');
     try {
       const form = new FormData(); form.append('file', file);
       const updated = await api(`/api/literature/${id}/attachment`, { method: 'POST', body: form });
       const idx = items.findIndex((x) => x.id === id); if (idx >= 0) items[idx] = updated;
-      render(); toast('上传成功，开始 AI 解析…');
+      render();
+      if (updated.fileKind === 'epub') { toast('EPUB 已挂上，点「阅读」即可看', 'success'); return; }
+      toast('上传成功，开始 AI 解析…');
       await parseIds([id]);
       ensureThumb(updated);
     } catch (e) { toast('上传失败：' + e.message, 'error'); render(); }
@@ -861,7 +878,7 @@
     el.tbody.addEventListener('drop', (e) => {
       const cell = e.target.closest('.cell-attach'); if (!cell) return;
       e.preventDefault(); e.stopPropagation(); cell.classList.remove('dragover');
-      const file = [...(e.dataTransfer?.files || [])].find((f) => /\.pdf$/i.test(f.name));
+      const file = [...(e.dataTransfer?.files || [])].find(isReadableDoc);
       if (file) uploadToCell(cell.dataset.upload, file);
     });
     el.cellFileInput.addEventListener('change', () => { const f = el.cellFileInput.files[0]; if (f && cellUploadId) uploadToCell(cellUploadId, f); el.cellFileInput.value = ''; });
@@ -2646,9 +2663,16 @@
     chatAbort: null,     // 流式生成中用于「停止」的 AbortController
     chatLoadedFor: null, // 已从服务端载入对话的文献 id（防止重复拉取 / 串台）
     fullTextCache: null, // {forId, text} 解析全文缓存，供 AI 对话作为上下文
+    layoutFor: null,     // 已装载版面结果对应的文献 id（防止切篇时串台）
+    layoutBusy: false,   // 版面解析是否正在进行（含等待）
+    layoutAbort: null,   // 版面进度流的中断句柄
     fullTextLoading: false,
     meta: null,          // 打开阅读器时缓存的文献记录快照（列表过期时兜底）
     dirOpen: false,      // 左侧「论文目录」抽屉是否展开（只在文献来源下可用）
+    fileKind: 'pdf',     // 当前文档格式：'pdf'（PDF.js 内核）| 'epub'（epub.js 内核）
+    citePool: [],        // AI 引用池：[{id, text, label}]。划词时点「📌 引用」累积多段原文，提问时一起交给 AI
+    notesFilter: { type: 'all', color: 'all', tag: 'all', q: '' }, // 笔记与高亮的筛选条件
+    notesHit: -1,        // 「上一处 / 下一处」跳到的批注下标（用于高亮当前条目）
     // 当前阅读来源。两种：
     //   { kind:'literature',  id }                                       —— 文献中心（默认）
     //   { kind:'achievement', achievementId, fileId, name }              —— 成果管理里的附件（科研人员自己的论文）
@@ -4895,6 +4919,125 @@
     renderPrAttach();
   }
 
+  // ---------- AI 引用池：划词累积多段原文，提问时一起交给 AI ----------
+  // 精读时的典型动作是「把 A 段、B 段、C 段放在一起问」，但一次只能选一段。
+  // 引用池把多段原文攒起来，发送时统一拼进用户消息，模型一次就能看到全部引文。
+
+  /** EPUB 当前位置的章节名（PDF 走页码，不用这个） */
+  function epubLocationLabel() {
+    try {
+      const loc = window.EpubReader?.getLocation?.();
+      const toc = window.EpubReader?.getToc?.() || [];
+      if (loc && loc.chapterIndex >= 0 && toc[loc.chapterIndex]) return toc[loc.chapterIndex].label;
+    } catch (_) { /* ignore */ }
+    return '正文';
+  }
+
+  /** 把选中文字放进引用池（划词工具条的「📌 引用」） */
+  function doCite() {
+    const sel = pr.currentSelection;
+    if (!sel) return;
+    const label = sel.kind === 'epub' ? `电子书 · ${epubLocationLabel()}` : `第 ${sel.pageNum} 页`;
+    addCitePoolItem(sel.text, label);
+    pr.currentSelection = null;
+    hideSelectionToolbar();
+    // 引用池长在 AI 对话面板里：加到引用池就顺手切过去，否则用户在「划词翻译」页签上
+    // 完全看不到自己刚引了什么（只弹一条 toast，很容易以为没生效）。
+    if (isLiteratureSource()) switchPrTab('chat');
+  }
+
+  function addCitePoolItem(text, label) {
+    const t = String(text || '').trim();
+    if (!t) return;
+    pr.citePool.push({
+      id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6),
+      text: t, label: label || '',
+    });
+    renderCitePool();
+    toast(`已加入引用池（共 ${pr.citePool.length} 段）`, 'success');
+  }
+
+  function renderCitePool() {
+    const wrap = $('prCitePoolWrap');
+    const list = $('prCiteList');
+    if (!wrap || !list) return;
+    const n = pr.citePool.length;
+    wrap.classList.toggle('hidden', !n);
+    const cnt = $('prCiteCount');
+    if (cnt) cnt.textContent = n;
+    if (!n) { list.innerHTML = ''; return; }
+    list.innerHTML = pr.citePool.map((c, i) => `
+      <div class="pr-cite-item">
+        <span class="pr-cite-idx">${i + 1}</span>
+        <span class="pr-cite-body">${esc(c.text.slice(0, 240))}${c.text.length > 240 ? '…' : ''}${c.label ? `<span class="pr-cite-src">${esc(c.label)}</span>` : ''}</span>
+        <button class="pr-cite-del" data-cite-del="${i}" title="移除这一段">✕</button>
+      </div>`).join('');
+    list.querySelectorAll('[data-cite-del]').forEach((b) => b.addEventListener('click', () => {
+      pr.citePool.splice(parseInt(b.dataset.citeDel, 10), 1);
+      renderCitePool();
+    }));
+  }
+
+  /** 把引用池拼进用户提问：引文在前、问题在后（本轮已拼过的重试不再二次拼接） */
+  function withCitePool(text) {
+    const pool = pr.citePool || [];
+    if (!pool.length) return text;
+    const block = pool.map((c, i) => `【引用 ${i + 1}${c.label ? '｜' + c.label : ''}】\n${c.text}`).join('\n\n');
+    const ask = String(text || '').trim() || '请综合以上引文，帮我梳理它们的要点、相互关系与可能的用法。';
+    return `下面是我从这篇文献里摘出的 ${pool.length} 段原文：\n\n${block}\n\n---\n我的问题：${ask}`;
+  }
+
+  // ---------- AI 助读：当前页 / 当前章节总结 ----------
+
+  /** 取当前页完整文字（比「附上当前页文字」取得更多，供总结用） */
+  async function currentPageFullText(limit = 7000) {
+    try {
+      if (!pr.doc) return '';
+      const p = await pr.doc.getPage(pr.pageNum || 1);
+      const tc = await p.getTextContent();
+      let out = '';
+      for (const it of (tc.items || [])) {
+        out += it.str || '';
+        if (it.hasEOL) out += '\n';
+      }
+      return out.replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n').trim().slice(0, limit);
+    } catch (_) { return ''; }
+  }
+
+  /** 用预设问题触发一轮 AI 对话（与在输入框里打字发送等价） */
+  function askPrChatWith(text) {
+    const box = $('prChatInput');
+    if (!box) return;
+    if (pr.chatBusy) { toast('AI 正在回答，请稍候', 'error'); return; }
+    switchPrTab('chat');
+    box.value = text;
+    box.dispatchEvent(new Event('input'));
+    sendPrChat();
+  }
+
+  /** 总结当前页（PDF）/ 当前章节（EPUB） */
+  async function summarizeCurrentUnit() {
+    const epub = pr.fileKind === 'epub';
+    let text = '';
+    let label = '';
+    if (epub) {
+      text = String(window.EpubReader?.currentChapterText?.() || '').trim();
+      label = epubLocationLabel();
+    } else {
+      if (!pr.doc) { toast('还没有打开文档', 'error'); return; }
+      text = await currentPageFullText(7000);
+      label = `第 ${pr.pageNum} 页`;
+    }
+    if (!text) {
+      toast(epub ? '没能取到本章正文，请等正文加载完再试' : '当前页没有提取到文字（可能是扫描版 PDF）', 'error');
+      return;
+    }
+    const prompt = `请用简体中文总结「${label}」的内容：先用一句话点出主旨，再分 3-5 条要点`
+      + `（要具体、可核查，涉及数据或结论请照抄关键数字），最后说明这一部分在全篇中的作用。\n\n`
+      + `【${label}正文】\n${text}`;
+    askPrChatWith(prompt);
+  }
+
   // 组装论文上下文：结构化字段 + 解析出的全文正文，让 AI 的回答贴合这篇论文
   function buildPaperContext() {
     // items 是阅读器打开时列表页的快照；若此刻列表还没加载/已过期，
@@ -4989,14 +5132,23 @@
   async function sendPrChat(retryPayload = null) {
     if (pr.chatBusy) return;
     const input = $('prChatInput');
-    const text = String(retryPayload?.text ?? input?.value ?? '').trim();
-    if (!text && !prChatImages.length && !retryPayload?.imgs?.length) { toast('请输入问题或上传图片', 'error'); return; }
+    const rawText = String(retryPayload?.text ?? input?.value ?? '').trim();
+    // 引用池里有内容时，允许「不输入任何问题」直接发（当作「就这些引用，说说看」）
+    if (!rawText && !prChatImages.length && !retryPayload?.imgs?.length && !(pr.citePool || []).length) {
+      toast('请输入问题或上传图片', 'error'); return;
+    }
+    // 只有首次发送才拼引用池：重试时 retryPayload.text 已经是拼过的内容，再拼一次会重复
+    const text = retryPayload ? rawText : withCitePool(rawText);
     const it = paperRecord(pr.recordId);
     if (!it) { toast('未找到对应的文献记录', 'error'); return; }
 
     const imgs = retryPayload?.imgs ? [...retryPayload.imgs] : prChatImages.map((x) => x.dataUrl);
     const userMessage = retryPayload?.userMessage || { role: 'user', content: text, images: imgs };
     if (!retryPayload) pr.chat.push(userMessage);
+    // 引用池是「这一轮提问」的素材，送出去就清空，否则后面每一问（包括「总结本页」）
+    // 都会一直挂着旧引文，用户却没有清过。历史消息里仍保留引用原文，
+    // 追问时模型依旧看得到（见下面 messages 的 slice(-8)），所以清空不丢上下文。
+    if (!retryPayload && (pr.citePool || []).length) { pr.citePool = []; renderCitePool(); }
     // 首轮先把解析全文取进来（含缓存），否则模型只看得到标题摘要，答得空泛
     if (!pr.fullTextCache || pr.fullTextCache.forId !== pr.recordId) {
       await ensurePrFullText(pr.recordId);
@@ -5202,6 +5354,280 @@
     if (pr.chatAbort) { try { pr.chatAbort.abort(); } catch (_) { /* ignore */ } }
   }
 
+  // ==================== EPUB 阅读（与 PDF 共用同一外壳，按 fileKind 切换渲染内核） ====================
+  //
+  // 复用面：外层浮层、右侧划词翻译 / AI 对话、批注存储（annotations）、「我的思考」全部沿用 PDF 那一套；
+  // 只有「正文渲染」换成 epub.js，并补上 EPUB 特有的章节目录、字号 / 行距 / 字体 / 主题、翻页方式与阅读位置。
+  // 于是用户在两种文档里看到的是同一个阅读器，操作习惯一致，不存在两套界面互相打架。
+  const EPUB_PREFS_KEY = 'sciterminal.epubPrefs';
+  const ep = {
+    on: false,        // 当前阅读器是否处于 EPUB 模式
+    meta: null,       // 打开时的文献记录快照
+    pendingCfi: '',   // 待落盘的阅读位置（EPUB 用 CFI 定位）
+    savedCfi: '',     // 已落盘的位置，避免重复写
+    saveTimer: null,  // 位置写盘节流器
+    searchSeq: 0,     // 搜索序号：输入变化后旧结果作废
+  };
+
+  /** EPUB 阅读偏好（字号 / 行距 / 字体 / 主题 / 翻页方式）跨书籍复用，记在 localStorage */
+  function epubPrefs() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(EPUB_PREFS_KEY) || '{}');
+      return raw && typeof raw === 'object' ? raw : {};
+    } catch (_) { return {}; }
+  }
+  function persistEpubPrefs() {
+    if (!window.EpubReader?.isOpen()) return;
+    try {
+      const s = window.EpubReader.getSettings();
+      localStorage.setItem(EPUB_PREFS_KEY, JSON.stringify({
+        fontSize: s.fontSize, lineHeight: s.lineHeight,
+        fontFamily: s.fontFamily, theme: s.theme, flow: s.flow,
+      }));
+    } catch (_) { /* 隐私模式下忽略 */ }
+  }
+
+  // ---------- 打开 / 关闭 ----------
+
+  /** 打开 EPUB：恢复到上次读到的位置，并把这一篇已有的批注挂回正文 */
+  async function loadEpubDocument(url, recordId) {
+    const host = $('prEpubHost');
+    if (!host || !window.EpubReader) return;
+    host.innerHTML = '';
+    const it = items.find((x) => x.id === recordId);
+    const prefs = epubPrefs();
+    ep.on = true;
+    ep.meta = it || null;
+    ep.pendingCfi = '';
+    ep.savedCfi = (it?.readPos && it.readPos.kind === 'epub' && it.readPos.cfi) || '';
+    // 只有带 EPUB 定位（cfi）的批注才挂得到正文上；PDF 的 page/rect 批注在这里自然被忽略
+    const annotations = (it?.annotations || [])
+      .filter((a) => a && a.cfi && (a.type === 'highlight' || a.type === 'underline'));
+    try {
+      await window.EpubReader.open({
+        url,
+        container: host,
+        recordId,
+        startCfi: ep.savedCfi || undefined,
+        annotations,
+        settings: {
+          fontSize: prefs.fontSize, lineHeight: prefs.lineHeight,
+          fontFamily: prefs.fontFamily, theme: prefs.theme, flow: prefs.flow,
+        },
+        hooks: {
+          onTocReady: (toc) => renderEpubToc(toc),
+          onLocation: (loc) => { updateEpubLocation(loc); scheduleEpubProgress(loc); },
+          onSelection: (sel) => handleEpubSelection(sel),
+          onError: (err) => toast('EPUB 渲染出错：' + (err?.message || String(err)), 'error'),
+        },
+      });
+      syncEpubTools();
+    } catch (e) {
+      toast('打开 EPUB 失败：' + e.message, 'error');
+    }
+  }
+
+  /** 关闭 EPUB 引擎：阅读位置先落盘，再释放 iframe 与索引 */
+  function destroyEpub() {
+    if (ep.saveTimer) { clearTimeout(ep.saveTimer); ep.saveTimer = null; }
+    flushEpubProgress().catch(() => { /* 关窗路径不阻塞 */ });
+    ep.on = false;
+    ep.meta = null;
+    ep.pendingCfi = '';
+    ep.savedCfi = '';
+    ep.searchSeq += 1;
+    try { window.EpubReader?.close(); } catch (_) { /* ignore */ }
+    const host = $('prEpubHost');
+    if (host) host.innerHTML = '';
+    const foot = $('prEpubTocFoot');
+    if (foot) foot.textContent = '点章节即可跳转';
+    const search = $('prEpubTocSearch');
+    if (search) search.value = '';
+  }
+
+  // ---------- 章节目录 ----------
+
+  function renderEpubToc(toc) {
+    const list = $('prEpubTocList');
+    if (!list) return;
+    const entries = Array.isArray(toc) ? toc : [];
+    $('prEpubTocCount').textContent = String(entries.length || 0);
+    if (!entries.length) {
+      list.innerHTML = '<div class="pr-dir-empty">这本电子书没有提供目录信息<br />可以用上面的搜索框查找正文</div>';
+      $('prEpubTocFoot').textContent = '';
+      return;
+    }
+    list.innerHTML = entries.map((t, i) => `
+      <div class="pr-dir-item" data-epchap="${i}" style="padding-left:${8 + (Number(t.depth) || 0) * 12}px" title="${esc(t.label)}">
+        <div class="pr-dir-name">${esc(t.label)}</div>
+      </div>`).join('');
+    list.querySelectorAll('[data-epchap]').forEach((row) => row.addEventListener('click', () => {
+      window.EpubReader.goToChapter(parseInt(row.dataset.epchap, 10));
+    }));
+    markEpubTocActive();
+  }
+
+  /** 高亮当前所处章节（滚动到可见区域，但不抢用户的滚动位置） */
+  function markEpubTocActive() {
+    const list = $('prEpubTocList');
+    if (!list || !window.EpubReader?.isOpen()) return;
+    const loc = window.EpubReader.getLocation();
+    list.querySelectorAll('[data-epchap]').forEach((row) => {
+      row.classList.toggle('active', parseInt(row.dataset.epchap, 10) === loc.chapterIndex);
+    });
+    if (pr.dirOpen) list.querySelector('.pr-dir-item.active')?.scrollIntoView({ block: 'nearest' });
+  }
+
+  // ---------- 全书搜索（章节标题即时过滤 + 正文逐章检索） ----------
+
+  async function runEpubSearch(keyword) {
+    const seq = ++ep.searchSeq;
+    const q = String(keyword || '').trim();
+    const toc = window.EpubReader?.isOpen() ? window.EpubReader.getToc() : [];
+    if (!q) { renderEpubToc(toc); return; }
+    const lower = q.toLowerCase();
+    const titleHits = toc.map((t, i) => ({ label: t.label, depth: t.depth, index: i }))
+      .filter((t) => t.label.toLowerCase().includes(lower));
+    renderEpubSearch(q, titleHits, null);
+    const hits = await window.EpubReader.search(q, (done, total) => {
+      if (seq === ep.searchSeq) $('prEpubTocFoot').textContent = `检索正文 ${done}/${total} 章…`;
+    });
+    if (seq !== ep.searchSeq) return;   // 用户又改了关键词，丢弃这批结果
+    renderEpubSearch(q, titleHits, hits);
+  }
+
+  function renderEpubSearch(q, titleHits, bodyHits) {
+    const list = $('prEpubTocList');
+    if (!list) return;
+    const total = titleHits.length + (bodyHits ? bodyHits.length : 0);
+    $('prEpubTocCount').textContent = String(total);
+    $('prEpubTocFoot').textContent = bodyHits ? `共 ${total} 处命中 · 点结果跳转` : '正在检索全书正文…';
+    const parts = [];
+    if (titleHits.length) {
+      parts.push('<div class="pr-dir-group">章节标题</div>');
+      parts.push(titleHits.map((t) => `
+        <button class="ep-hit" data-epchap="${t.index}" style="padding-left:${8 + (Number(t.depth) || 0) * 12}px">
+          <span class="ep-hit-chapter">${esc(t.label)}</span>
+        </button>`).join(''));
+    }
+    if (bodyHits && bodyHits.length) {
+      parts.push('<div class="pr-dir-group">正文命中</div>');
+      parts.push(bodyHits.map((h) => `
+        <button class="ep-hit" data-ephref="${esc(h.href)}">
+          <span class="ep-hit-chapter">${esc(h.label)}</span>
+          <span class="ep-hit-excerpt">…${esc(h.excerpt)}…</span>
+        </button>`).join(''));
+    }
+    if (!parts.length) { list.innerHTML = `<div class="pr-dir-empty">没有找到「${esc(q)}」</div>`; return; }
+    list.innerHTML = parts.join('');
+    list.querySelectorAll('[data-epchap]').forEach((row) => row.addEventListener('click', () => {
+      window.EpubReader.goToChapter(parseInt(row.dataset.epchap, 10));
+    }));
+    list.querySelectorAll('[data-ephref]').forEach((row) => row.addEventListener('click', () => {
+      window.EpubReader.goTo(row.dataset.ephref);
+    }));
+  }
+
+  // ---------- 阅读位置与进度 ----------
+
+  function updateEpubLocation(loc) {
+    const total = loc.chapterTotal || 0;
+    const chap = total ? `第 ${loc.chapterIndex + 1}/${total} 章` : '';
+    const pct = Number.isFinite(loc.percentage) ? `${loc.percentage}%` : '';
+    const label = [chap, pct].filter(Boolean).join(' · ');
+    const box = $('epLocLabel');
+    if (box) box.textContent = label || '—';
+    markEpubTocActive();
+  }
+
+  /** 阅读位置节流写回文献记录：翻页很频繁，没必要每页发一次请求 */
+  function scheduleEpubProgress(loc) {
+    if (!loc || !loc.cfi || !pr.recordId) return;
+    ep.pendingCfi = loc.cfi;
+    if (ep.saveTimer) return;
+    ep.saveTimer = setTimeout(() => { ep.saveTimer = null; flushEpubProgress().catch(() => {}); }, 4000);
+  }
+
+  async function flushEpubProgress() {
+    const cfi = ep.pendingCfi;
+    if (!cfi || !pr.recordId || cfi === ep.savedCfi) return;
+    const litId = pr.recordId;   // 请求发出时锁住这一篇，避免切篇后写到新记录上
+    ep.savedCfi = cfi;
+    try {
+      const updated = await api('/api/literature/' + litId, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ readPos: { kind: 'epub', cfi, updatedAt: new Date().toISOString() } }),
+      });
+      const idx = items.findIndex((x) => x.id === litId);
+      if (idx >= 0) items[idx] = updated;
+    } catch (_) { ep.savedCfi = ''; /* 失败不留痕，下次翻页再试 */ }
+  }
+
+  // ---------- 选中文字 → 走既有的划词翻译面板 ----------
+
+  function handleEpubSelection({ text, cfi, clientRects }) {
+    pr.currentSelection = { kind: 'epub', text, cfi, pageNum: 0, rects: [], clientRects: clientRects || [] };
+    if (clientRects && clientRects.length) showSelectionToolbar(clientRects);
+    translateSelection(text);
+  }
+
+  // ---------- EPUB 工具条 ----------
+
+  function syncEpubTools() {
+    if (!window.EpubReader?.isOpen()) return;
+    const s = window.EpubReader.getSettings();
+    const fontLabel = $('epFontLabel'); if (fontLabel) fontLabel.textContent = `${s.fontSize}%`;
+    const lh = $('epLineHeight'); if (lh) lh.value = String(s.lineHeight);
+    const fam = $('epFontFamily'); if (fam) fam.value = s.fontFamily || '';
+    const flow = $('epFlowToggle'); if (flow) flow.textContent = s.flow === 'scrolled' ? '⇅ 分页' : '⇅ 滚动';
+    const theme = $('epThemeToggle');
+    if (theme) theme.textContent = (window.EpubReader.THEMES[s.theme]?.label || '浅色') + '主题';
+  }
+
+  function bindEpubTools() {
+    const on = (id, ev, fn) => $(id)?.addEventListener(ev, fn);
+    const nudgeFont = (delta) => {
+      const s = window.EpubReader.getSettings();
+      window.EpubReader.setSettings({ fontSize: s.fontSize + delta });
+      persistEpubPrefs(); syncEpubTools();
+    };
+    on('epFontDec', 'click', () => nudgeFont(-10));
+    on('epFontInc', 'click', () => nudgeFont(10));
+    on('epFlowToggle', 'click', () => {
+      const s = window.EpubReader.getSettings();
+      window.EpubReader.setSettings({ flow: s.flow === 'scrolled' ? 'paginated' : 'scrolled' });
+      persistEpubPrefs(); syncEpubTools();
+    });
+    on('epThemeToggle', 'click', () => {
+      window.EpubReader.cycleTheme();
+      persistEpubPrefs(); syncEpubTools();
+    });
+    on('epFontFamily', 'change', (e) => {
+      window.EpubReader.setSettings({ fontFamily: e.target.value });
+      persistEpubPrefs();
+    });
+    on('epLineHeight', 'input', (e) => {
+      window.EpubReader.setSettings({ lineHeight: Number(e.target.value) });
+      persistEpubPrefs();
+    });
+    // 分页模式翻页；滚动模式直接跳上一章 / 下一章
+    on('epPrev', 'click', () => {
+      const s = window.EpubReader.getSettings();
+      if (s.flow === 'scrolled') window.EpubReader.stepChapter(-1); else window.EpubReader.pagePrev();
+    });
+    on('epNext', 'click', () => {
+      const s = window.EpubReader.getSettings();
+      if (s.flow === 'scrolled') window.EpubReader.stepChapter(1); else window.EpubReader.pageNext();
+    });
+    // 目录搜索框：停手 350ms 再查，边打字边查会把整本书反复索引一遍
+    let searchTimer = null;
+    on('prEpubTocSearch', 'input', (e) => {
+      clearTimeout(searchTimer);
+      const q = e.target.value;
+      searchTimer = setTimeout(() => runEpubSearch(q), 350);
+    });
+  }
+
   // ---------- 阅读器里的「论文目录」：直接跳到另一篇，不必先返回列表 ----------
   // 只列「有 PDF 的文献」——没有附件的条目点开也读不了，放进来只会让人白点一下。
   const PR_DIR_LIB_ORDER = ['empirical', 'model'];
@@ -5250,11 +5676,31 @@
     if ($('prDirFoot')) $('prDirFoot').textContent = `共 ${total} 篇 · 点标题即可切换阅读`;
   }
 
+  /**
+   * 展开 / 收起左侧抽屉。同一个按钮、同一个状态，两种文档给两种目录：
+   *   PDF → 「论文目录」（跨篇切换）   EPUB → 「章节目录」（书内跳转）
+   */
   function setPrDir(on) {
     pr.dirOpen = !!on;
-    $('prDir')?.classList.toggle('hidden', !pr.dirOpen);
-    $('prDirToggle')?.classList.toggle('active', pr.dirOpen);
-    if (pr.dirOpen) renderPrDir();
+    const isEpub = pr.fileKind === 'epub';
+    $('prDir')?.classList.toggle('hidden', !pr.dirOpen || isEpub);
+    $('prEpubToc')?.classList.toggle('hidden', !pr.dirOpen || !isEpub);
+    const toggle = $('prDirToggle');
+    if (toggle) {
+      toggle.classList.toggle('active', pr.dirOpen);
+      toggle.textContent = isEpub ? '📑 目录' : '📚 目录';
+      toggle.title = isEpub
+        ? '展开 / 收起章节目录'
+        : '展开 / 收起论文目录 —— 不必先返回列表，直接跳到另一篇';
+    }
+    if (!pr.dirOpen) return;
+    if (isEpub) {
+      // 目录要等 book 解析完（onTocReady）才有；先给个占位，免得抽屉看起来是空的
+      const list = $('prEpubTocList');
+      if (list && !list.children.length) list.innerHTML = '<div class="pr-dir-empty">正在读取目录…</div>';
+    } else {
+      renderPrDir();
+    }
   }
 
   function bindPrDir() {
@@ -5274,11 +5720,14 @@
    * 打开阅读器的公共外壳：文献中心与成果管理附件共用这一套。
    * 只做「清掉上一位阅读者的残留 → 显示 → 载入 PDF」，不含任何文献专属初始化。
    */
-  async function openReaderShell({ pdfUrl, title, source }) {
+  async function openReaderShell({ pdfUrl, title, source, fileKind }) {
     // 上一位读者若还开着「笔记模式」，先按**旧的** recordId 正常退出（内部会把未落盘的
     // 笔记写盘）。必须放在改写 pr.recordId 之前，否则笔记会存到新记录上。
     if (pn.on) { try { await closePnNoteMode(); } catch (_) { /* ignore */ } }
+    // 上一本若是 EPUB，先释放它的 iframe 与索引（阅读位置会顺带落盘）
+    if (ep.on) destroyEpub();
     pr.source = source;
+    pr.fileKind = fileKind === 'epub' ? 'epub' : 'pdf';
     // 文献来源才记 recordId；成果附件没有文献库记录（相关面板会被隐藏）
     pr.recordId = source?.kind === 'literature' ? source.id : null;
     // 成果附件是从「详情抽屉」（z-index 860）里点进来的，阅读器默认 90 会被抽屉盖住，
@@ -5296,6 +5745,12 @@
     // 解析全文缓存按文献隔离，切文献必须清掉，否则会把上一篇正文喂给这一篇
     pr.fullTextCache = null;
     pr.fullTextLoading = false;
+    // 引用池与笔记筛选也是「按文献」的：换篇一律清空，否则会把上一篇的引文 / 筛选带到这一篇
+    pr.citePool = [];
+    renderCitePool();
+    resetNotesFilter();
+    // 「总结本章 / 总结本页」的文案随文档格式变化
+    setSummaryButtonLabel();
     $('pdfReader').classList.remove('hidden');
     $('prFilename').textContent = title || '';
     resetSelectionTranslation({ preserveMode: false, clearBrowserSelection: false });
@@ -5318,8 +5773,22 @@
     // 文献中心记得上次停在哪个页签；成果附件固定从「划词翻译」开始
     switchPrTab(isLiteratureSource() ? (pr.tab || 'translate') : 'translate');
     // 目录开着的话跟着当前这篇刷新高亮（切篇后自己是哪一条要看得出来）
-    if (pr.dirOpen) renderPrDir();
-    loadPdfDocument(pdfUrl);
+    if (pr.dirOpen) { if (pr.fileKind === 'epub') markEpubTocActive(); else renderPrDir(); }
+    // 版面层按文献装载：切篇一律先清空，PDF 再按需拉取（EPUB / 成果附件没有这一层）
+    closeBlockView();
+    if (pr.layoutAbort) { pr.layoutAbort.close(); pr.layoutAbort = null; }
+    pr.layoutBusy = false;
+    pr.layoutFor = null;
+    if (window.PrBlocks) window.PrBlocks.clear();
+    setLayoutBtn('idle');
+    // 按格式分流到两个渲染内核（外壳与右侧面板完全一致，只有正文这层不同）
+    if (pr.fileKind === 'epub') {
+      loadEpubDocument(pdfUrl, pr.recordId);
+    } else {
+      loadPdfDocument(pdfUrl);
+      // 已经解析过的文献直接铺版面层；没解析过的保持安静，等用户点「版面」再跑
+      loadLayoutFor(pr.recordId);
+    }
   }
 
   /**
@@ -5336,7 +5805,6 @@
     show($('prTabAnalysis'), lit);
     show($('prTabChat'), lit);
     show($('prLitOnly'), lit);
-    show($('prToggleNote'), lit);
     show($('prColorTools'), lit);
     // 「论文目录」列的是文献库里的文献，成果附件没有这一层 → 按钮收起，已展开的抽屉一并关掉，
     // 否则会在读自己的论文时浮出一份文献列表。
@@ -5353,11 +5821,39 @@
     }
     const nameEl = $('prFilename');
     if (nameEl) nameEl.title = lit ? '' : '来自「成果管理」的附件';
+
+    // ---- 与「来源」正交的第二个维度：文档格式 ----
+    // PDF 用 PDF.js（连续页 + 页码/缩放/旋转），EPUB 用 epub.js（重排 + 字号/行距/主题）。
+    // 两套控件互斥显示，右侧面板（划词翻译 / AI 对话）两者共用。
+    const epub = pr.fileKind === 'epub';
+    show($('prPdfNav'), !epub);
+    show($('prPdfTools'), !epub);
+    show($('prEpubTools'), epub);
+    show($('prPages'), !epub);
+    show($('prEpubHost'), epub);
+    // EPUB 没有 PDF 版式：全文翻译（按页解析 PDF 再回写）与「笔记模式」（左原文 PDF + 译文）都不适用
+    show($('prTabFulltext'), !epub);
+    show($('prToggleNote'), lit && !epub);
+    show($('prToggleMd'), !epub);
+    // 版面解析针对 PDF 版式，而且结果要写进文献记录（成果附件没有记录）→ 两处都要满足
+    show($('prLayoutBtn'), lit && !epub);
+    show($('prTabAnalysis'), lit && !epub);
+    // 停在 EPUB 不支持的页签上（比如从 PDF 切过来时正开着「全文翻译」）要退回到划词翻译
+    if (epub && ['fulltext', 'analysis'].includes(pr.tab)) pr.tab = 'translate';
+    // 划词面板的提示文案跟着格式走
+    const srcBox = $('prSourceText');
+    if (srcBox) srcBox.placeholder = selectionHintText();
+    const resBox = $('prTransResult');
+    if (resBox && resBox.querySelector('.pr-trans-placeholder')) {
+      resBox.innerHTML = `<div class="pr-trans-placeholder">${translationPlaceholder()}</div>`;
+    }
+    // 「总结本页 / 总结本章」的文案与格式绑定（PDF 是页、EPUB 是章）
+    setSummaryButtonLabel();
   }
 
   async function openPdfReader(id) {
     const it = items.find((x) => x.id === id);
-    if (!it?.filename) { toast('该文献还没有 PDF 附件', 'error'); return; }
+    if (!it?.filename) { toast('该文献还没有 PDF 或 EPUB 附件', 'error'); return; }
     // 缓存记录快照：AI 上下文用它兜底，列表刷新前也不会丢论文信息
     pr.meta = it;
     $('prThoughts').value = it.thoughts || '';
@@ -5366,6 +5862,7 @@
       pdfUrl: '/uploads/' + encodeURIComponent(it.filename),
       title: it.originalName || '',
       source: { kind: 'literature', id },
+      fileKind: it.fileKind,
     });
     // 右侧「解析结果」与正在阅读的文献同步刷新
     renderPrAnalysis();
@@ -5397,6 +5894,313 @@
     });
   }
 
+  // ============ PDF 版面解析（图表 / 表格 / 公式区域） ============
+  // 解析本身在后端 processor 子进程里做（见 src/layout.js）：把每页切成标题 / 正文 /
+  // 图表 / 表格 / 公式等区域，并给出每个区域的坐标与裁图。前端这层只做三件事：
+  //   1) 触发解析、显示进度；
+  //   2) 把结果铺到页面上（public/reader-blocks.js）：悬停整块高亮 + 类型徽标；
+  //   3) 图表 / 公式的放大预览，以及「AI 解释」「转 LaTeX」。
+  // 文本块刻意不做点击交互 —— 正文已经有划词翻译，再叠一层点击只会互相打架。
+
+  const BLOCK_VIEW = { block: null, zoom: 1, busy: false, asset: false };
+
+  function layoutAssetUrl(recordId, imagePath) {
+    const name = String(imagePath || '').split('/').pop();
+    return `/api/literature/${encodeURIComponent(recordId)}/layout/assets/${encodeURIComponent(name)}`;
+  }
+
+  function setLayoutBtn(state, label) {
+    const btn = $('prLayoutBtn');
+    if (!btn) return;
+    btn.classList.toggle('busy', state === 'busy');
+    btn.classList.toggle('reading', state === 'ready');
+    btn.textContent = label || '🧩 版面';
+    btn.title = state === 'ready'
+      ? '版面已解析：鼠标悬停在页面上可看到区域类型；点击图表 / 公式可放大或送 AI'
+      : state === 'busy'
+        ? '正在解析版面…'
+        : '版面解析：识别图表 / 表格 / 公式区域，悬停看类型、点击放大或送 AI 解释';
+  }
+
+  /** PrBlocks 用它把块的归一化坐标换算成屏幕位置（含用户旋转） */
+  function prBlockGeometry(pageNum) {
+    const size = pr.pageSizes[pageNum - 1];
+    if (!size) return null;
+    return { w: size.w, h: size.h, rotation: getPageExtraRotation(pageNum) };
+  }
+
+  function installPrBlocksHooks() {
+    if (!window.PrBlocks) return;
+    window.PrBlocks.setHooks({
+      geometry: prBlockGeometry,
+      // 只有带裁图的块（图表 / 表格 / 公式）才响应点击
+      onActivate: (block, meta) => { if (meta?.asset) openBlockView(block, meta); },
+    });
+    window.PrBlocks.bind();
+  }
+
+  /** 装载某篇文献已经解析好的版面结果；没有则清空（切篇时用） */
+  async function loadLayoutFor(recordId) {
+    if (!window.PrBlocks) return;
+    if (!recordId || pr.fileKind === 'epub') {
+      pr.layoutFor = null;
+      window.PrBlocks.clear();
+      setLayoutBtn('idle');
+      return;
+    }
+    try {
+      const data = await api(`/api/literature/${encodeURIComponent(recordId)}/layout`);
+      if (pr.recordId !== recordId) return; // 期间已经切篇了，别把结果装错地方
+      applyLayoutState(recordId, data);
+    } catch (_) {
+      if (pr.recordId === recordId) { window.PrBlocks.clear(); setLayoutBtn('idle'); }
+    }
+  }
+
+  function applyLayoutState(recordId, data) {
+    const state = data?.state;
+    if (state === 'done' && data.manifest) {
+      pr.layoutBusy = false;
+      pr.layoutFor = recordId;
+      window.PrBlocks.setManifest(recordId, data.manifest);
+      const n = data.manifest.blocks?.length || 0;
+      setLayoutBtn('ready', `🧩 版面 ${n}`);
+      return;
+    }
+    if (state === 'running' || state === 'queued') {
+      pr.layoutBusy = true;
+      setLayoutBtn('busy', `🧩 解析中 ${data.page || 0}/${data.pages || '?'}`);
+      watchLayoutProgress(recordId);
+      return;
+    }
+    if (state === 'error') {
+      pr.layoutBusy = false;
+      pr.layoutFor = null;
+      window.PrBlocks.clear();
+      setLayoutBtn('idle');
+      toast('版面解析失败：' + (data.error || '未知错误'), 'error');
+      return;
+    }
+    pr.layoutBusy = false;
+    pr.layoutFor = null;
+    window.PrBlocks.clear();
+    setLayoutBtn('idle');
+  }
+
+  /** 订阅解析进度（SSE）。用 EventSource：进度接口是 GET，正好对得上。 */
+  function watchLayoutProgress(recordId) {
+    if (pr.layoutAbort) return;
+    let es;
+    try { es = new EventSource(`/api/literature/${encodeURIComponent(recordId)}/layout/stream`); }
+    catch (_) { return; }
+    const stop = () => { try { es.close(); } catch (_) { /* ignore */ } pr.layoutAbort = null; };
+    pr.layoutAbort = { close: stop };
+    es.onmessage = (event) => {
+      let data;
+      try { data = JSON.parse(event.data); } catch (_) { return; }
+      if (data?.ping) return;
+      if (pr.recordId !== recordId) { stop(); return; }
+      if (data.state === 'done') {
+        stop();
+        pr.layoutBusy = false;
+        // done 事件本身不带 manifest（几十 KB 没必要塞进进度流），单独取一次
+        loadLayoutFor(recordId);
+        toast('版面解析完成，图表 / 公式区域可直接点开', 'success');
+        return;
+      }
+      if (data.state === 'error') {
+        stop();
+        pr.layoutBusy = false;
+        setLayoutBtn('idle');
+        toast('版面解析失败：' + (data.error || '未知错误'), 'error');
+        return;
+      }
+      if (data.state === 'none') { stop(); pr.layoutBusy = false; setLayoutBtn('idle'); return; }
+      pr.layoutBusy = true;
+      setLayoutBtn('busy', `🧩 解析中 ${data.page || 0}/${data.pages || '?'}`);
+    };
+    es.onerror = () => { stop(); };
+  }
+
+  async function startLayoutParse({ force = false } = {}) {
+    const id = pr.recordId;
+    if (!id || pr.fileKind === 'epub') { toast('当前文档不支持版面解析', 'error'); return; }
+    if (pr.layoutBusy) return;
+    pr.layoutBusy = true;
+    setLayoutBtn('busy', '🧩 解析中…');
+    try {
+      const r = await api(`/api/literature/${encodeURIComponent(id)}/layout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: !!force }),
+      });
+      if (r.state === 'done') { await loadLayoutFor(id); return; }
+      watchLayoutProgress(id);
+      toast('已开始解析版面，图表 / 公式区域稍后可直接点开', 'success');
+    } catch (e) {
+      pr.layoutBusy = false;
+      setLayoutBtn('idle');
+      toast('版面解析启动失败：' + e.message, 'error');
+    }
+  }
+
+  // ---------- 版面块预览（图表 / 表格 / 公式） ----------
+
+  function closeBlockView() {
+    const box = $('prBlockPreview');
+    if (!box || box.classList.contains('hidden')) return;
+    box.classList.add('hidden');
+    $('pbpImg').removeAttribute('src');
+    $('pbpAnswer').classList.add('hidden');
+    $('pbpAnswerBody').innerHTML = '';
+    BLOCK_VIEW.block = null;
+    BLOCK_VIEW.zoom = 1;
+    BLOCK_VIEW.busy = false;
+    if (BLOCK_VIEW.abort) { try { BLOCK_VIEW.abort.abort(); } catch (_) { /* ignore */ } BLOCK_VIEW.abort = null; }
+  }
+
+  function openBlockView(block, meta) {
+    if (!block) return;
+    BLOCK_VIEW.block = block;
+    BLOCK_VIEW.asset = !!meta?.asset;
+    BLOCK_VIEW.zoom = 1;
+    BLOCK_VIEW.busy = false;
+    $('pbpKind').textContent = meta?.label || '区域';
+    $('pbpPage').textContent = `第 ${block.page} 页`;
+    $('pbpAnswer').classList.add('hidden');
+    $('pbpAnswerBody').innerHTML = '';
+    const img = $('pbpImg');
+    img.style.width = '100%';
+    if (block.image && pr.recordId) img.src = layoutAssetUrl(pr.recordId, block.image);
+    else img.removeAttribute('src');
+    $('prBlockPreview').classList.remove('hidden');
+  }
+
+  function applyBlockZoom() {
+    const img = $('pbpImg');
+    if (img) img.style.width = (BLOCK_VIEW.zoom * 100) + '%';
+  }
+
+  function assetDataUrl(recordId, imagePath) {
+    return fetch(layoutAssetUrl(recordId, imagePath))
+      .then((res) => {
+        if (!res.ok) throw new Error('图片读取失败');
+        return res.blob();
+      })
+      .then((blob) => new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || ''));
+        fr.onerror = () => reject(new Error('图片读取失败'));
+        fr.readAsDataURL(blob);
+      }));
+  }
+
+  /** 从模型回答里抠出 LaTeX：优先取代码围栏，其次取 $$…$$ / $…$ */
+  function extractLatex(text) {
+    const raw = String(text || '').trim();
+    const fence = raw.match(/```(?:latex|tex|math)?\s*([\s\S]*?)```/i);
+    if (fence) return fence[1].trim();
+    const display = raw.match(/\$\$([\s\S]*?)\$\$/);
+    if (display) return display[1].trim();
+    const inline = raw.match(/\$([^$\n]+)\$/);
+    if (inline) return inline[1].trim();
+    return raw;
+  }
+
+  /**
+   * 让 AI 看这块裁图。explain = 解释内容；latex = 转写成 LaTeX。
+   * 走的是阅读器 AI 对话那条链路（/api/paper-chat）：模型不支持看图时，
+   * 服务端会自动先用视觉模型把图转成文字，所以这里不必关心模型能力。
+   */
+  async function runBlockAi(mode) {
+    const block = BLOCK_VIEW.block;
+    const id = pr.recordId;
+    if (!block || !id) return;
+    if (BLOCK_VIEW.busy) return;
+    if (!block.image) { toast('该区域没有可识别的图片', 'error'); return; }
+    BLOCK_VIEW.busy = true;
+    const answerBox = $('pbpAnswer');
+    const body = $('pbpAnswerBody');
+    $('pbpAnswerTitle').textContent = mode === 'latex' ? '公式转 LaTeX' : 'AI 解释';
+    body.innerHTML = '<span class="pr-vision-stage"><span class="pr-vision-spin"></span>正在识别图片并生成…</span>';
+    answerBox.classList.remove('hidden');
+
+    let dataUrl;
+    try {
+      dataUrl = await assetDataUrl(id, block.image);
+    } catch (e) {
+      BLOCK_VIEW.busy = false;
+      body.innerHTML = `<div class="pr-msg-error">读取图片失败：${esc(e.message)}</div>`;
+      return;
+    }
+
+    const label = window.PrBlocks?.labels?.[block.label] || block.label || '区域';
+    const prompt = mode === 'latex'
+      ? `这是论文第 ${block.page} 页的一个「${label}」区域。请把图中的数学公式准确转写成 LaTeX。`
+        + '只输出 LaTeX 源码本身，不要任何解释或开场白；多行公式请整体放在一对 $$ 里。'
+        + '如果图中不是公式，就输出最接近的 LaTeX 表示；确实无法转写时只回复“无法识别”。'
+      : `这是论文第 ${block.page} 页的一个「${label}」区域。请说明它表达了什么：`
+        + '若是图表，讲清坐标轴、趋势与关键结论；若是表格，还原行列结构与关键数值；'
+        + '若是公式，说明各符号的含义。用简体中文，简明扼要。';
+
+    BLOCK_VIEW.abort = new AbortController();
+    let acc = '';
+    const r = await streamSSE('/api/paper-chat', withProfileId({
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: dataUrl } },
+        ],
+      }],
+    }, 'paperchat'), {
+      signal: BLOCK_VIEW.abort.signal,
+      onEvent: (o) => {
+        if (o.stage === 'vision') {
+          body.innerHTML = `<span class="pr-vision-stage"><span class="pr-vision-spin"></span>`
+            + `正在用视觉模型识别图片（${o.imageCount || 1} 张）…</span>`;
+        }
+        if (o.delta) { acc += o.delta; body.innerHTML = mdInline(acc) + '<span class="pr-caret"></span>'; }
+        if (o.error) acc += `\n\n> 出错：${o.error}`;
+      },
+    });
+    BLOCK_VIEW.abort = null;
+    BLOCK_VIEW.busy = false;
+    if (r.error && !acc) { body.innerHTML = `<div class="pr-msg-error">${esc(r.error)}</div>`; return; }
+    const text = acc.trim();
+    if (mode === 'latex') {
+      const latex = extractLatex(text);
+      let rendered = '';
+      try {
+        rendered = window.katex ? window.katex.renderToString(latex.replace(/^\$\$?|\$\$?$/g, ''), { displayMode: true, throwOnError: false }) : '';
+      } catch (_) { rendered = ''; }
+      body.innerHTML = (rendered || `<div class="pr-msg-error">无法渲染为公式</div>`)
+        + `<div class="pr-latex-src">${esc(latex)}</div>`;
+    } else {
+      body.innerHTML = mdInline(text) + (r.error ? `\n\n> 出错：${r.error}` : '');
+    }
+  }
+
+  function bindBlockView() {
+    const box = $('prBlockPreview');
+    if (!box || box.dataset.bound === '1') return;
+    box.dataset.bound = '1';
+    $('pbpClose').addEventListener('click', closeBlockView);
+    box.querySelector('[data-pbp-close]')?.addEventListener('click', closeBlockView);
+    $('pbpZoomIn').addEventListener('click', () => { BLOCK_VIEW.zoom = Math.min(4, BLOCK_VIEW.zoom + 0.25); applyBlockZoom(); });
+    $('pbpZoomOut').addEventListener('click', () => { BLOCK_VIEW.zoom = Math.max(0.5, BLOCK_VIEW.zoom - 0.25); applyBlockZoom(); });
+    $('pbpZoomFit').addEventListener('click', () => { BLOCK_VIEW.zoom = 1; applyBlockZoom(); });
+    $('pbpAsk').addEventListener('click', () => runBlockAi('explain'));
+    $('pbpLatex').addEventListener('click', () => runBlockAi('latex'));
+    $('pbpAnswerCopy').addEventListener('click', async () => {
+      const src = $('pbpAnswerBody').querySelector('.pr-latex-src');
+      const text = (src ? src.textContent : $('pbpAnswerBody').innerText || '').trim();
+      if (!text) return;
+      try { await navigator.clipboard.writeText(text); toast('已复制', 'success'); }
+      catch (_) { toast('复制失败', 'error'); }
+    });
+  }
+
   function closePdfReader() {
     pr.open = false;
     pr.doc = null;
@@ -5413,6 +6217,18 @@
     // 全文翻译只是不再跟踪进度；服务端作业会继续跑完，下次打开面板自动接上
     closeFtStream();
     pr.chatBusy = false;
+    // EPUB 内核独立于 PDF：不关掉的话 iframe 与全文索引会留在内存里
+    if (ep.on) destroyEpub();
+    // 版面层与预览弹层一起收掉：留着高亮框会浮在下一份文档上
+    closeBlockView();
+    if (pr.layoutAbort) { pr.layoutAbort.close(); pr.layoutAbort = null; }
+    pr.layoutBusy = false;
+    pr.layoutFor = null;
+    if (window.PrBlocks) window.PrBlocks.clear();
+    pr.fileKind = 'pdf';
+    pr.citePool = [];
+    renderCitePool();
+    pr.notesHit = -1;
     $('pdfReader').classList.add('hidden');
     $('prPages').innerHTML = '';
   }
@@ -5502,6 +6318,8 @@
       const viewport = getPageViewport(page, pageNum);
       const dpr = window.devicePixelRatio || 1;
 
+      // 页面内容重建会把块高亮框一并清掉，先主动收起，避免留下悬空的高亮
+      if (window.PrBlocks) window.PrBlocks.hideHover();
       wrap.innerHTML = '';
       wrap.style.width = viewport.width + 'px';
       wrap.style.height = viewport.height + 'px';
@@ -5642,35 +6460,220 @@
     }
   }
 
-  function renderNotesList() {
+  // ---------- 笔记与高亮：列表 / 筛选 / 标签 / 定位导航 / 导出 ----------
+
+  /** 清空筛选条件与跳转游标（换篇 / 重新打开时调用） */
+  function resetNotesFilter() {
+    pr.notesFilter = { type: 'all', color: 'all', tag: 'all', q: '' };
+    pr.notesHit = -1;
+    const t = $('prNotesType'); if (t) t.value = 'all';
+    const c = $('prNotesColor'); if (c) c.value = 'all';
+    const g = $('prNotesTag'); if (g) g.value = 'all';
+    const s = $('prNotesSearch'); if (s) s.value = '';
+  }
+
+  /** 「总结本页 / 总结本章」按钮的文案随文档格式走 */
+  function setSummaryButtonLabel() {
+    const el = $('prSummaryLabel');
+    if (el) el.textContent = pr.fileKind === 'epub' ? '总结本章' : '总结本页';
+    const btn = $('btnPrChatSummary');
+    if (btn) {
+      btn.title = pr.fileKind === 'epub'
+        ? '把当前章节的正文交给 AI 总结'
+        : '把当前页的正文交给 AI 总结';
+    }
+  }
+
+  /** 当前文献的全部批注（数组下标即持久化下标，删除与改标签都按它定位） */
+  function currentAnnotations() {
     const it = items.find((x) => x.id === pr.recordId);
-    const anns = it?.annotations || [];
-    $('prNotesCount').textContent = anns.length || 0;
+    return Array.isArray(it?.annotations) ? it.annotations : [];
+  }
+
+  /** 「标签」下拉的选项来自当前文献已用过的标签（新增 / 删除标签后要重建） */
+  function renderNotesTagOptions() {
+    const sel = $('prNotesTag');
+    if (!sel) return;
+    const tags = new Set();
+    for (const a of currentAnnotations()) {
+      for (const t of (a.tags || [])) { const s = String(t || '').trim(); if (s) tags.add(s); }
+    }
+    const cur = pr.notesFilter.tag;
+    const opts = [...tags].sort((a, b) => a.localeCompare(b, 'zh'));
+    sel.innerHTML = '<option value="all">全部标签</option>'
+      + opts.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+    sel.value = (cur !== 'all' && tags.has(cur)) ? cur : 'all';
+    pr.notesFilter.tag = sel.value;
+  }
+
+  /** 按当前筛选条件过一遍批注，返回 [{ann, idx}]；idx 是持久化下标 */
+  function filteredAnnotations() {
+    const f = pr.notesFilter;
+    const q = String(f.q || '').trim().toLowerCase();
+    return currentAnnotations()
+      .map((ann, idx) => ({ ann, idx }))
+      .filter(({ ann }) => {
+        if (f.type !== 'all' && (ann.type || 'highlight') !== f.type) return false;
+        if (f.color !== 'all' && (ann.color || '') !== f.color) return false;
+        if (f.tag !== 'all' && !(ann.tags || []).includes(f.tag)) return false;
+        if (q) {
+          const hay = `${ann.text || ''} ${ann.note || ''} ${(ann.tags || []).join(' ')}`.toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+  }
+
+  function renderNotesList() {
     const list = $('prNotesList');
-    if (!anns.length) { list.innerHTML = '<div class="pr-loading">暂无笔记或高亮</div>'; return; }
-    list.innerHTML = anns.map((a, i) => `
-      <div class="pr-note-item">
-        <button class="pr-note-del" data-annidx="${i}" title="删除">✕</button>
-        ${a.type === 'highlight' ? '<span class="badge badge-source">高亮</span>' : a.type === 'underline' ? '<span class="badge badge-source">下划线</span>' : '<span class="badge badge-done">笔记</span>'}
-        <div class="pr-note-quote">${esc((a.text || '').slice(0, 100))}</div>
+    if (!list) return;
+    const all = currentAnnotations();
+    $('prNotesCount').textContent = all.length || 0;
+    renderNotesTagOptions();
+    const rows = filteredAnnotations();
+    // 上一次跳到的批注若已被筛掉，重置导航位置
+    if (pr.notesHit >= 0 && !rows.some((r) => r.idx === pr.notesHit)) pr.notesHit = -1;
+    const empty = !all.length;
+    ['prNotesPrev', 'prNotesNext'].forEach((id) => { const b = $(id); if (b) b.disabled = rows.length === 0; });
+    if (empty) { list.innerHTML = '<div class="pr-loading">暂无笔记或高亮</div>'; return; }
+    if (!rows.length) { list.innerHTML = '<div class="pr-loading">没有符合筛选条件的批注</div>'; return; }
+    list.innerHTML = rows.map(({ ann: a, idx }) => {
+      // 定位方式二选一：EPUB 用 CFI，PDF 用页码
+      const meta = a.cfi
+        ? `电子书 · <a href="#" data-goto-cfi="${esc(a.cfi)}" style="color:var(--primary)">跳转</a>`
+        : `第 ${a.page} 页 · <a href="#" data-goto="${a.page}" style="color:var(--primary)">跳转</a>`;
+      const badge = a.type === 'highlight' ? '<span class="badge badge-source">高亮</span>'
+        : a.type === 'underline' ? '<span class="badge badge-source">下划线</span>'
+        : '<span class="badge badge-done">笔记</span>';
+      const tags = (a.tags || []).map((t) => `<button class="pr-note-tag" data-tag-edit="${idx}" title="点击编辑标签">${esc(t)}</button>`).join('');
+      return `
+      <div class="pr-note-item${idx === pr.notesHit ? ' hit' : ''}" data-note-row="${idx}">
+        <button class="pr-note-del" data-annidx="${idx}" title="删除">✕</button>
+        ${badge}
+        <div class="pr-note-quote">${esc((a.text || '').slice(0, 300))}</div>
         ${a.note ? `<div class="pr-note-text">${esc(a.note)}</div>` : ''}
-        <div class="pr-note-meta">第 ${a.page} 页 · <a href="#" data-goto="${a.page}" style="color:var(--primary)">跳转</a></div>
-      </div>`).join('');
+        <div class="pr-note-tags">${tags}<button class="pr-note-tag-add" data-tag-edit="${idx}" title="添加 / 编辑标签">🏷 +标签</button></div>
+        <div class="pr-note-meta">${meta}${a.color && HIGHLIGHT_COLORS[a.color] ? ` · <span class="pr-note-dot" style="background:${HIGHLIGHT_COLORS[a.color]}"></span>` : ''}</div>
+      </div>`;
+    }).join('');
     list.querySelectorAll('[data-goto]').forEach((l) => l.addEventListener('click', (e) => {
       e.preventDefault();
       const target = $('prPages').querySelector(`.pr-page-wrap[data-page="${l.dataset.goto}"]`);
       if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }));
+    list.querySelectorAll('[data-goto-cfi]').forEach((l) => l.addEventListener('click', (e) => {
+      e.preventDefault();
+      window.EpubReader?.goTo(l.dataset.gotoCfi);
+    }));
+    list.querySelectorAll('[data-tag-edit]').forEach((b) => b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      editAnnotationTags(parseInt(b.dataset.tagEdit, 10));
     }));
     list.querySelectorAll('[data-annidx]').forEach((b) => b.addEventListener('click', async (e) => {
       e.stopPropagation();
       const idx = parseInt(b.dataset.annidx, 10);
       const it2 = items.find((x) => x.id === pr.recordId);
       const anns2 = [...(it2?.annotations || [])];
-      anns2.splice(idx, 1);
+      const [removed] = anns2.splice(idx, 1);
       await saveAnnotations(anns2);
-      rerenderVisiblePage(pr.pageNum);
+      if (removed?.cfi) window.EpubReader?.detachAnnotation(removed);
+      else rerenderVisiblePage(pr.pageNum);
       renderNotesList();
     }));
+  }
+
+  /** 跳到某一处批注（EPUB 用 CFI，PDF 滚到那一页） */
+  function locateAnnotation(a) {
+    if (!a) return;
+    if (a.cfi) { window.EpubReader?.goTo(a.cfi); return; }
+    if (!a.page) return;
+    const target = $('prPages')?.querySelector(`.pr-page-wrap[data-page="${a.page}"]`);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  /** 「上一处 / 下一处」：在**当前筛选结果**里循环跳转 */
+  function gotoAnnotationStep(delta) {
+    const rows = filteredAnnotations();
+    if (!rows.length) { toast('没有可跳转的批注', 'error'); return; }
+    let pos = rows.findIndex((r) => r.idx === pr.notesHit);
+    if (pos < 0) pos = delta > 0 ? -1 : 0;
+    let next = pos + delta;
+    if (next < 0) next = rows.length - 1;
+    if (next >= rows.length) next = 0;
+    pr.notesHit = rows[next].idx;
+    locateAnnotation(rows[next].ann);
+    renderNotesList();
+    const row = $('prNotesList')?.querySelector(`[data-note-row="${pr.notesHit}"]`);
+    row?.scrollIntoView({ block: 'nearest' });
+  }
+
+  /** 编辑一条批注的标签（逗号分隔输入，可点已有标签快速追加） */
+  function editAnnotationTags(idx) {
+    const anns = currentAnnotations();
+    const ann = anns[idx];
+    if (!ann) return;
+    const known = [...new Set(anns.flatMap((a) => a.tags || []))].sort((a, b) => a.localeCompare(b, 'zh'));
+    const chips = known.map((t) => `<button class="pr-tag-pick" data-pick="${esc(t)}">${esc(t)}</button>`).join('');
+    showPopover($('prPopover'), '编辑标签',
+      `<div style="margin-bottom:8px;font-size:12px;color:var(--text-3)">多个标签用逗号分隔（中英文逗号都行），例如：方法, 结论, 待引用</div>
+       <input id="prTagInput" class="tb-input w100" value="${esc((ann.tags || []).join(', '))}" placeholder="方法, 结论, 待引用" />
+       ${chips ? `<div class="pr-tag-picks">${chips}</div>` : ''}`,
+      [{ text: '保存', cls: 'btn-primary', onClick: async () => {
+        const raw = $('prTagInput')?.value || '';
+        const tags = [...new Set(raw.split(/[,，;；]/).map((s) => s.trim()).filter(Boolean))].slice(0, 12);
+        const next = [...currentAnnotations()];
+        if (!next[idx]) return;
+        next[idx] = { ...next[idx], tags };
+        await saveAnnotations(next);
+        renderNotesList();
+        toast(tags.length ? `标签已保存：${tags.join(' / ')}` : '已清空标签', 'success');
+      } }]);
+    // 点已有标签 → 追加进输入框（不覆盖已写的内容）
+    $('prPopover')?.querySelectorAll('.pr-tag-pick').forEach((b) => b.addEventListener('click', () => {
+      const input = $('prTagInput');
+      if (!input) return;
+      const cur = input.value.split(/[,，;；]/).map((s) => s.trim()).filter(Boolean);
+      if (!cur.includes(b.dataset.pick)) cur.push(b.dataset.pick);
+      input.value = cur.join(', ');
+      input.focus();
+    }));
+  }
+
+  /**
+   * 把当前文献的笔记与高亮导出为 Markdown 文件。
+   * 导出的是**全部**批注（不受筛选影响），按「正文顺序」排：PDF 按页码、EPUB 按录入先后。
+   * keepFilter = true 时只导出筛选结果（用于「只导出某一类」的场景）。
+   */
+  function exportNotesMarkdown({ keepFilter = false } = {}) {
+    const it = items.find((x) => x.id === pr.recordId);
+    const all = currentAnnotations();
+    if (!all.length) { toast('这篇文献还没有笔记或高亮', 'error'); return; }
+    const source = keepFilter ? filteredAnnotations() : all.map((ann, idx) => ({ ann, idx }));
+    if (!source.length) { toast('没有符合筛选条件的批注', 'error'); return; }
+    const rows = [...source].sort((a, b) => {
+      const pa = a.ann.cfi ? 1e9 : (a.ann.page || 0);
+      const pb = b.ann.cfi ? 1e9 : (b.ann.page || 0);
+      return pa === pb ? a.idx - b.idx : pa - pb;
+    });
+    const title = it?.title || it?.originalName || '文献';
+    const metaBits = [it?.authors, it?.journal, it?.year].filter(Boolean).join(' · ');
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const lines = [`# ${title} · 笔记与高亮`, ''];
+    if (metaBits) lines.push(`> ${metaBits}`, '');
+    lines.push(`> 导出时间：${stamp}　·　共 ${rows.length} 条${keepFilter ? '（筛选结果）' : ''}`, '');
+    const TYPE_NAME = { highlight: '高亮', underline: '下划线', note: '笔记' };
+    for (const { ann: a, idx } of rows) {
+      const loc = a.cfi ? '电子书' : `第 ${a.page} 页`;
+      lines.push(`## ${TYPE_NAME[a.type] || '批注'} · ${loc}`, '');
+      if (a.text) lines.push(`> ${String(a.text).replace(/\r?\n/g, '\n> ')}`, '');
+      if (a.note) lines.push(`**我的笔记：** ${a.note}`, '');
+      if ((a.tags || []).length) lines.push(`标签：${a.tags.map((t) => '`' + t + '`').join(' ')}`, '');
+    }
+    const name = `${String(title).replace(/[\\/:*?"<>|]/g, '_').slice(0, 40)}·笔记与高亮.md`;
+    downloadBlob(new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' }), name);
+    toast(`已导出 ${rows.length} 条批注`, 'success');
   }
 
   function rerenderVisiblePage(pageNum) {
@@ -5740,6 +6743,18 @@
   }
   function hideSelectionToolbar() { $('prSelectionToolbar').classList.add('hidden'); }
 
+  // 划词面板的提示文案随文档格式走：读 EPUB 时别说成 PDF
+  function selectionHintText() {
+    return pr.fileKind === 'epub'
+      ? '在左侧 EPUB 正文中选中文字即可自动翻译；也可在此直接粘贴文本…'
+      : '在左侧 PDF 中选中文字即可自动翻译；也可在此直接粘贴文本…';
+  }
+  function translationPlaceholder() {
+    return pr.fileKind === 'epub'
+      ? '翻译结果将显示在这里。<br />在左侧 EPUB 正文中选中文字后会自动翻译。'
+      : '翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。';
+  }
+
   // 划词 → 自动填充右侧翻译面板并立即翻译（无需点击「译」）
   let translateAbort = null;
   function resetSelectionTranslation({ preserveMode = true, clearBrowserSelection = true } = {}) {
@@ -5747,7 +6762,7 @@
     pr.lastJoinedSelectionKey = '';
     pr.currentSelection = null;
     $('prSourceText').value = '';
-    $('prTransResult').innerHTML = '<div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>';
+    $('prTransResult').innerHTML = `<div class="pr-trans-placeholder">${translationPlaceholder()}</div>`;
     if (!preserveMode) $('prJoinMode').checked = false;
     if (clearBrowserSelection) window.getSelection()?.removeAllRanges();
   }
@@ -5821,6 +6836,8 @@
   function doHighlight() {
     const sel = pr.currentSelection;
     if (!sel) return;
+    // EPUB 没有页面坐标，改用 CFI 定位（两种定位最终存进同一条 annotations 记录）
+    if (sel.kind === 'epub') { addEpubAnnotation('highlight', sel); return; }
     const x1 = Math.min(...sel.rects.map((r) => r.x1)), y1 = Math.min(...sel.rects.map((r) => r.y1));
     const x2 = Math.max(...sel.rects.map((r) => r.x2)), y2 = Math.max(...sel.rects.map((r) => r.y2));
     addAnnotation({ id: 'a' + Date.now(), page: sel.pageNum, type: 'highlight', color: pr.highlightColor, rect: [x1, y1, x2, y2], text: sel.text, note: '', createdAt: new Date().toISOString() });
@@ -5830,6 +6847,7 @@
   function doUnderline() {
     const sel = pr.currentSelection;
     if (!sel) return;
+    if (sel.kind === 'epub') { addEpubAnnotation('underline', sel); return; }
     addAnnotation({ id: 'a' + Date.now(), page: sel.pageNum, type: 'underline', color: pr.highlightColor, rects: sel.rects, text: sel.text, note: '', createdAt: new Date().toISOString() });
   }
 
@@ -5841,11 +6859,26 @@
       { text: '保存', cls: 'btn-primary', onClick: () => {
         const note = $('prNoteText').value.trim();
         if (!note) { toast('笔记内容为空', 'error'); return; }
+        if (sel.kind === 'epub') { addEpubAnnotation('note', sel, note); return; }
         const x1 = Math.min(...sel.rects.map((r) => r.x1)), y1 = Math.min(...sel.rects.map((r) => r.y1));
         const x2 = Math.max(...sel.rects.map((r) => r.x2)), y2 = Math.max(...sel.rects.map((r) => r.y2));
         addAnnotation({ id: 'a' + Date.now(), page: sel.pageNum, type: 'note', color: '', rect: [x1, y1, x2, y2], text: sel.text, note, createdAt: new Date().toISOString() });
       } },
     ]);
+  }
+
+  /** EPUB 的批注只有 CFI 与文字，没有页面坐标 → 单独组装，最终仍写进同一条 annotations */
+  async function addEpubAnnotation(type, sel, note = '') {
+    const ann = {
+      id: 'a' + Date.now(),
+      type,                                     // 'highlight' | 'underline' | 'note'
+      cfi: sel.cfi,
+      color: type === 'note' ? '' : pr.highlightColor,
+      text: sel.text || '',
+      note,
+      createdAt: new Date().toISOString(),
+    };
+    return addAnnotation(ann);
   }
 
   async function addAnnotation(ann) {
@@ -5854,7 +6887,12 @@
     await saveAnnotations(anns);
     hideSelectionToolbar();
     hidePopover();
-    rerenderVisiblePage(ann.page);
+    if (ann.cfi) {
+      // EPUB：交给 epub.js 把批注画进正文（重排版后由 rendition 自动重建）
+      window.EpubReader?.attachAnnotation(ann);
+    } else {
+      rerenderVisiblePage(ann.page);
+    }
     renderNotesList();
     toast('已保存', 'success');
   }
@@ -5899,6 +6937,23 @@
 
     // 论文目录：展开 / 收起 + 搜索 + 点条目直接切篇
     bindPrDir();
+
+    // EPUB 专属控件（字号 / 行距 / 字体 / 主题 / 翻页方式 / 目录搜索）
+    bindEpubTools();
+
+    // 版面解析：悬停高亮的挂钩 + 放大预览弹层 + 工具栏按钮
+    installPrBlocksHooks();
+    bindBlockView();
+    $('prLayoutBtn').addEventListener('click', () => {
+      const id = pr.recordId;
+      if (!id || pr.fileKind === 'epub') { toast('当前文档不支持版面解析', 'error'); return; }
+      if (pr.layoutFor === id) {
+        if (!window.confirm('这篇文献已经解析过版面了。要重新解析吗？（会覆盖现有结果）')) return;
+        startLayoutParse({ force: true });
+        return;
+      }
+      startLayoutParse();
+    });
 
     // 笔记模式（三栏）：绑定分隔条、页签与导图工具栏
     initPnNoteMode();
@@ -5995,6 +7050,44 @@
     $('prJoinMode').addEventListener('change', () => { pr.lastJoinedSelectionKey = ''; });
     $('prClearSelection').addEventListener('click', () => { resetSelectionTranslation(); toast('已清空选区与译文', 'success'); });
 
+    // 笔记与高亮：筛选（类型 / 颜色 / 标签 / 关键词）+ 定位导航 + 导出 Markdown
+    const onNotesFilterChange = () => {
+      pr.notesFilter.type = $('prNotesType')?.value || 'all';
+      pr.notesFilter.color = $('prNotesColor')?.value || 'all';
+      pr.notesFilter.tag = $('prNotesTag')?.value || 'all';
+      pr.notesFilter.q = $('prNotesSearch')?.value || '';
+      renderNotesList();
+    };
+    ['prNotesType', 'prNotesColor', 'prNotesTag'].forEach((id) => $(id)?.addEventListener('change', onNotesFilterChange));
+    let notesFilterTimer = null;
+    $('prNotesSearch')?.addEventListener('input', () => {
+      clearTimeout(notesFilterTimer);
+      notesFilterTimer = setTimeout(onNotesFilterChange, 160);
+    });
+    $('prNotesPrev')?.addEventListener('click', () => gotoAnnotationStep(-1));
+    $('prNotesNext')?.addEventListener('click', () => gotoAnnotationStep(1));
+    $('prNotesExport')?.addEventListener('click', () => {
+      // 正筛着的时候就只导出筛选结果，否则导出全部
+      const keepFilter = ['type', 'color', 'tag'].some((k) => pr.notesFilter[k] !== 'all')
+        || !!String(pr.notesFilter.q || '').trim();
+      exportNotesMarkdown({ keepFilter });
+    });
+
+    // AI 引用池：一起提问 / 清空
+    $('prCiteAsk')?.addEventListener('click', () => {
+      if (!pr.citePool.length) { toast('引用池是空的', 'error'); return; }
+      // 输入框里已经写了问题就照常发；空着则由 withCitePool 兜一句「综合以上引文」的默认问法
+      askPrChatWith(String($('prChatInput')?.value || '').trim());
+    });
+    $('prCiteClear')?.addEventListener('click', () => {
+      pr.citePool = [];
+      renderCitePool();
+      toast('已清空引用池', 'success');
+    });
+
+    // AI 助读：总结当前页（PDF）/ 当前章节（EPUB）
+    $('btnPrChatSummary')?.addEventListener('click', () => { summarizeCurrentUnit(); });
+
     // Ctrl + 鼠标滚轮 / 笔记本触控板捏合 缩放（Chromium 中捏合手势会带 ctrlKey 的 wheel 事件）
     let zoomDebounce = null;
     $('prPages').addEventListener('wheel', (e) => {
@@ -6055,6 +7148,7 @@
       else if (btn.dataset.sel === 'highlight') doHighlight();
       else if (btn.dataset.sel === 'underline') doUnderline();
       else if (btn.dataset.sel === 'note') doNote();
+      else if (btn.dataset.sel === 'cite') doCite();
     });
 
     // 我的思考：PDF 阅读器侧栏直接写，保存到文献库 thoughts 字段

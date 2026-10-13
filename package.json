@@ -1,6 +1,6 @@
 {
   "name": "zotero-lit-tool",
-  "version": "1.21.3",
+  "version": "1.22.0",
   "description": "一站式科研终端（经管版） —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
   "type": "module",
   "main": "electron/main.cjs",
@@ -26,6 +26,7 @@
   "author": "SciTerminal",
   "license": "MIT",
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.11",
     "@pdf-lib/fontkit": "^1.1.1",
     "dompurify": "^3.2.6",
     "electron-updater": "^6.6.2",
@@ -38,7 +39,9 @@
     "marked": "^15.0.12",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^10.0.10",
+    "onnxruntime-node": "^1.30.0",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.3.289",
     "sanitize-html": "^2.17.0",
     "unpdf": "^0.12.0"
   },
@@ -69,6 +72,10 @@
       "electron/**/*",
       "package.json",
       "node_modules/**/*",
+      "processor/dist/**/*",
+      "processor/model.json",
+      "processor/model-license/**/*",
+      "processor/README.md",
       "!node_modules/canvas/**",
       "!node_modules/**/canvas/**"
     ],
@@ -78,7 +85,11 @@
       "target": [
         "dmg"
       ],
-      "artifactName": "zotero-lit-tool-${version}-macos-${arch}.dmg"
+      "artifactName": "zotero-lit-tool-${version}-macos-${arch}.dmg",
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v6/win32/**",
+        "!node_modules/onnxruntime-node/bin/napi-v6/linux/**"
+      ]
     },
     "dmg": {
       "title": "一站式科研终端（经管版）",
@@ -106,7 +117,12 @@
           ]
         }
       ],
-      "artifactName": "zotero-lit-tool-setup-${version}.exe"
+      "artifactName": "zotero-lit-tool-setup-${version}.exe",
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+        "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
+        "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**"
+      ]
     },
     "nsis": {
       "oneClick": false,

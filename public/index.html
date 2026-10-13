@@ -575,8 +575,8 @@
     </div>
   </div>
 
-  <input type="file" id="fileInput" accept=".pdf,application/pdf" multiple hidden />
-  <input type="file" id="cellFileInput" accept=".pdf,application/pdf" hidden />
+  <input type="file" id="fileInput" accept=".pdf,.epub,application/pdf,application/epub+zip" multiple hidden />
+  <input type="file" id="cellFileInput" accept=".pdf,.epub,application/pdf,application/epub+zip" hidden />
   <input type="file" id="mdFileInput" accept=".md,.markdown,text/markdown,text/plain" multiple hidden />
   <input type="file" id="reviewFileInput" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden />
   <input type="file" id="calIcsInput" accept=".ics,text/calendar" hidden />
@@ -1371,11 +1371,11 @@
       <button id="prClose" class="btn">← 返回</button>
       <button id="prDirToggle" class="btn btn-ghost" title="展开 / 收起论文目录 —— 不必先返回列表，直接跳到另一篇">📚 目录</button>
       <span id="prFilename" class="pr-filename"></span>
-      <div class="pr-nav">
+      <div class="pr-nav" id="prPdfNav">
         <input type="number" id="prPageInput" class="pr-page-input" value="1" min="1" />
         <span class="pr-page-total">/ <span id="prPageTotal">1</span> 页</span>
       </div>
-      <div class="pr-tools">
+      <div class="pr-tools" id="prPdfTools">
         <button id="prZoomOut" class="btn btn-ghost" title="缩小">－</button>
         <span id="prZoomLabel" class="pr-zoom-label">140%</span>
         <button id="prZoomIn" class="btn btn-ghost" title="放大">＋</button>
@@ -1385,6 +1385,7 @@
         <button id="prRotateRight" class="btn btn-ghost" title="向右旋转当前页（仅本次阅读）">右转 ↷</button>
         <button id="prToggleMd" class="btn btn-ghost hidden" title="在 Markdown 译文与原文 PDF 之间切换">📑 查看译文</button>
         <button id="prToggleNote" class="btn btn-ghost" title="笔记模式：左侧原文 / 中间划词翻译 / 右侧笔记（Markdown + 思维导图）">📓 笔记模式</button>
+        <button id="prLayoutBtn" class="btn btn-ghost" title="版面解析：识别图表 / 表格 / 公式区域，悬停看类型、点击放大或送 AI 解释">🧩 版面</button>
       </div>
       <div class="pr-tools" id="prColorTools">
         <span class="tb-label">高亮色</span>
@@ -1393,6 +1394,26 @@
           <button class="pr-color" data-color="green" style="background:#b5e6b5"></button>
           <button class="pr-color" data-color="blue" style="background:#a8d4f5"></button>
           <button class="pr-color" data-color="pink" style="background:#f7b8d0"></button>
+        </div>
+      </div>
+      <!-- EPUB 专属工具条（PDF 模式下整组隐藏）：字号 / 行距 / 字体 / 主题 / 翻页方式 / 章节位置 -->
+      <div class="pr-tools hidden" id="prEpubTools">
+        <button id="epFontDec" class="btn btn-ghost" title="减小正文字号">A－</button>
+        <span id="epFontLabel" class="pr-zoom-label">100%</span>
+        <button id="epFontInc" class="btn btn-ghost" title="增大正文字号">A＋</button>
+        <button id="epFlowToggle" class="btn btn-ghost" title="在「分页翻页」与「连续滚动」之间切换">⇅ 滚动</button>
+        <select id="epFontFamily" class="tb-select" title="正文字体">
+          <option value="">字体：跟随原书</option>
+          <option value="serif">字体：宋体 / 衬线</option>
+          <option value="sans">字体：黑体 / 无衬线</option>
+        </select>
+        <span class="tb-label">行距</span>
+        <input id="epLineHeight" class="ep-range" type="range" min="1.2" max="2.4" step="0.1" value="1.6" title="行距" />
+        <button id="epThemeToggle" class="btn btn-ghost" title="切换阅读主题：浅色 → 米黄 → 深色">🌗 主题</button>
+        <div class="pr-nav">
+          <button id="epPrev" class="btn btn-ghost" title="上一章 / 上一页">‹</button>
+          <span id="epLocLabel" class="pr-page-total">—</span>
+          <button id="epNext" class="btn btn-ghost" title="下一章 / 下一页">›</button>
         </div>
       </div>
     </div>
@@ -1574,6 +1595,15 @@
         <div class="pr-dir-list" id="prDirList"></div>
         <div class="pr-dir-foot" id="prDirFoot">点标题即可切换阅读</div>
       </aside>
+      <!-- EPUB 章节目录（读电子书时取代上面的「论文目录」，由 formatReaderToc 按格式切换） -->
+      <aside id="prEpubToc" class="pr-dir pr-epub-toc hidden">
+        <div class="pr-dir-head">
+          <div class="pr-dir-title">章节目录 <span class="side-count" id="prEpubTocCount">0</span></div>
+          <input id="prEpubTocSearch" class="pr-dir-search" type="search" placeholder="搜索章节 / 全书正文" />
+        </div>
+        <div class="pr-dir-list" id="prEpubTocList"></div>
+        <div class="pr-dir-foot" id="prEpubTocFoot">点章节即可跳转</div>
+      </aside>
       <!-- 左：PDF 连续页面（Markdown 译文打开后以覆盖层形式盖在页面上方） -->
       <div class="pr-main">
         <div id="prMdViewer" class="pr-md-viewer hidden">
@@ -1584,12 +1614,14 @@
           <div id="prMdContent" class="pr-md-content"></div>
         </div>
         <div id="prPages" class="pr-pages"></div>
+        <!-- EPUB 正文宿主：与 #prPages 互斥显示（同一个阅读器外壳，两种渲染内核） -->
+        <div id="prEpubHost" class="pr-epub-host hidden"></div>
       </div>
       <!-- 右：功能面板（划词翻译 / 解析结果 / AI 对话） -->
       <aside class="pr-trans-panel">
         <div class="pr-tabs" id="prTabs">
           <button class="pr-tab active" data-prtab="translate">🌐 划词翻译</button>
-          <button class="pr-tab" data-prtab="fulltext">📄 全文翻译</button>
+          <button class="pr-tab" data-prtab="fulltext" id="prTabFulltext">📄 全文翻译</button>
           <button class="pr-tab" data-prtab="analysis" id="prTabAnalysis">📋 解析结果</button>
           <button class="pr-tab" data-prtab="chat" id="prTabChat">🤖 AI 对话</button>
         </div>
@@ -1631,7 +1663,33 @@
             <textarea id="prThoughts" class="pr-src pr-thoughts" placeholder="阅读时随手记录自己的小想法：疑问、灵感、与课题的联系…保存后写入文献库的「我的思考」字段"></textarea>
             <button id="btnPrThoughtsSave" class="btn btn-primary w100" style="margin-top:6px">保存思考</button>
             <div class="pr-panel-sep"></div>
-            <div class="pr-panel-sub">📝 笔记与高亮 <span class="side-count" id="prNotesCount">0</span></div>
+            <div class="pr-panel-sub pr-notes-head">
+              <span>📝 笔记与高亮 <span class="side-count" id="prNotesCount">0</span></span>
+              <span class="pr-notes-head-actions">
+                <button class="pr-mini-btn" id="prNotesPrev" title="跳到上一处批注">↑</button>
+                <button class="pr-mini-btn" id="prNotesNext" title="跳到下一处批注">↓</button>
+                <button class="pr-mini-btn" id="prNotesExport" title="把这篇文献的笔记与高亮导出为 Markdown">📤</button>
+              </span>
+            </div>
+            <div class="pr-notes-filter" id="prNotesFilter">
+              <select id="prNotesType" class="pr-notes-sel" title="按类型筛选">
+                <option value="all">全部类型</option>
+                <option value="highlight">高亮</option>
+                <option value="underline">下划线</option>
+                <option value="note">笔记</option>
+              </select>
+              <select id="prNotesColor" class="pr-notes-sel" title="按颜色筛选">
+                <option value="all">全部颜色</option>
+                <option value="yellow">黄</option>
+                <option value="green">绿</option>
+                <option value="blue">蓝</option>
+                <option value="pink">粉</option>
+              </select>
+              <select id="prNotesTag" class="pr-notes-sel" title="按标签筛选">
+                <option value="all">全部标签</option>
+              </select>
+              <input id="prNotesSearch" class="pr-notes-search" type="search" placeholder="搜索摘录 / 笔记 / 标签" />
+            </div>
             <div id="prNotesList" class="pr-notes-list"></div>
           </div>
         </div>
@@ -1752,9 +1810,24 @@
           <div id="prChatModelRow" class="ai-model-row"></div>
           <div class="pr-chat-bar">
             <span class="pr-chat-bar-title">对话记录 <span class="pr-chat-bar-note">按文献保存，退出应用不丢</span></span>
-            <button id="prChatClear" class="btn btn-ghost btn-sm" disabled title="清除本篇论文的对话记录">🗑 清除记录</button>
+            <span class="pr-chat-bar-actions">
+              <button id="btnPrChatSummary" class="btn btn-ghost btn-sm" title="把当前页 / 当前章节的正文交给 AI 总结">📝 <span id="prSummaryLabel">总结本页</span></button>
+              <button id="prChatClear" class="btn btn-ghost btn-sm" disabled title="清除本篇论文的对话记录">🗑 清除记录</button>
+            </span>
           </div>
           <div id="prChatMsgs" class="pr-chat-msgs"></div>
+          <!-- AI 引用池：划词时点「📌 引用」累积多段原文，提问时一起交给 AI -->
+          <div id="prCitePoolWrap" class="pr-cite-pool hidden">
+            <div class="pr-cite-head">
+              <span class="pr-cite-title">📌 引用池 <span class="side-count" id="prCiteCount">0</span>
+                <span class="pr-cite-hint">提问时连同这些原文一起交给 AI，发出后自动清空</span></span>
+              <span class="pr-cite-actions">
+                <button class="btn btn-ghost btn-sm" id="prCiteAsk" title="就以引用池里的内容向 AI 提问">就这些提问</button>
+                <button class="btn btn-ghost btn-sm" id="prCiteClear" title="清空引用池">清空</button>
+              </span>
+            </div>
+            <div id="prCiteList" class="pr-cite-list"></div>
+          </div>
           <div id="prChatAttach" class="pr-chat-attach"></div>
           <div class="pr-chat-input-row">
             <button id="btnPrChatImg" class="pr-chat-icon-btn" title="上传图片（截图 / 图表 / 手写笔记），AI 会看图回答">🖼️</button>
@@ -1775,11 +1848,38 @@
       <button class="pr-sel-btn" data-sel="highlight" data-litonly title="高亮选中文字"><span class="pr-sel-ico">🖍️</span>高亮</button>
       <button class="pr-sel-btn" data-sel="underline" data-litonly title="给选中文字加下划线"><span class="pr-sel-ico pr-ico-u">U</span>下划线</button>
       <button class="pr-sel-btn" data-sel="note" data-litonly title="写笔记"><span class="pr-sel-ico">📝</span>笔记</button>
+      <button class="pr-sel-btn" data-sel="cite" data-litonly title="把选中文字放进 AI 引用池，可累积多段后一起提问"><span class="pr-sel-ico">📌</span>引用</button>
       <span class="pr-sel-sep"></span>
       <button class="pr-sel-btn" data-sel="translate" title="翻译选中文字"><span class="pr-sel-ico">🌐</span>翻译</button>
     </div>
     <!-- 笔记输入浮层 -->
     <div id="prPopover" class="pr-popover hidden"></div>
+
+    <!-- 版面块放大预览：图表 / 表格 / 公式。可缩放，也可交给 AI 解释或转成 LaTeX -->
+    <div id="prBlockPreview" class="pbp hidden">
+      <div class="pbp-mask" data-pbp-close="1"></div>
+      <div class="pbp-panel" role="dialog" aria-modal="true" aria-label="版面块预览">
+        <div class="pbp-head">
+          <span class="pbp-kind" id="pbpKind">图表</span>
+          <span class="pbp-page" id="pbpPage"></span>
+          <span class="pbp-spacer"></span>
+          <button class="btn btn-ghost" id="pbpZoomOut" title="缩小">－</button>
+          <button class="btn btn-ghost" id="pbpZoomFit" title="适应窗口">适应</button>
+          <button class="btn btn-ghost" id="pbpZoomIn" title="放大">＋</button>
+          <button class="btn btn-ghost" id="pbpAsk" title="把这张图交给 AI 解释（自动用视觉模型看图）">✨ AI 解释</button>
+          <button class="btn btn-ghost" id="pbpLatex" title="让 AI 把图中的公式转成 LaTeX">∑ 转 LaTeX</button>
+          <button class="btn" id="pbpClose">关闭</button>
+        </div>
+        <div class="pbp-body" id="pbpBody"><img id="pbpImg" alt="版面块原图" /></div>
+        <div class="pbp-answer hidden" id="pbpAnswer">
+          <div class="pbp-answer-head">
+            <span id="pbpAnswerTitle">AI 结果</span>
+            <button class="btn btn-ghost" id="pbpAnswerCopy" title="复制结果">⧉ 复制</button>
+          </div>
+          <div class="pbp-answer-body" id="pbpAnswerBody"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- ===== 新手引导（首次使用） ===== -->
@@ -1807,9 +1907,14 @@
   <script src="vendor/dompurify/purify.min.js"></script>
   <script src="vendor/katex/katex.min.js"></script>
   <script src="vendor/lunar/lunar.js"></script>
+  <!-- EPUB 阅读内核：jszip 必须先于 epub.js 加载（epub.js 把 JSZip 当作外部依赖，全局找 window.JSZip） -->
+  <script src="vendor/jszip/jszip.min.js"></script>
+  <script src="vendor/epubjs/epub.min.js"></script>
   <!-- 思维导图库：UMD 全局 simpleMindMap，类在 .default；21 个插件已内置自动注册 -->
   <script src="vendor/simple-mind-map/simpleMindMap.umd.min.js"></script>
   <script src="pdf-reader-utils.js"></script>
+  <script src="epub-reader.js"></script>
+  <script src="reader-blocks.js"></script>
   <script src="paper-note-utils.js"></script>
   <script src="doi-utils.js"></script>
   <script src="rank-utils.js"></script>

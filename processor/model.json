@@ -1,0 +1,9 @@
+{
+  "name": "PP-DocLayoutV3-FP16",
+  "repository": "bu44er/PP-DocLayoutV3-FP16-ONNX",
+  "revision": "58dfa00ba1135e027817cbd5802f1f0df62aa5c0",
+  "file": "PP-DocLayoutV3-fp16.onnx",
+  "sha256": "8bb693ed3b5dcc1cf926b15d89dfe6abf62bc11cdd0afd33c8ffe039db6f8209",
+  "bytes": 67372587,
+  "output": "det"
+}
