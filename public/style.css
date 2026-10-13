@@ -3104,6 +3104,10 @@ body.pn-resizing * { cursor: col-resize !important; }
 }
 .cmp-engine-state { font-variant-numeric: tabular-nums; }
 .cmp-engine-state.ready { color: var(--ink-2); }
+.cmp-bar-engine {
+  max-width: 220px; height: 28px; padding: 0 6px; font-size: 12px; flex-shrink: 0;
+  border: 1px solid var(--hair); border-radius: 6px; background: var(--surface); color: var(--text);
+}
 
 /* ---------- 四区容器 ---------- */
 .cmp-panes { flex: 1; display: flex; align-items: stretch; overflow: hidden; min-height: 0; }

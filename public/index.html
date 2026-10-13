@@ -1688,6 +1688,9 @@
           <button class="pn-seg-btn active" data-cmpview="split" title="左原文 PDF 右译文，两侧同步滚动">原文译文</button>
           <button class="pn-seg-btn" data-cmpview="trans" title="只看译文，用于快速通读">仅译文</button>
         </div>
+        <select id="cmpBarEngine" class="cmp-bar-engine" title="点段落即译 / 重译统一用这个引擎，顶部设置一次即可">
+          <option value="auto">引擎：跟随全局设置</option>
+        </select>
         <span class="cmp-engine-state" id="cmpEngineState"></span>
         <span class="cmp-hint" id="cmpSyncHint"></span>
         <span class="cmp-bar-spacer"></span>
@@ -1772,9 +1775,13 @@
         </div>
 
         <!-- ---------- 划词翻译 ----------
-             选中左侧 PDF / EPUB 文字后自动翻译到这里；翻译源 / 目标语言走「设置」页的全局配置
-             （#prTranslateSource / #prLangTo），与对照精读、笔记模式共用同一组。 -->
+             选中左侧 PDF / EPUB 文字后自动翻译到这里；引擎在顶部自选（跟随全局设置 / 指定模型 / 指定服务）。 -->
         <div class="pr-panel-body pr-pane hidden" data-prpane="translate">
+          <div class="pr-lang-row">
+            <select id="prSelSource" class="tb-select w100" title="划词翻译用的引擎，只影响这一栏">
+              <option value="auto">引擎：跟随全局设置</option>
+            </select>
+          </div>
           <textarea id="prSourceText" class="pr-src" placeholder="在左侧 PDF 中选中文字即可自动翻译；也可在此直接粘贴文本…"></textarea>
           <div class="pr-selection-options">
             <span>选区：</span>
@@ -1785,7 +1792,6 @@
           <div id="prTransResult" class="pr-trans-box">
             <div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>
           </div>
-          <p class="pr-trans-hint">翻译源 / 目标语言在「设置」里调整，全应用共用。</p>
         </div>
 
         <!-- ---------- 笔记与高亮（我的思考 + 批注列表） ----------

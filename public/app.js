@@ -6173,6 +6173,19 @@
         opts.push(`<option value="deepl">DeepL${meta.engine?.deeplReady ? '' : '（未配置 Key）'}</option>`);
         src.innerHTML = opts.join('');
       }
+      // 工具条引擎选择器（点段落即译 / 重译统一用）：完整提供方（跟随设置 + 各模型 + 各服务）
+      const bar = cmpEl('cmpBarEngine');
+      if (bar && !bar.dataset.filled) {
+        bar.dataset.filled = '1';
+        api('/api/translate/sources').then((d) => {
+          const opts = ['<option value="auto">跟随全局设置</option>'];
+          for (const p of d.profiles || []) {
+            opts.push(`<option value="llm:${esc(p.id)}">大模型 · ${esc(p.label)}${p.hasKey ? '' : '（未填 Key）'}</option>`);
+          }
+          for (const p of d.providers || []) opts.push(`<option value="${esc(p.id)}">${esc(p.label)}</option>`);
+          bar.innerHTML = opts.join('');
+        }).catch(() => {});
+      }
     } catch (_) { /* 拉不到就保留「跟随设置」这一项 */ }
   }
 
@@ -6701,9 +6714,11 @@
     if (!force && (String(b.translation || '').trim() || cmp.transCache.has(id))) return;
     const text = String(b.text || '').trim();
     if (!text) { if (!auto) toast('这一段没有可翻译的文字', 'error'); return; }
-    // 翻译源优先级：显式传入（重译选引擎）→ 对照精读面板（#cmpEngine）→ 设置页翻译源（#prTranslateSource）
+    // 翻译源优先级：显式传入 → 顶部工具条（#cmpBarEngine）→ 启动面板（#cmpEngine）→ 设置页翻译源（#prTranslateSource）
+    const bar = cmpEl('cmpBarEngine')?.value || 'auto';
     const own = cmpEl('cmpEngine')?.value || 'auto';
-    const src = source ?? (own !== 'auto' ? own : ($('prTranslateSource')?.value || 'auto'));
+    const fallback = bar !== 'auto' ? bar : (own !== 'auto' ? own : ($('prTranslateSource')?.value || 'auto'));
+    const src = source ?? fallback;
     const { provider, profileId } = cmpResolveSource(src);
     const target = cmpEl('cmpTarget')?.value || $('prLangTo')?.value || 'zh';
     setCmpTransText(id, '<span class="cmp-pending">翻译中…</span>', { pending: true });
@@ -6730,52 +6745,19 @@
     }
   }
 
-  /** 有译文时的动作按钮：复制 + 重新翻译（点重译弹出引擎选择）。 */
+  /** 有译文时的动作按钮：复制 + 重新翻译（用顶部工具条统一的引擎重译）。 */
   function cmpRetransActs(id) {
     return `<button class="cmp-act" data-cmp-act="copy" data-cmp-id="${esc(id)}" title="复制这段译文">⧉ 复制</button>`
-      + `<button class="cmp-act" data-cmp-act="retrans" data-cmp-id="${esc(id)}" title="换一个引擎重新翻译这一段">🔄 重译</button>`;
+      + `<button class="cmp-act" data-cmp-act="retrans" data-cmp-id="${esc(id)}" title="用顶部工具条选择的引擎重新翻译这一段">🔄 重译</button>`;
   }
 
   /**
-   * 重新翻译：弹出一个引擎选择浮层（复用 /api/translate/sources 的提供方与模型配置），
-   * 选好后用该引擎强制重译这一段。取消则不动。
+   * 重新翻译：用顶部工具条（#cmpBarEngine）统一设置的引擎强制重译这一段，
+   * 不再每次弹浮层选引擎 —— 引擎在顶部设一次即可，重译直接复用。
    */
   function cmpRetranslateBlock(id) {
-    const b = cmp.blockById.get(id);
-    if (!b) return;
-    const blk = transBlockEl(id);
-    if (!blk) return;
-    // 用一个轻量 popover 承载引擎选择，避免另起一套浮层
-    const pop = $('prPopover');
-    if (!pop) return;
-    // 锚定到「重译」按钮附近，浮层不会跑到屏幕左上角
-    const btn = blk.querySelector('.cmp-act[data-cmp-act="retrans"]');
-    const btnRect = btn?.getBoundingClientRect();
-    const pos = btnRect
-      ? { left: Math.max(10, btnRect.left - 180), top: Math.min(window.innerHeight - 220, btnRect.bottom + 8) }
-      : {};
-    showPopover(pop, '换引擎重译这一段', '<div class="cmp-retrans-body"><select id="cmpRetransEngine" class="tb-select w100"></select></div>', [
-      { text: '重译', cls: 'btn-primary', onClick: async () => {
-          const v = $('cmpRetransEngine')?.value || 'auto';
-          await cmpTranslateBlock(id, { force: true, source: v });
-        } },
-      { text: '取消', cls: '', onClick: () => {} },
-    ], pos);
-    // 填充引擎选项：跟随设置 + 逐条大模型配置 + 各翻译服务（与设置页翻译源同一份来源）
-    const sel = $('cmpRetransEngine');
-    if (!sel) return;
-    api('/api/translate/sources').then((d) => {
-      const opts = ['<option value="auto">跟随全局设置</option>'];
-      for (const p of d.profiles || []) {
-        opts.push(`<option value="llm:${esc(p.id)}">大模型 · ${esc(p.label)}${p.hasKey ? '' : '（未填 Key）'}</option>`);
-      }
-      for (const p of d.providers || []) opts.push(`<option value="${esc(p.id)}">${esc(p.label)}</option>`);
-      sel.innerHTML = opts.join('');
-      // 默认选当前这一段实际会用的源（面板 → 设置）
-      const own = cmpEl('cmpEngine')?.value || 'auto';
-      const cur = own !== 'auto' ? own : ($('prTranslateSource')?.value || 'auto');
-      if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
-    }).catch(() => { sel.innerHTML = '<option value="auto">跟随全局设置</option>'; });
+    if (!cmp.blockById.has(id)) return;
+    cmpTranslateBlock(id, { force: true });
   }
 
   // ---------- 一键送入 AI 助读 ----------
@@ -7856,18 +7838,25 @@
    * 选择存在 localStorage，下次打开阅读器自动恢复。
    */
   async function loadTranslateSources() {
-    const sel = $('prTranslateSource');
-    if (!sel) return;
+    // 两个下拉：设置页的全局翻译源（#prTranslateSource）+ 划词面板的引擎（#prSelSource）。
+    // 各自记住自己的选择，互不干扰。
+    const targets = [
+      { el: $('prTranslateSource'), key: 'prTranslateSource', label: '翻译源：跟随全局设置' },
+      { el: $('prSelSource'), key: 'prSelSource', label: '引擎：跟随全局设置' },
+    ];
     try {
       const data = await api('/api/translate/sources');
-      const saved = localStorage.getItem('prTranslateSource') || 'auto';
-      const opts = [{ value: 'auto', label: '翻译源：跟随全局设置' }];
-      for (const p of data.profiles || []) {
-        opts.push({ value: 'llm:' + p.id, label: `大模型 · ${p.label}${p.hasKey ? '' : '（未填 Key）'}` });
+      for (const t of targets) {
+        if (!t.el) continue;
+        const opts = [{ value: 'auto', label: t.label }];
+        for (const p of data.profiles || []) {
+          opts.push({ value: 'llm:' + p.id, label: `大模型 · ${p.label}${p.hasKey ? '' : '（未填 Key）'}` });
+        }
+        for (const p of data.providers || []) opts.push({ value: p.id, label: p.label });
+        const saved = localStorage.getItem(t.key) || 'auto';
+        t.el.innerHTML = opts.map((o) => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
+        if ([...t.el.options].some((o) => o.value === saved)) t.el.value = saved;
       }
-      for (const p of data.providers || []) opts.push({ value: p.id, label: p.label });
-      sel.innerHTML = opts.map((o) => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
-      if ([...sel.options].some((o) => o.value === saved)) sel.value = saved;
     } catch (_) { /* 拉取失败就保留默认项，不阻塞阅读器 */ }
   }
 
@@ -7922,10 +7911,12 @@
     translateAbort = new AbortController();
     const { signal } = translateAbort;
     const target = $('prLangTo')?.value || 'zh';
-    // 翻译源：auto = 跟随全局设置；llm:<profileId> = 指定某条大模型配置；其余为具体服务 id
+    // 翻译源就近优先：划词面板顶部选的引擎（#prSelSource）→ 设置页全局翻译源（#prTranslateSource）。
+    // auto = 跟随全局设置；llm:<profileId> = 指定某条大模型配置；其余为具体服务 id。
     let provider;
     let profileId;
-    const src = $('prTranslateSource')?.value || 'auto';
+    const own = $('prSelSource')?.value || 'auto';
+    const src = own !== 'auto' ? own : ($('prTranslateSource')?.value || 'auto');
     if (src.startsWith('llm:')) { provider = 'siliconflow'; profileId = src.slice(4); }
     else if (src !== 'auto') provider = src;
     box.innerHTML = '<div class="pr-loading">翻译中…</div>';
@@ -8283,12 +8274,15 @@
       } catch (e2) { toast('保存失败：' + e2.message, 'error'); }
     });
 
-    // 右侧划词翻译面板：拼接模式 / 清空 / 手动翻译 / Ctrl+Enter 翻译
+    // 右侧划词翻译面板：拼接模式 / 清空 / 手动翻译 / Ctrl+Enter 翻译 / 引擎选择
     $('prJoinMode').addEventListener('change', () => { pr.lastJoinedSelectionKey = ''; });
     $('prClearSelection').addEventListener('click', () => { resetSelectionTranslation(); toast('已清空选区与译文', 'success'); });
     $('prDoTranslate').addEventListener('click', doPanelTranslate);
     $('prSourceText').addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') doPanelTranslate();
+    });
+    $('prSelSource')?.addEventListener('change', () => {
+      localStorage.setItem('prSelSource', $('prSelSource').value);
     });
 
 

@@ -1,3 +1,20 @@
+## 划词翻译可选引擎 + 重译统一引擎（2026-10-14，v1.24.5）
+
+> 用户指令：「划词翻译要支持选择翻译引擎，而且原文框重译不要每重译一次都选择一次，可以在顶端统一设置」
+
+- 划词翻译面板顶部加引擎选择器 `#prSelSource`（跟随全局设置 / 各模型 / 各服务），
+  `doPanelTranslate` 就近读它（非 auto）→ 回落设置页 `#prTranslateSource`；选择记 localStorage `prSelSource`。
+- 对照精读顶部工具条 `#cmpBar` 加引擎选择器 `#cmpBarEngine`（常驻），`fillCmpForm` 里用
+  `/api/translate/sources` 填充（dataset.filled 守卫防重复）。
+- `cmpTranslateBlock` 翻译源优先级：显式 source → `#cmpBarEngine`（工具条）→ `#cmpEngine`（启动面板）
+  → `#prTranslateSource`（设置页）。
+- `cmpRetranslateBlock` 不再弹浮层选引擎：直接用 `cmpTranslateBlock(id, {force:true})` 复用工具条引擎。
+  删除 `#cmpRetransEngine` 浮层逻辑。
+- 测试：E2E 重译断言从「弹浮层选引擎」改「工具条选引擎 + 直接重译（不弹浮层、单段 +1）」。
+- 验证：单测 457/457（Node 20+22）、E2E 74/74。
+
+---
+
 ## 还原「划词翻译」页签到右栏侧边栏（2026-10-14，v1.24.4）
 
 > 用户指令：「还原原来的划词翻译功能，同样添加到侧边栏中」
