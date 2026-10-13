@@ -1582,6 +1582,28 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 }
 .pr-sel-trans-body .pr-loading { padding: 12px 0; font-size: 12.5px; }
 
+/* 自动对照管线状态徽标（阅读器工具条上）：打开文献 → 自动版面识别 → 自动整篇翻译
+   → 自动进对照精读。在用户还停在普通阅读视图时，让它看得见整条管线进行到哪一步。 */
+.cmp-auto-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-left: 8px; padding: 3px 11px;
+  border: 1px solid var(--hair); border-radius: 999px;
+  background: var(--surface); color: var(--ink-2);
+  font-size: 11.5px; line-height: 1.5; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.cmp-auto-chip.hidden { display: none; }
+.cmp-auto-chip::before {
+  content: ''; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ink-3); flex: 0 0 auto;
+}
+.cmp-auto-chip.busy::before { background: var(--ink); animation: cmpAutoPulse 1.2s ease-in-out infinite; }
+.cmp-auto-chip.done::before { background: var(--ink); }
+.cmp-auto-chip.fail { color: var(--ink); border-color: var(--ink-3); }
+.cmp-auto-chip.fail::before { background: var(--ink); }
+@keyframes cmpAutoPulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+
+
 /* ==================== 科研工作台（应用级侧边栏 + 多视图） ==================== */
 
 /* 应用级侧边栏（墨绿研究工作台） */

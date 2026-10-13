@@ -5368,6 +5368,9 @@
     else { pn.md = ''; pn.mindmap = null; pn.loadedFor = null; }
     // 对话记录：拉回历史（不阻塞 PDF 渲染）
     loadPrChat(id).catch(() => {});
+    // 自动对照管线：版面识别 → 整篇翻译 → 完成后自动进入对照精读，全程免点击。
+    // 已翻译过的篇目直接进；任何一步失败都降级回普通阅读，绝不卡住。
+    autoCmpPipeline(id).catch(() => {});
   }
 
   /**
@@ -5803,6 +5806,9 @@
     pdfPickId: null,
     meta: null,             // /api/pdf-translate/settings 的结果
     structureOnly: false,   // true = 只是版面结构（无译文），false = 已翻译版对照数据
+    autoId: null,           // 自动管线正在处理（或已处理过）的文献 id —— 一篇只跑一轮
+    autoEnter: false,       // true = 当前翻译作业跑完后要自动进入对照精读
+    autoTimer: null,        // 自动管线等版面解析的轮询句柄（关阅读器时清掉）
   };
 
   function cmpEl(id) { return document.getElementById(id); }
@@ -5849,9 +5855,18 @@
   }
 
   function applyCmpRatios() {
+    // 三档视图下，被隐藏那一栏的份额必须并给可见的中间栏，否则右侧会留一条空白：
+    // 各栏 flex-basis 全是 0，而 CSS 规定 Σflex-grow < 1 时每栏只分到 grow×自由空间、
+    // 剩余不用 —— 隐藏一栏等于把它那份宽度直接从屏上拿走（实测 1760px 下空出 ~370px）。
+    // 把隐藏栏并回去后 Σgrow 回到 1.11，按比例正常铺满。
+    const hiddenPane = cmp.view === 'pdf' ? 'trans' : cmp.view === 'trans' ? 'src' : null;
+    const midPane = hiddenPane ? (hiddenPane === 'trans' ? 'src' : 'trans') : null;
+    const midRatio = hiddenPane ? cmp.ratios.src + cmp.ratios.trans : 0;
     for (const name of ['outline', 'src', 'trans', 'assist']) {
       const el = cmpPane(name);
-      if (el) el.style.flex = `${cmp.ratios[name]} 1 0`;
+      if (!el) continue;
+      const r = name === midPane ? midRatio : cmp.ratios[name];
+      el.style.flex = `${r} 1 0`;
     }
   }
 
@@ -5918,6 +5933,8 @@
     document.querySelector('.pr-body')?.classList.add('hidden');
     $('prToggleCmp')?.classList.add('active');
     $('prToggleMd')?.classList.add('hidden');
+    // 已经进了对照精读，工具条上的「自动管线」徽标就完成了使命
+    setCmpAutoChip(null);
     // 每次进来都刷新一次启动面板的状态（版面是否已解析 / 是否已有对照数据）
     await refreshCmpStart();
     // 已经有版面结构（或已翻译的对照数据）就先铺出来：启动面板是浮层，
@@ -6150,6 +6167,24 @@
         if (out) return { job: j, output: out };
       }
       return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** 这篇是否已经有在跑（排队 / 进行中）的整篇翻译作业 —— 自动管线用，避免重复起作业 */
+  async function findCmpRunningJob() {
+    const litId = pr.recordId;
+    if (!litId) return null;
+    try {
+      const list = await api('/api/pdf-translate/jobs');
+      const mine = (Array.isArray(list) ? list : [])
+        .filter((j) => j.literatureId === litId && ['queued', 'running'].includes(j.status))
+        .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      for (const j of mine) {
+        if ((j.outputs || []).some((o) => o.kind === 'align' || o.kind === 'md') || j.stage) return { job: j };
+      }
+      return mine.length ? { job: mine[0] } : null;
     } catch (_) {
       return null;
     }
@@ -6703,6 +6738,17 @@
         renderCmp();
       }
       refreshCmpStart();
+      // 自动管线收尾：翻译完成后自动进入对照精读（用户全程没有点过任何按钮）
+      if (cmp.autoEnter) {
+        cmp.autoEnter = false;
+        if (ok && !cmp.on && pr.recordId && cmp.autoId === pr.recordId) {
+          setCmpAutoChip('busy', '正在打开对照精读…');
+          await openCmpMode();
+        } else if (cmp.autoId === pr.recordId) {
+          // 已经切到别的篇目了就别再打扰，徽标是当前这篇的状态
+          setCmpAutoChip(ok ? 'done' : 'fail', ok ? '翻译完成' : '翻译失败，可点「📖 对照精读」手动进入');
+        }
+      }
     };
     if (typeof EventSource === 'undefined') {
       const timer = setInterval(async () => {
@@ -6745,6 +6791,8 @@
         + (job.status === 'done' ? ' ft-bar-done' : '');
     }
     cmpEl('cmpStartProgress')?.classList.remove('hidden');
+    // 自动管线：用户还在普通阅读视图，进度要反映到工具条徽标上
+    if (cmp.autoEnter && !cmp.on) setCmpAutoChip('busy', `正在整篇翻译… ${Math.round(job.percent || 0)}%`);
     if (Array.isArray(job.logs)) {
       const box = cmpEl('cmpLogs');
       if (box) { box.textContent = job.logs.join('\n'); box.scrollTop = box.scrollHeight; }
@@ -6768,6 +6816,8 @@
     });
     const mode = cmpEl('prCmpMode');
     if (mode) mode.dataset.view = cmp.view;
+    // 视图变了，隐藏栏的宽度份额要重新分配（见 applyCmpRatios 里的注释）
+    applyCmpRatios();
     const hint = cmpEl('cmpSyncHint');
     if (hint) {
       hint.textContent = cmp.view === 'split'
@@ -6896,6 +6946,97 @@
     }, 1000);
   }
 
+  // ---------- 自动对照管线：打开文献 → 版面识别 → 整篇翻译 → 完成后自动进对照精读 ----------
+
+  /** 工具条上的管线状态徽标。state: undefined=收起 | 'busy' | 'done' | 'fail' */
+  function setCmpAutoChip(state, text) {
+    const chip = $('cmpAutoChip');
+    if (!chip) return;
+    if (!state) { chip.classList.add('hidden'); chip.textContent = ''; return; }
+    chip.classList.remove('hidden', 'busy', 'done', 'fail');
+    chip.classList.add(state);
+    chip.textContent = text;
+    chip.title = '打开文献后自动进行版面识别与整篇翻译，完成后自动进入对照精读';
+  }
+
+  /** 等这篇的版面解析跑完（轮询 pr 的状态位；watchLayoutProgress 的 SSE 会维护它们） */
+  function waitLayoutDone(recordId, maxSeconds = 1200) {
+    return new Promise((resolve) => {
+      let waited = 0;
+      const timer = setInterval(() => {
+        if (pr.recordId !== recordId) { clearInterval(timer); resolve(false); return; }
+        if (pr.layoutFor === recordId) { clearInterval(timer); resolve(true); return; }
+        // 既不在跑也没结果 = 解析失败 / 被取消
+        if (!pr.layoutBusy) { clearInterval(timer); resolve(false); return; }
+        if ((waited += 1) > maxSeconds) { clearInterval(timer); resolve(false); return; }
+      }, 1000);
+      cmp.autoTimer = timer;
+    });
+  }
+
+  /**
+   * 全自动管线：文献 PDF 打开后无需任何点击 ——
+   *   已有整篇翻译 → 直接进对照精读；
+   *   缺版面 → 自动解析 → 等完；
+   *   已有在跑的翻译作业 → 跟踪它；没有 → 用默认引擎（跟随「划词翻译」设置）自动起一篇；
+   *   翻译完成（subscribeCmpJob 的 onDone）→ 自动 openCmpMode()。
+   * 任何一步失败都只降级回普通阅读（toast + 徽标），绝不把用户卡住。
+   */
+  async function autoCmpPipeline(recordId) {
+    // 测试免打扰开关：端到端验证「手动点按钮」的链路时，自动管线会抢在前面
+    // 进对照精读 / 起翻译作业，把交互时序整个打乱。与 window.__openReader 一样
+    // 属于调试钩子，正常用户永远碰不到它。
+    if (window.__cmpAutoOff) return;
+    if (!recordId || pr.recordId !== recordId) return;
+    if (!isLiteratureSource() || pr.fileKind === 'epub') return;
+    if (cmp.autoId === recordId) return; // 这一篇在本轮阅读里已经跑过 / 正在跑
+    cmp.autoId = recordId;
+    cmp.autoEnter = false;
+    // ① 已经整篇翻译过 → 对照数据现成，直接进
+    const found = await findCmpAlignJob();
+    if (pr.recordId !== recordId) return;
+    if (found) {
+      setCmpAutoChip('busy', '正在打开对照精读…');
+      await openCmpMode();
+      return;
+    }
+    // ② 已有在跑的翻译作业（上次没等完就关了阅读器）→ 跟踪它而不是再起一篇
+    const running = await findCmpRunningJob();
+    if (pr.recordId !== recordId) return;
+    if (running) {
+      setCmpAutoChip('busy', '正在整篇翻译…');
+      cmp.autoEnter = true;
+      setCmpStartBusy(true);
+      cmp.job = running.job;
+      renderCmpJob(running.job);
+      subscribeCmpJob(running.job.id);
+      return;
+    }
+    // ③ 缺版面 → 自动解析（解析中工具条的「🧩 版面」按钮本来就会显示进度）
+    if (pr.layoutFor !== recordId && !pr.layoutBusy) {
+      setCmpAutoChip('busy', '正在解析版面…');
+      try {
+        await startLayoutParse();
+      } catch (_) {
+        setCmpAutoChip('fail', '版面解析启动失败');
+        return;
+      }
+      if (pr.recordId !== recordId) return;
+    }
+    const layoutOk = await waitLayoutDone(recordId);
+    if (pr.recordId !== recordId) return;
+    if (!layoutOk) { setCmpAutoChip('fail', '版面解析未完成，翻译没有开始'); return; }
+    // ④ 自动整篇翻译。引擎 / 目标语言都用默认值（跟随「划词翻译」设置 → 中文）
+    setCmpAutoChip('busy', '正在整篇翻译…');
+    cmp.autoEnter = true;
+    await startCmpTranslate();
+    if (cmp.autoEnter && !cmp.job) {
+      // startCmpTranslate 没把作业起起来（内部已 toast 原因）
+      cmp.autoEnter = false;
+      setCmpAutoChip('fail', '翻译启动失败');
+    }
+  }
+
   function closePdfReader() {
     pr.open = false;
     pr.doc = null;
@@ -6908,6 +7049,12 @@
     closeMdTranslation();
     hideSelTrans();
     if (pr.observer) { pr.observer.disconnect(); pr.observer = null; }
+    // 自动管线：本轮阅读结束。正在跑的翻译作业留在服务端继续（下次打开这篇会接上），
+    // 本地只清掉轮询与状态位，下次打开同一篇重新走一遍判定。
+    if (cmp.autoTimer) { clearInterval(cmp.autoTimer); cmp.autoTimer = null; }
+    cmp.autoId = null;
+    cmp.autoEnter = false;
+    setCmpAutoChip(null);
     // 关窗时终止仍在进行的流式回答，避免后台白白跑完
     stopPrChat();
     // 对照精读：把搬进最右栏的助读面板与 PDF 容器搬回原位，并收掉四区界面
