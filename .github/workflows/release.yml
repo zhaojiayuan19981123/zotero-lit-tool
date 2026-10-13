@@ -51,6 +51,15 @@ jobs:
           - x64
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      # ★ 关掉 electron-builder 的「硬链接」打包策略（v1.22.0 实测踩坑）。
+      #   在非 Windows 上且处于 CI 时，electron-builder 默认把源码目录里的文件
+      #   **硬链接**进 .app（builder-util/out/fs.js: _isUseHardLink = platform!=="win32"
+      #   && CI && USE_HARD_LINKS!=="false"）。它的 link() 只容忍 EXDEV，
+      #   一旦目标路径已存在就抛 EEXIST 并终止整个构建：
+      #   `⨯ EEXIST: file already exists, link '.../server.js' -> '....app/Contents/Resources/app/server.js'`
+      #   Windows 走的是复制分支（copyFile 会直接覆盖），所以同一个配置在 Windows 上一直是好的。
+      #   置 false 后 macOS 与 Windows 走同一条经过验证的复制路径。
+      USE_HARD_LINKS: "false"
     steps:
       - name: Check out source
         uses: actions/checkout@v4
