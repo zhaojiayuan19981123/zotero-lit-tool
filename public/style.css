@@ -1423,6 +1423,7 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .pr-trans-placeholder { color: var(--text-3); font-size: 12px; }
 .pr-trans-text { color: var(--text); }
 .pr-trans-error { color: var(--red); }
+.pr-trans-hint { margin: 0; font-size: 11.5px; color: var(--text-3); line-height: 1.5; }
 /* 我的思考（PDF 阅读器侧栏 + 阅读抽屉共用输入风格） */
 .pr-thoughts { min-height: 84px; resize: vertical; }
 .drawer-thoughts {

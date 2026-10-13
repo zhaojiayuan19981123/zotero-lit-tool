@@ -2725,10 +2725,10 @@
 
   // ---------- 右侧页签切换 ----------
   function switchPrTab(name) {
-    // 页签只剩三个：解析结果 / 笔记 / AI 助读。
-    // 「划词翻译」「全文翻译」两个页签已删除 —— 翻译统一走「对照精读」；
-    // 翻译源与目标语言（#prTranslateSource / #prLangTo）搬到「设置」页，元素本身没删，
-    // 因为笔记模式、邮件翻译、对照精读的单段翻译都还在读它们。
+    // 页签四个：划词翻译 / 解析结果 / 笔记 / AI 助读。
+    // 「全文翻译」页签已删除（整篇翻译走「对照精读」）；划词翻译页签已还原。
+    // 翻译源与目标语言（#prTranslateSource / #prLangTo）在「设置」页，元素本身没删，
+    // 因为笔记模式、邮件翻译、对照精读的单段翻译、划词翻译面板都还在读它们。
     pr.tab = name || 'analysis';
     document.querySelectorAll('.pr-tab').forEach((b) => b.classList.toggle('active', b.dataset.prtab === pr.tab));
     document.querySelectorAll('.pr-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.prpane !== pr.tab));
@@ -5344,6 +5344,13 @@
     show($('prTabAnalysis'), lit && !epub);
     // 停在 EPUB 不支持的页签上（解析结果读的是 PDF 版面）要退回到「笔记」
     if (epub && pr.tab === 'analysis') pr.tab = 'notes';
+    // 划词翻译面板的提示文案跟着格式走（EPUB / PDF 措辞不同）
+    const srcBox = $('prSourceText');
+    if (srcBox) srcBox.placeholder = selectionHintText();
+    const resBox = $('prTransResult');
+    if (resBox && resBox.querySelector('.pr-trans-placeholder')) {
+      resBox.innerHTML = `<div class="pr-trans-placeholder">${translationPlaceholder()}</div>`;
+    }
     // 「总结本页 / 总结本章」的文案与格式绑定（PDF 是页、EPUB 是章）
     setSummaryButtonLabel();
   }
@@ -7864,6 +7871,77 @@
     } catch (_) { /* 拉取失败就保留默认项，不阻塞阅读器 */ }
   }
 
+  // 划词面板的提示文案随文档格式走：读 EPUB 时别说成 PDF
+  function selectionHintText() {
+    return pr.fileKind === 'epub'
+      ? '在左侧 EPUB 正文中选中文字即可自动翻译；也可在此直接粘贴文本…'
+      : '在左侧 PDF 中选中文字即可自动翻译；也可在此直接粘贴文本…';
+  }
+  function translationPlaceholder() {
+    return pr.fileKind === 'epub'
+      ? '翻译结果将显示在这里。<br />在左侧 EPUB 正文中选中文字后会自动翻译。'
+      : '翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。';
+  }
+
+  // 划词 → 自动填充右侧翻译面板并立即翻译（无需点击「译」）
+  let translateAbort = null;
+  function resetSelectionTranslation({ preserveMode = true, clearBrowserSelection = true } = {}) {
+    if (translateAbort) { translateAbort.abort(); translateAbort = null; }
+    pr.lastJoinedSelectionKey = '';
+    pr.currentSelection = null;
+    $('prSourceText').value = '';
+    $('prTransResult').innerHTML = `<div class="pr-trans-placeholder">${translationPlaceholder()}</div>`;
+    if (!preserveMode) $('prJoinMode').checked = false;
+    if (clearBrowserSelection) window.getSelection()?.removeAllRanges();
+  }
+
+  function translateSelection(text) {
+    // 还原「划词翻译」页签后，选中文字自动切过去，让译文立刻可见
+    if (!pn.on) switchPrTab('translate');
+    const source = $('prSourceText');
+    if ($('prJoinMode').checked) {
+      const key = pdfReaderUtils.selectionKey(pr.currentSelection);
+      // 工具条里的「翻译」只重译当前拼接结果，不能把同一段重复塞进去。
+      if (key && key !== pr.lastJoinedSelectionKey) {
+        source.value = pdfReaderUtils.joinSelectionText(source.value, text);
+        pr.lastJoinedSelectionKey = key;
+      }
+    } else {
+      source.value = text;
+      pr.lastJoinedSelectionKey = '';
+    }
+    doPanelTranslate();
+  }
+
+  async function doPanelTranslate() {
+    const text = $('prSourceText').value.trim();
+    const box = $('prTransResult');
+    if (!text) { toast('请先选中或输入要翻译的文本', 'error'); return; }
+    // 新翻译开始前取消上一次未完成的请求，避免旧结果覆盖新结果
+    if (translateAbort) translateAbort.abort();
+    translateAbort = new AbortController();
+    const { signal } = translateAbort;
+    const target = $('prLangTo')?.value || 'zh';
+    // 翻译源：auto = 跟随全局设置；llm:<profileId> = 指定某条大模型配置；其余为具体服务 id
+    let provider;
+    let profileId;
+    const src = $('prTranslateSource')?.value || 'auto';
+    if (src.startsWith('llm:')) { provider = 'siliconflow'; profileId = src.slice(4); }
+    else if (src !== 'auto') provider = src;
+    box.innerHTML = '<div class="pr-loading">翻译中…</div>';
+    try {
+      const data = await api('/api/translate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, target, provider, profileId }), signal,
+      });
+      if (signal.aborted) return;
+      box.innerHTML = `<div class="pr-trans-text">${esc(data.translation)}</div>`;
+    } catch (e) {
+      if (isAbortError(e)) return;
+      box.innerHTML = `<div class="pr-trans-error">⚠ ${esc(e.message)}</div>`;
+    }
+  }
+
   function doHighlight() {
     const sel = pr.currentSelection;
     if (!sel) return;
@@ -8165,9 +8243,9 @@
           pr.currentSelection = sel;
           showSelectionToolbar(sel.clientRects);
           // 笔记模式有自己的中栏：划完就填进去自动翻译。
-          // 其余模式不再自动翻译 ——「划词翻译」页签已删除，译文改成按需：
-          // 点工具条上的「翻译」才会在选区下方弹出译文浮层。
+          // 普通模式还原「划词翻译」页签：划完自动切过去并翻译。
           if (pn.on) pnFillFromSelection(sel.text);
+          else translateSelection(sel.text);
         } else {
           hideSelectionToolbar();
         }
@@ -8185,11 +8263,7 @@
       }
       if (btn.dataset.sel === 'translate') {
         if (pn.on) pnFillFromSelection(sel.text);
-        else {
-          const rects = sel.clientRects || [];
-          hideSelectionToolbar();
-          showSelTrans(sel.text, rects[rects.length - 1]);
-        }
+        else translateSelection(sel.text);
       }
       else if (btn.dataset.sel === 'highlight') doHighlight();
       else if (btn.dataset.sel === 'underline') doUnderline();
@@ -8207,6 +8281,14 @@
         if (pr.recordId === litId) $('prThoughtsState').textContent = v ? '已保存' : '';
         toast('我的思考已保存', 'success');
       } catch (e2) { toast('保存失败：' + e2.message, 'error'); }
+    });
+
+    // 右侧划词翻译面板：拼接模式 / 清空 / 手动翻译 / Ctrl+Enter 翻译
+    $('prJoinMode').addEventListener('change', () => { pr.lastJoinedSelectionKey = ''; });
+    $('prClearSelection').addEventListener('click', () => { resetSelectionTranslation(); toast('已清空选区与译文', 'success'); });
+    $('prDoTranslate').addEventListener('click', doPanelTranslate);
+    $('prSourceText').addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') doPanelTranslate();
     });
 
 

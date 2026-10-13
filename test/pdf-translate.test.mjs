@@ -472,7 +472,7 @@ test('前端：整篇翻译目前唯一入口是对照精读，四区骨架齐�
   }
 });
 
-test('前端：划词工具条六项动作与划词译文浮层都在', () => {
+test('前端：划词工具条六项动作、划词翻译面板与译文浮层都在', () => {
   const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf-8');
   const tb = html.match(/<div id="prSelectionToolbar"[\s\S]*?<\/div>/);
   assert.ok(tb, 'index.html 里找不到 #prSelectionToolbar');
@@ -480,11 +480,18 @@ test('前端：划词工具条六项动作与划词译文浮层都在', () => {
   for (const a of ['copy', 'highlight', 'underline', 'note', 'cite', 'translate']) {
     assert.ok(actions.includes(a), `划词工具条缺少动作 ${a}`);
   }
-  // 划词「翻译」的结果就地显示，不再往已删除的右栏面板里送
+  // 划词翻译页签已还原：右栏面板有页签 + 原文框 + 翻译按钮 + 结果框
+  for (const id of ['prTabTranslate', 'prSourceText', 'prDoTranslate', 'prTransResult']) {
+    assert.match(html, new RegExp(`id=["']${id}["']`), `index.html 缺少划词翻译面板部件 ${id}`);
+  }
+  const js = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf-8');
+  for (const fn of ['doPanelTranslate', 'translateSelection', 'resetSelectionTranslation']) {
+    assert.match(js, new RegExp(`function ${fn}\\(`), `app.js 缺少 ${fn}()`);
+  }
+  // 就地译文浮层仍在（备用，还原后划词翻译主走面板）
   for (const id of ['prSelTrans', 'prSelTransBody', 'prSelTransCopy', 'prSelTransClose']) {
     assert.match(html, new RegExp(`id=["']${id}["']`), `index.html 缺少划词译文浮层部件 ${id}`);
   }
-  const js = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf-8');
   for (const fn of ['showSelTrans', 'hideSelTrans', 'placeSelTrans']) {
     assert.match(js, new RegExp(`function ${fn}\\(`), `app.js 缺少 ${fn}()`);
   }

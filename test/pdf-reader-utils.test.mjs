@@ -32,19 +32,18 @@ test('单页旋转会正确交换显示尺寸，并可把标注矩形往返映�
   assert.equal(utils.normalizeRotation(450), 90);
 });
 
-test('PDF 阅读器保留当前页旋转控件，底栏不再挂「拼接 / 清空」按钮', () => {
+test('PDF 阅读器保留旋转控件，划词翻译面板已还原', () => {
   const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
   for (const id of ['prRotateLeft', 'prRotateRight', 'prRotationLabel']) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
-  // 「拼接模式」「清空选区」原来是跟着「划词翻译」面板一起做进底部工具条的。
-  // 该面板已删除，划词改走 #prSelectionToolbar（复制 / 高亮 / 下划线 / 笔记 / 引用 / 翻译），
-  // 这两个控件不该再出现；真出现了就说明面板只删了一半。
-  for (const id of ['prJoinMode', 'prClearSelection']) {
-    assert.doesNotMatch(html, new RegExp(`id="${id}"`), `${id} 应已随划词翻译面板一并移除`);
+  // 划词翻译面板已还原（「🌐 划词翻译」页签回来了），原文框 / 翻译按钮 / 结果框 /
+  // 拼接模式 / 清空选区跟着一起回来。
+  for (const id of ['prTabTranslate', 'prSourceText', 'prTransResult', 'prDoTranslate', 'prJoinMode', 'prClearSelection']) {
+    assert.match(html, new RegExp(`id="${id}"`), `还原划词翻译面板后应存在 ${id}`);
   }
-  // 拼接逻辑本身还在，只是不再由开关控制：默认就按中英边界拼（见 app.js 的 selectionText）
+  // 拼接逻辑仍在：默认按中英边界拼（见 app.js 的 selectionText），也可用面板里的「拼接模式」开关
   assert.match(app, /pdfReaderUtils\.joinSelectionText/);
   assert.match(app, /getPageViewport\(page, pageNum\)/);
   assert.match(app, /toCanonicalRect/);

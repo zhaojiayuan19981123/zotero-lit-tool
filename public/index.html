@@ -1765,13 +1765,30 @@
       <!-- 右：功能面板（划词翻译 / 解析结果 / AI 对话） -->
       <aside class="pr-trans-panel">
         <div class="pr-tabs" id="prTabs">
+          <button class="pr-tab" data-prtab="translate" id="prTabTranslate">🌐 划词翻译</button>
           <button class="pr-tab active" data-prtab="analysis" id="prTabAnalysis">📋 解析结果</button>
           <button class="pr-tab" data-prtab="notes" id="prTabNotes">📝 笔记</button>
           <button class="pr-tab" data-prtab="chat" id="prTabChat">🤖 AI 助读</button>
         </div>
 
-        <!-- ---------- 笔记与高亮（我的思考 + 批注列表） ---------- -->
-        <!-- 原「划词翻译」页签已删除：翻译统一走「对照精读」。
+        <!-- ---------- 划词翻译 ----------
+             选中左侧 PDF / EPUB 文字后自动翻译到这里；翻译源 / 目标语言走「设置」页的全局配置
+             （#prTranslateSource / #prLangTo），与对照精读、笔记模式共用同一组。 -->
+        <div class="pr-panel-body pr-pane hidden" data-prpane="translate">
+          <textarea id="prSourceText" class="pr-src" placeholder="在左侧 PDF 中选中文字即可自动翻译；也可在此直接粘贴文本…"></textarea>
+          <div class="pr-selection-options">
+            <span>选区：</span>
+            <label class="pr-join-label"><input id="prJoinMode" type="checkbox" /> 拼接模式</label>
+            <button id="prClearSelection" class="btn btn-ghost btn-sm" type="button" title="清空已拼接的选区与译文">清空</button>
+          </div>
+          <button id="prDoTranslate" class="btn btn-primary w100">翻 译</button>
+          <div id="prTransResult" class="pr-trans-box">
+            <div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>
+          </div>
+          <p class="pr-trans-hint">翻译源 / 目标语言在「设置」里调整，全应用共用。</p>
+        </div>
+
+        <!-- ---------- 笔记与高亮（我的思考 + 批注列表） ----------
              这一页留下的两块依赖「文献库记录」（写入 thoughts 字段 / paper-notes.json）；
              阅读成果管理里的附件时没有对应记录，按来源整块隐藏（见 app.js 的 applyReaderMode）。 -->
         <div class="pr-panel-body pr-pane hidden" data-prpane="notes">

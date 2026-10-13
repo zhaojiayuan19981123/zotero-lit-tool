@@ -1,3 +1,23 @@
+## 还原「划词翻译」页签到右栏侧边栏（2026-10-14，v1.24.4）
+
+> 用户指令：「还原原来的划词翻译功能，同样添加到侧边栏中」
+
+- 右侧面板恢复「🌐 划词翻译」页签（`#prTabTranslate` + `data-prpane="translate"` 面板）：
+  原文框 `#prSourceText`、拼接模式 `#prJoinMode`、清空 `#prClearSelection`、翻译按钮 `#prDoTranslate`、
+  结果框 `#prTransResult` 全部还原（这些元素在 v1.24.0 删除时被移除，CSS 样式一直保留未删）。
+- 翻译源 / 目标语言**不重复放**在面板里：继续读设置页的 `#prTranslateSource` / `#prLangTo`
+  （全局共用，与对照精读单段翻译、笔记模式、邮件翻译一致），避免两处下拉不同步。
+- JS 还原：`doPanelTranslate` / `translateSelection` / `resetSelectionTranslation` / `selectionHintText` /
+  `translationPlaceholder` 补回；mouseup 选中文字后普通模式自动 `translateSelection`
+  （自动切到划词翻译页签 + 立即翻译），工具条「翻译」按钮改回 `translateSelection`（不再走就地浮层）。
+- 就地译文浮层 `#prSelTrans` / `showSelTrans` **保留**（未被工具条触发，属无害备用），
+  删它要动 HTML/CSS/JS/测试四处，风险大于收益。
+- 测试更新：pdf-reader-utils（prJoinMode/prClearSelection 从「应移除」改「应存在」）、
+  pdf-translate（划词翻译面板断言 + 浮层断言并存）；E2E 划词翻译断言从「就地浮层」改「面板 + 切页签」。
+- 验证：单测 457/457（Node 20 与 22）、E2E 75/75。
+
+---
+
 ## 公式转 LaTeX 去全文 + 点击放大 150% + 原文栏居中 + 缩放丝滑（2026-10-14，v1.24.3）
 
 > 用户指令：
