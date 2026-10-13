@@ -196,6 +196,9 @@ export function registerPdfTranslateRoutes(app, deps) {
         filePath: resolved.path,
         fileName: resolved.name,
         literatureId: req.body?.literatureId || null,
+        // 'manifest' = 沿用阅读器里已完成的「🧩 版面」解析结果。块切分与前端叠加层、
+        // 侧栏「解析结果」完全同源，逐段对照才能对齐；扫描件也只有它有文字。
+        layoutSource: req.body?.layoutSource || null,
         // 成果附件来源：作业记住它，前端才能按「成果」筛出这一篇的翻译历史
         achievementId: req.body?.achievementId || null,
         fileId: req.body?.fileId || null,

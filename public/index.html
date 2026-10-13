@@ -1385,6 +1385,7 @@
         <button id="prRotateRight" class="btn btn-ghost" title="向右旋转当前页（仅本次阅读）">右转 ↷</button>
         <button id="prToggleMd" class="btn btn-ghost hidden" title="在 Markdown 译文与原文 PDF 之间切换">📑 查看译文</button>
         <button id="prToggleNote" class="btn btn-ghost" title="笔记模式：左侧原文 / 中间划词翻译 / 右侧笔记（Markdown + 思维导图）">📓 笔记模式</button>
+        <button id="prToggleCmp" class="btn btn-ghost" title="对照精读：左大纲 ｜ 中左原文 ｜ 中右译文 ｜ 右 AI 助读。先识别版面，再逐段对照翻译，点原文译文同步定位">📖 对照精读</button>
         <button id="prLayoutBtn" class="btn btn-ghost" title="版面解析：识别图表 / 表格 / 公式区域，悬停看类型、点击放大或送 AI 解释">🧩 版面</button>
       </div>
       <div class="pr-tools" id="prColorTools">
@@ -1583,6 +1584,113 @@
         </section>
       </div>
       <div class="pn-empty-tip hidden" id="pnEmptyTip"></div>
+    </div>
+
+    <!-- ================= 对照精读（四区：大纲 ｜ 原文 ｜ 译文 ｜ AI 助读） =================
+         与 .pr-body / .pr-note-mode 互斥显示（同一时刻只有一个在里面显示）。
+           · 最左「本文大纲」：版面识别出的标题块，带页码，点一下跳到该段
+           · 中左「原文流」：版面块按阅读顺序铺开，可划词、可点选
+           · 中右「译文流」：与原文逐块对齐的译文
+           · 最右「AI 助读」：常驻。复用右侧面板的 DOM（进入时搬进来，退出时搬回去），
+             所以划词、引用池、模型切换、按文献持久化这些能力全部一致。
+
+         数据有两条来源，块 id / 切分 / 顺序完全同源（同一段 layoutFromManifest + buildAlignOutput）：
+           ① 版面识别一跑完，就能先看「结构」（大纲 + 原文流，译文留空）—— GET /layout/align
+           ② 跑过全文翻译后换成「已翻译」版（GET /jobs 里 kind==='align' 的产物）
+         所以从结构切到已翻译不会错位，用户点哪一段就按需翻哪一段（走 /api/translate）。 -->
+    <div id="prCmpMode" class="pr-cmp-mode hidden">
+      <!-- 启动面板：选翻译引擎整篇翻译。四区已经就绪时它是可收起的浮层（右上 ✕）。 -->
+      <div class="cmp-start" id="cmpStart">
+        <div class="cmp-start-card">
+          <div class="cmp-start-emoji">📖</div>
+          <h3 class="cmp-start-title">对照精读</h3>
+          <p class="cmp-start-desc" id="cmpStartDesc">
+            把这篇 PDF 的<b>版面识别结果</b>逐段译成目标语言：左侧列出本章大纲，中间左右对照原文与译文，
+            点击任一段落两侧同步定位，选中的段落可一键送入右侧 AI 助读。
+          </p>
+          <ol class="cmp-start-steps" id="cmpStartSteps"></ol>
+          <div class="cmp-start-form">
+            <label class="cmp-field"><span>翻译引擎</span>
+              <select id="cmpEngine" class="tb-select w100" title="这一篇用谁来翻译"></select>
+            </label>
+            <label class="cmp-field"><span>目标语言</span>
+              <select id="cmpTarget" class="tb-select w100"></select>
+            </label>
+            <label class="cmp-field"><span>页码范围</span>
+              <input id="cmpPages" class="tb-input w100" placeholder="留空 = 全部（例：1-5,8,12-）" />
+            </label>
+          </div>
+          <label class="ml-switch cmp-start-switch"><input type="checkbox" id="cmpRefs" /> 参考文献也翻译</label>
+          <button id="cmpStartClose" class="cmp-start-close hidden" title="收起，直接看四区对照">✕</button>
+          <div class="cmp-start-actions">
+            <button id="cmpStartBtn" class="btn btn-primary">开始对照翻译</button>
+            <button id="cmpLoadBtn" class="btn btn-ghost" title="不重新翻译，直接读取这篇已经生成过的对照数据">读取已有结果</button>
+            <button id="cmpParseBtn" class="btn btn-ghost hidden" title="先跑一次版面识别">先识别版面</button>
+          </div>
+          <div class="cmp-start-progress hidden" id="cmpStartProgress">
+            <div class="ft-bar"><div class="ft-bar-inner" id="cmpBarInner"></div></div>
+            <div class="ft-stage-row">
+              <span id="cmpStage">排队中</span>
+              <span id="cmpPercent">0%</span>
+            </div>
+            <div class="cmp-start-progress-actions">
+              <button id="cmpCancelBtn" class="btn btn-ghost btn-sm">取消任务</button>
+              <button id="cmpLogToggle" class="btn btn-ghost btn-sm">运行日志</button>
+            </div>
+            <pre id="cmpLogs" class="ft-logs hidden"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- 常驻工具条：视图切换 / 全文翻译入口 / 状态。
+           刻意放在四区之上，而不是某一栏的栏头里 —— 若挂在「原文」栏头上，
+           切到「仅译文」时原文栏连同切换按钮一起被隐藏，用户就被卡死在那个视图里。 -->
+      <div class="cmp-bar" id="cmpBar">
+        <div class="pn-seg pn-seg-sm" id="cmpViewSeg">
+          <button class="pn-seg-btn active" data-cmpview="split" title="左原文右译文，两侧同步滚动">分栏对照</button>
+          <button class="pn-seg-btn" data-cmpview="inline" title="只在原文栏里，每段下面挂它的译文">同栏对照</button>
+          <button class="pn-seg-btn" data-cmpview="trans" title="只看译文，用于快速通读">仅译文</button>
+        </div>
+        <button id="cmpStartToggle" class="btn btn-ghost btn-sm" title="选择翻译引擎，把整篇按版面块逐段翻译">🌐 全文翻译</button>
+        <span class="cmp-engine-state" id="cmpEngineState"></span>
+        <span class="cmp-hint" id="cmpSyncHint"></span>
+      </div>
+
+      <div class="cmp-panes" id="cmpPanes">
+        <!-- ---------- 最左：本文大纲 ---------- -->
+        <aside class="cmp-pane cmp-outline" data-cmp="outline">
+          <div class="pn-head">
+            <span class="pn-head-title">本文大纲 <span class="side-count" id="cmpOutlineCount">0</span></span>
+            <input id="cmpOutlineSearch" class="pr-dir-search cmp-outline-search" type="search" placeholder="搜索章节" />
+          </div>
+          <div class="cmp-outline-list" id="cmpOutlineList"></div>
+          <div class="cmp-outline-foot" id="cmpOutlineFoot">点章节即可跳到该段</div>
+        </aside>
+        <div class="pn-resizer" data-cmpresize="outline" title="拖动调整大纲宽度"></div>
+
+        <!-- ---------- 中左：原文流 ---------- -->
+        <section class="cmp-pane cmp-src" data-cmp="src">
+          <div class="pn-head">
+            <span class="pn-head-title">原文 <span class="side-count" id="cmpSrcCount">0</span></span>
+          </div>
+          <div class="cmp-flow" id="cmpSrcFlow"></div>
+        </section>
+        <div class="pn-resizer" data-cmpresize="trans" title="拖动调整原文 / 译文宽度"></div>
+
+        <!-- ---------- 中右：译文流 ---------- -->
+        <section class="cmp-pane cmp-trans" data-cmp="trans">
+          <div class="pn-head">
+            <span class="pn-head-title">译文 <span class="side-count" id="cmpTransCount">0</span></span>
+          </div>
+          <div class="cmp-flow" id="cmpTransFlow"></div>
+        </section>
+        <div class="pn-resizer" data-cmpresize="assist" title="拖动调整 AI 助读宽度"></div>
+
+        <!-- ---------- 最右：AI 助读（常驻；宿主容器，右侧面板 DOM 会搬进来） ---------- -->
+        <aside class="cmp-pane cmp-assist" data-cmp="assist">
+          <div class="cmp-assist-host" id="cmpAssistHost"></div>
+        </aside>
+      </div>
     </div>
 
     <div class="pr-body">

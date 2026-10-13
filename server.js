@@ -13,6 +13,9 @@ import { extractPdfText } from './src/pdfParser.js';
 import { extract, FIELDS } from './src/aiExtractor.js';
 import * as store from './src/store.js';
 import * as layout from './src/layout.js';
+// 版面识别结果 → 翻译管线结构 / 逐块对照数据（见 src/layoutTranslate.js）：
+// 「对照精读」在还没做过全文翻译时也要能立刻铺出大纲与原文流。
+import { readManifestFor, layoutFromManifest, buildAlignOutput } from './src/layoutTranslate.js';
 import { queryPublicationRank, formatRank } from './src/easyscholar.js';
 import { translate } from './src/translate.js';
 import { TRANSLATE_PROVIDERS } from './src/translateProviders.js';
@@ -1782,6 +1785,33 @@ export function createApp({
     res.sendFile(file);
   });
 
+  // 版面识别结果 → 「对照精读」的逐块数据（**不含译文**）
+  //
+  // 为什么需要它：按用户的用法，是「先识别版面理解页面结构，再执行全文翻译」。
+  // 版面一旦识别好，大纲与原文流其实就已经有了，不必等翻译跑完才让用户看见结构。
+  // 译文留空，前端点哪一段就按需翻哪一段（走 /api/translate）。
+  //
+  // 与翻译作业产出的「对照数据」走的是同一段代码（layoutFromManifest + buildAlignOutput），
+  // 所以块 id / 切分 / 阅读顺序与翻译完成后完全一致 —— 从「结构」切到「已翻译」
+  // 不会发生任何错位，只是 translation 字段被填上了。
+  app.get('/api/literature/:id/layout/align', (req, res) => {
+    const item = store.getLiterature(req.params.id);
+    if (!item) return res.status(404).json({ error: '记录不存在' });
+    const manifest = readManifestFor(store.getDataDir(), item.id);
+    if (!manifest) return res.status(404).json({ error: '还没有版面识别结果' });
+    try {
+      const lay = layoutFromManifest(manifest, { translateReferences: false });
+      const align = buildAlignOutput(lay, {
+        literatureId: item.id,
+        targetLang: '',
+        translationsReady: false,
+      });
+      res.json({ ok: true, align });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ---------- easyScholar 期刊等级 ----------
   app.post('/api/literature/:id/rank', async (req, res) => {
     const item = store.getLiterature(req.params.id);
@@ -3409,18 +3439,38 @@ export function createApp({
     });
 
     sseStart(res);
-    // 先把用的是哪个模型告诉前端，便于界面提示（例如模型不支持看图）
-    sseSend(res, { model: { id: am.id, label: am.label, providerName: am.providerName, model: am.model, vision: am.vision } });
 
     try {
-      // ---- 第一段（可选）：当前模型看不了图，就先让视觉模型把图变成文字 ----
       const { hasImage, images } = splitImageParts(payloadMessages);
+
+      // ---- 「直接走视觉模型」：图表 / 公式解释这类场景，要的是模型**真的看见图**，
+      //      而不是让一个文本模型去读二手转述（转述会丢掉坐标轴数值、表格行列这些关键信息）。
+      //      请求方显式声明 preferVision 时：只要当前模型看不了图，就把**回答模型**整个
+      //      换成视觉模型，单段直答。普通对话不传这个标记，仍然走下面那套两段式。 ----
+      const wantVision = req.body?.preferVision === true;
+      let answerModel = am;
+      let directVision = false;
+      if (wantVision && hasImage && am.vision !== true) {
+        const vm = resolveVisionModel(settings);
+        if (vm) { answerModel = vm; directVision = true; }
+      }
+
+      // 先把用的是哪个模型告诉前端，便于界面提示（例如模型不支持看图）
+      sseSend(res, {
+        model: {
+          id: answerModel.id, label: answerModel.label, providerName: answerModel.providerName,
+          model: answerModel.model, vision: answerModel.vision,
+        },
+        directVision,
+      });
+
+      // ---- 第一段（可选）：只有当回答模型仍然看不了图时，才让视觉模型把图变成文字 ----
       let finalMessages = payloadMessages;
-      if (hasImage && am.vision !== true) {
+      if (hasImage && answerModel.vision !== true) {
         const vm = resolveVisionModel(settings);
         if (!vm) {
           sseSend(res, {
-            error: `当前模型「${am.model}」不支持图片输入，而且没有可用的视觉模型。`
+            error: `当前模型「${answerModel.model}」不支持图片输入，而且没有可用的视觉模型。`
               + `请到「AI 设置 → 两段式看图」里指定一个支持视觉的模型（例如 GLM-4.5V 或 Qwen3.8-27B），或直接在顶栏切换到视觉模型。`,
           });
           return sseEnd(res);
@@ -3436,8 +3486,8 @@ export function createApp({
         sseSend(res, { stage: 'answer', visionModel: { id: vm.id, label: vm.label, model: vm.model }, description: desc.text });
       }
 
-      const r = await streamModelResponse(am, {
-        model: am.model,
+      const r = await streamModelResponse(answerModel, {
+        model: answerModel.model,
         messages: finalMessages,
         temperature: 0.3,
         max_tokens: 4096,

@@ -20,6 +20,11 @@ import {
 } from './engines.js';
 import { resolveCjkFont, downloadCjkFont, describeFont, defaultBundledFontDir, platformFontHint } from './fonts.js';
 import { toUint8Array } from './util.js';
+// 版面解析 → 翻译管线的适配层：把 processor 的 manifest.json 转成 analyzePdf 的结构，
+// 让术语表 / 缓存 / 并发 / 渲染全部原样复用（详见 src/layoutTranslate.js 顶部说明）
+import {
+  layoutFromManifest, buildMarkdownFromManifest, buildAlignOutput, readManifestFor,
+} from '../layoutTranslate.js';
 
 export { TARGET_LANGS, parseGlossary, describeFont, downloadCjkFont, platformFontHint };
 
@@ -353,6 +358,10 @@ export class PdfTranslateService extends EventEmitter {
       // 两者互斥，都为空时表示「直接上传的 PDF」。
       achievementId: params.achievementId || null,
       fileId: params.fileId || null,
+      // 'manifest' = 沿用阅读器里「🧩 版面」已经跑完的解析结果（见 run() 第 1 步）。
+      // 只传这个标记、不传 manifest 本体：解析结果按文献 id 落在数据目录里，
+      // 几十上百 KB 的内容没必要塞进请求体与历史 JSON。
+      layoutSource: params.layoutSource || null,
       filePath: params.filePath,
       fileName: params.fileName || path.basename(params.filePath || ''),
       status: 'queued',
@@ -445,7 +454,9 @@ export class PdfTranslateService extends EventEmitter {
 
     // 0) 本次要出哪些成品。md 不需要字体与 PDF 渲染；视觉识别只作用于 md 成品。
     const modes = resolveModes(options.mode);
-    const useVision = options.vision && modes.includes('md');
+    // 版面来源时不走视觉识别：版面模型给出的文字与块结构已经比「截图再转录」
+    // 更准更细，再让视觉模型重认一遍既慢、又会引入第二套切分导致对不齐。
+    const useVision = options.vision && modes.includes('md') && job.layoutSource !== 'manifest';
     const needPdfRender = modes.some((m) => m !== 'md');
 
     // 进度锚点：视觉模式多一个识别阶段，翻译段整体后移
@@ -467,18 +478,39 @@ export class PdfTranslateService extends EventEmitter {
       + (pageNumbers ? `（页码范围：${options.pageRange}）` : '（未限定页码范围）'));
 
     let layout = null;
+    // ★ 版面来源：阅读器里已经跑过「🧩 版面」时，翻译直接沿用那份解析结果。
+    //
+    // 为什么不让两个引擎各跑一遍：
+    //   ① 版面模型（PP-DocLayoutV3）的块切分带 order / label，比文本层启发式更准，
+    //      左右对照才能逐段稳定对齐 —— 两套切分不同会让「点原文跳译文」错位；
+    //   ② 与前端叠加层、侧栏「解析结果」完全同源，用户看到的块就是被翻译的块；
+    //   ③ 扫描件根本没有文本层，analyzePdf 拿不到字，只有版面模型有文字。
+    const manifest = job.layoutSource === 'manifest'
+      ? readManifestFor(this.deps.getDataDir(), job.literatureId)
+      : null;
+    if (job.layoutSource === 'manifest' && !manifest) {
+      throw new Error('找不到这篇文献的版面解析结果，请先回到阅读器点「🧩 版面」解析完成，再回来翻译');
+    }
+
     try {
-      layout = await analyzePdf(sourceBytes, {
-        pageNumbers,
-        signal,
-        keepFormulas: options.keepFormulas,
-        keepTables: options.keepTables,
-        translateReferences: options.translateReferences,
-        onProgress: (p) => this.setStage(job, 'analyze', 1 + Math.round(p.percent * (ANALYZE_END - 1)), `解析版面 ${p.page}/${p.total}`),
-      });
-      job.stats = { ...layout.stats };
-      this.log(job, `版面解析完成：${layout.stats.pages} 页 / ${layout.stats.blocks} 个文本块，其中可翻译 ${layout.stats.translatableBlocks} 个（约 ${layout.stats.chars} 字）`);
-      this.log(job, `正文基准字号 ${layout.stats.bodySize} pt，字形 ${layout.stats.bodySerif == null ? '族别未知' : (layout.stats.bodySerif ? '衬线体（宋体系）' : '无衬线体（黑体系）')}`);
+      if (manifest) {
+        layout = layoutFromManifest(manifest, { translateReferences: options.translateReferences });
+        job.stats = { ...layout.stats };
+        this.log(job, `沿用版面解析结果${layout.model ? `（${layout.model}）` : ''}：`
+          + `${layout.stats.pages} 页 / ${layout.stats.blocks} 个块，其中可翻译 ${layout.stats.translatableBlocks} 段（约 ${layout.stats.chars} 字）`);
+      } else {
+        layout = await analyzePdf(sourceBytes, {
+          pageNumbers,
+          signal,
+          keepFormulas: options.keepFormulas,
+          keepTables: options.keepTables,
+          translateReferences: options.translateReferences,
+          onProgress: (p) => this.setStage(job, 'analyze', 1 + Math.round(p.percent * (ANALYZE_END - 1)), `解析版面 ${p.page}/${p.total}`),
+        });
+        job.stats = { ...layout.stats };
+        this.log(job, `版面解析完成：${layout.stats.pages} 页 / ${layout.stats.blocks} 个文本块，其中可翻译 ${layout.stats.translatableBlocks} 个（约 ${layout.stats.chars} 字）`);
+        this.log(job, `正文基准字号 ${layout.stats.bodySize} pt，字形 ${layout.stats.bodySerif == null ? '族别未知' : (layout.stats.bodySerif ? '衬线体（宋体系）' : '无衬线体（黑体系）')}`);
+      }
     } catch (e) {
       // 视觉模式不依赖文本层（扫描版也能翻）；其余情况照旧抛出
       if (!useVision) throw e;
@@ -748,7 +780,10 @@ export class PdfTranslateService extends EventEmitter {
       this.setStage(job, 'render', 86, '正在生成 Markdown 译文');
       mdResult = useVision
         ? this.assembleVisionMarkdownOutput(visionPages, missingLayoutPages, layout, options)
-        : buildMarkdownFromLayout(layout?.pages || [], { reflowKeepFigures: options.reflowKeepFigures });
+        // 版面来源：label 已由模型直接给出类型，按 label 定层级比字号启发式更准
+        : layout?.source === 'manifest'
+          ? buildMarkdownFromManifest(layout.pages)
+          : buildMarkdownFromLayout(layout?.pages || [], { reflowKeepFigures: options.reflowKeepFigures });
       if (!mdResult.markdown.trim()) {
         throw new Error('Markdown 译文组装结果为空，请检查该 PDF 是否有可识别内容');
       }
@@ -842,6 +877,38 @@ export class PdfTranslateService extends EventEmitter {
         ? `${report.translatedBlocks} 段译文，${report.figures || 0} 张插图 / ${report.formulas || 0} 个公式 / ${report.tables || 0} 张表格按原样保留`
         : `${report.translatedBlocks} 段译文${report.overflowBlocks ? `，${report.overflowBlocks} 段文字较密已自动缩小字号` : ''}`;
       this.log(job, `已生成${meta.label}：${fileName}（${(bytes.length / 1024 / 1024).toFixed(2)} MB，${extra}）`);
+    }
+
+    // ★ 版面来源额外产出「逐块对齐数据」：阅读器左右对照、同步滚动、点原文跳译文的
+    //   唯一数据源。与选了哪些成品无关 —— 对照阅读本身不依赖任何 PDF 成品。
+    if (layout?.source === 'manifest') {
+      try {
+        const align = buildAlignOutput(layout, {
+          literatureId: job.literatureId || '',
+          targetLang: options.targetLang,
+          generatedAt: new Date().toISOString(),
+        });
+        const fileName = `${stem}-对照数据.json`;
+        const filePath = path.join(outDir, fileName);
+        const json = JSON.stringify(align, null, 2);
+        fs.writeFileSync(filePath, json, 'utf-8');
+        job.outputs.push({
+          kind: 'align',
+          label: '对照数据',
+          fileName,
+          filePath,
+          relPath: `${job.id}/${fileName}`,
+          url: `/translations/${encodeURIComponent(job.id)}/${encodeURIComponent(fileName)}`,
+          size: Buffer.byteLength(json, 'utf-8'),
+          pages: align.pages,
+          blocks: align.translatedBlocks,
+          overflowBlocks: 0,
+        });
+        this.log(job, `已生成对照数据：${fileName}（${align.totalBlocks} 个块，其中 ${align.translatedBlocks} 段有译文）`);
+      } catch (e) {
+        // 对照数据失败不该让整篇翻译判为失败 —— 译文成品本身已经产出
+        this.log(job, `对照数据生成失败（${e.message}），不影响译文成品`);
+      }
     }
 
     job.stats.outputs = job.outputs.length;

@@ -1049,6 +1049,11 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
   font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
   color: var(--text-2); white-space: pre-wrap; word-break: break-all; text-align: left;
 }
+/* 「AI 解释」的署名行：让用户知道这次是视觉模型直答、并且已经带上全文上下文 */
+.pbp-answer-body .pr-answer-by {
+  margin-top: 10px; padding-top: 7px; border-top: 1px dashed var(--border);
+  font-size: 11px; color: var(--text-3);
+}
 
 .pr-body { flex: 1; display: flex; overflow: hidden; }
 .pr-main { flex: 1; min-width: 0; overflow: hidden; display: flex; position: relative; }
@@ -2948,5 +2953,206 @@ body.pn-resizing * { cursor: col-resize !important; }
   .pn-left, .pn-mid { border-right: none; border-bottom: 1px solid var(--border); }
   .pn-pane { flex: 0 0 auto !important; min-height: 260px; }
   .pn-resizer { display: none; }
+}
+
+/* ==========================================================================
+   对照精读（四区：大纲 ｜ 原文 ｜ 译文 ｜ AI 助读）
+   与 .pr-body / .pr-note-mode 互斥显示。头部、分段控件、分隔条、小按钮这些
+   基础件直接复用笔记模式那套（.pn-*），保证两个模式的观感与手感一致。
+   默认宽度比例由 JS 写入 inline flex-basis，并持久化在 localStorage。
+   ========================================================================== */
+.pr-cmp-mode {
+  flex: 1; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--panel-soft); min-height: 0; position: relative;
+}
+.pr-cmp-mode.hidden { display: none; }
+
+/* ---------- 常驻工具条（视图切换 / 全文翻译入口 / 状态） ----------
+   必须挂在四区之外：视图切换按钮若放在「原文」栏的栏头里，切到「仅译文」时
+   整栏被 display:none，按钮跟着消失，用户再也切不回来。 */
+.cmp-bar {
+  flex-shrink: 0; display: flex; align-items: center; gap: 10px;
+  padding: 6px 12px; border-bottom: 1px solid var(--border);
+  background: var(--surface); min-height: 40px;
+}
+.cmp-bar .cmp-engine-state { margin-left: auto; max-width: 40%; }
+.cmp-bar .cmp-hint { margin-left: 0; max-width: 34%; }
+
+/* ---------- 四区容器 ---------- */
+.cmp-panes { flex: 1; display: flex; align-items: stretch; overflow: hidden; min-height: 0; }
+.cmp-pane { display: flex; flex-direction: column; overflow: hidden; min-width: 0; background: var(--surface); min-height: 0; }
+.cmp-outline { border-right: 1px solid var(--border); background: var(--panel-soft); }
+.cmp-trans { border-left: 1px solid var(--border); }
+.cmp-assist { border-left: 1px solid var(--border); }
+.cmp-assist-host { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+/* 搬进来的右侧面板要撑满，且不要再叠一层左边框（宿主 pane 已经有了） */
+.cmp-assist .pr-trans-panel {
+  width: 100% !important; border-left: none !important;
+  flex: 1 1 auto; min-height: 0;
+}
+
+/* ---------- 视图模式（分栏对照 / 同栏对照 / 仅译文） ---------- */
+.pr-cmp-mode[data-view="inline"] .cmp-trans,
+.pr-cmp-mode[data-view="inline"] [data-cmpresize="trans"] { display: none !important; }
+.pr-cmp-mode[data-view="trans"] .cmp-src,
+.pr-cmp-mode[data-view="trans"] [data-cmpresize="trans"] { display: none !important; }
+/* 「仅原文」时原文栏里的内联译文让位 */
+.pr-cmp-mode[data-view="inline"] .cmp-src .cmp-block-trans { display: block; }
+
+/* ---------- 最左：本文大纲 ---------- */
+.cmp-outline .pn-head { flex-wrap: wrap; row-gap: 6px; }
+.cmp-outline-search { flex: 1 1 100%; width: 100%; }
+.cmp-outline-list { flex: 1; overflow-y: auto; padding: 6px 6px 18px; }
+.cmp-outline-item {
+  display: flex; align-items: baseline; gap: 6px; width: 100%;
+  padding: 5px 8px; border: none; border-left: 2px solid transparent; border-radius: 0 6px 6px 0;
+  background: transparent; cursor: pointer; font-family: inherit; text-align: left;
+  font-size: 12.5px; line-height: 1.55; color: var(--text-2);
+  transition: background .12s, color .12s;
+}
+.cmp-outline-item:hover { background: var(--panel-2-hover); color: var(--text); }
+.cmp-outline-item.active { background: var(--primary-soft); color: var(--primary); border-left-color: var(--primary); font-weight: 600; }
+.cmp-outline-item[data-level="1"] { font-size: 13px; font-weight: 800; color: var(--text); }
+.cmp-outline-item[data-level="2"] { padding-left: 16px; font-weight: 600; }
+.cmp-outline-item[data-level="3"] { padding-left: 26px; }
+.cmp-outline-item[data-level="4"] { padding-left: 36px; font-size: 12px; color: var(--text-3); }
+.cmp-outline-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-outline-page { flex-shrink: 0; font-size: 10.5px; color: var(--text-3); font-weight: 400; }
+.cmp-outline-empty { padding: 24px 12px; text-align: center; font-size: 12px; color: var(--text-3); line-height: 1.9; }
+.cmp-outline-foot { flex-shrink: 0; padding: 7px 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-3); text-align: center; }
+
+/* ---------- 两条正文流 ---------- */
+.cmp-flow { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 14px 16px 80px; min-height: 0; }
+.cmp-flow::-webkit-scrollbar { width: 9px; }
+.cmp-flow::-webkit-scrollbar-thumb { background: var(--scrollbar, #c9d2e0); border-radius: 999px; }
+.cmp-flow-empty { padding: 40px 18px; text-align: center; font-size: 12.5px; color: var(--text-3); line-height: 2; }
+
+.cmp-block {
+  position: relative; margin-bottom: 5px; padding: 7px 10px 7px 12px;
+  border: 1px solid transparent; border-radius: 7px;
+  transition: background .13s, border-color .13s;
+}
+.cmp-block:hover { background: var(--panel-soft); }
+.cmp-block.active { background: var(--primary-soft); border-color: var(--primary); }
+.cmp-src .cmp-block { cursor: pointer; }
+.cmp-block.flash { animation: cmpFlash .95s ease-out 1; }
+@keyframes cmpFlash {
+  0% { background: var(--primary); }
+  100% { background: transparent; }
+}
+
+/* 块的类型 / 页码 / 操作按钮条：平时淡出，悬停或在选中时出现，
+   标题块例外 —— 它是结构信息，始终显示更利于扫读 */
+.cmp-block-meta { display: flex; align-items: center; gap: 6px; min-height: 17px; margin-bottom: 2px; opacity: 0; transition: opacity .13s; }
+.cmp-block:hover > .cmp-block-meta, .cmp-block.active > .cmp-block-meta { opacity: 1; }
+.cmp-block[data-kind="title"] > .cmp-block-meta, .cmp-block[data-kind="heading"] > .cmp-block-meta { opacity: 1; }
+.cmp-block-tag {
+  font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+  background: var(--panel-2); color: var(--text-3); border: 1px solid var(--border); white-space: nowrap;
+}
+.cmp-block-tag[data-kind="title"], .cmp-block-tag[data-kind="heading"] { background: var(--primary-soft); color: var(--primary); border-color: transparent; }
+.cmp-block-tag[data-kind="figure"], .cmp-block-tag[data-kind="table"], .cmp-block-tag[data-kind="formula"] {
+  background: rgba(232, 145, 42, .15); color: #b8720f; border-color: transparent;
+}
+.cmp-block-tag[data-kind="caption"] { background: var(--panel-2); color: var(--text-2); }
+.cmp-block-page { font-size: 10px; color: var(--text-3); white-space: nowrap; }
+.cmp-block-acts { margin-left: auto; display: flex; gap: 4px; }
+.cmp-act {
+  border: 1px solid var(--btn-border); background: var(--surface); border-radius: 5px;
+  font-family: inherit; font-size: 10.5px; font-weight: 600; color: var(--text-2);
+  padding: 1px 7px; cursor: pointer; white-space: nowrap; transition: all .12s;
+}
+.cmp-act:hover { background: var(--primary); border-color: var(--primary); color: #fff; }
+.cmp-act:disabled { opacity: .5; cursor: not-allowed; }
+
+.cmp-block-text { font-size: 13px; line-height: 1.8; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.cmp-block[data-kind="title"] .cmp-block-text { font-size: 16.5px; font-weight: 800; line-height: 1.5; }
+.cmp-block[data-kind="heading"] .cmp-block-text { font-size: 14.5px; font-weight: 700; line-height: 1.55; }
+.cmp-block[data-kind="caption"] .cmp-block-text { font-size: 12px; font-style: italic; color: var(--text-2); }
+.cmp-block[data-kind="footnote"] .cmp-block-text { font-size: 12px; color: var(--text-3); }
+.cmp-block[data-kind="reference"] .cmp-block-text { font-size: 11.5px; line-height: 1.65; color: var(--text-3); }
+.cmp-block-img { display: block; max-width: 100%; margin: 5px 0 2px; border: 1px solid var(--border-soft); border-radius: 6px; cursor: zoom-in; }
+.cmp-block-img[hidden] { display: none; }
+
+/* 原文栏里的「同栏对照」内联译文：像沉浸式翻译那样下挂在原段之后 */
+.cmp-block-trans {
+  margin-top: 6px; padding: 6px 10px; border-left: 2px solid var(--primary);
+  border-radius: 0 6px 6px 0; background: var(--primary-soft);
+  font-size: 13px; line-height: 1.85; color: var(--text); white-space: pre-wrap; word-break: break-word;
+}
+.cmp-block-trans:empty { display: none; }
+.cmp-block-trans.pending { color: var(--text-3); font-size: 12px; }
+.cmp-block-trans .cmp-trans-error { color: var(--red); font-size: 12px; line-height: 1.7; }
+.cmp-block-missing { color: var(--text-3); font-size: 11.5px; }
+.cmp-pending { color: var(--text-3); font-size: 12px; }
+/* 默认「分栏对照」下，内联译文不显示（右侧已有独立的译文栏） */
+.pr-cmp-mode[data-view="split"] .cmp-src .cmp-block-trans { display: none; }
+
+/* 译文栏里的块：文字弱化一点，避免两条栏互相抢视觉重心 */
+.cmp-trans .cmp-block-text { color: var(--text); }
+.cmp-trans .cmp-block[data-kind="reference"] .cmp-block-text { color: var(--text-3); }
+
+.cmp-hint, .cmp-engine-state {
+  margin-left: auto; font-size: 11px; color: var(--text-3); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 46%;
+}
+.cmp-engine-state.ready { color: var(--green); }
+
+/* ---------- 启动面板 ---------- */
+.cmp-start {
+  position: absolute; inset: 0; z-index: 8; overflow-y: auto;
+  display: flex; align-items: center; justify-content: center;
+  padding: 26px; background: var(--panel-soft);
+}
+.cmp-start.hidden { display: none; }
+.cmp-start-card {
+  position: relative;
+  width: min(600px, 100%); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 14px; padding: 26px 28px 22px; box-shadow: 0 14px 44px rgba(15, 23, 42, .10);
+}
+/* 四区已经就绪时，启动面板退化成可收起的浮层 */
+.cmp-start-close {
+  position: absolute; top: 12px; right: 12px; width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--btn-border); background: var(--surface); border-radius: 8px;
+  font-family: inherit; font-size: 13px; color: var(--text-3); cursor: pointer;
+  transition: all .12s;
+}
+.cmp-start-close:hover { background: var(--panel-2-hover); color: var(--text); }
+.cmp-start-close.hidden { display: none; }
+.cmp-start-emoji { font-size: 30px; line-height: 1; }
+.cmp-start-title { margin: 8px 0 6px; font-size: 18px; font-weight: 800; color: var(--text); }
+.cmp-start-desc { margin: 0 0 12px; font-size: 13px; line-height: 1.85; color: var(--text-2); }
+.cmp-start-desc b { color: var(--primary); }
+.cmp-start-steps { margin: 0 0 16px; padding-left: 22px; font-size: 12.5px; line-height: 2; color: var(--text-2); }
+.cmp-start-steps li.done { color: var(--green); }
+.cmp-start-steps li.now { color: var(--text); font-weight: 700; }
+.cmp-start-steps li.todo { color: var(--text-3); }
+.cmp-start-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px 12px; }
+.cmp-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cmp-field > span { font-size: 11.5px; font-weight: 700; color: var(--text-3); letter-spacing: .3px; }
+.cmp-start-switch { display: inline-flex; margin-top: 12px; font-size: 12.5px; }
+.cmp-start-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
+.cmp-start-progress { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--border); }
+.cmp-start-progress.hidden { display: none; }
+.cmp-start-progress-actions { display: flex; gap: 8px; margin-top: 9px; }
+.cmp-start-progress .ft-logs { max-height: 200px; margin-top: 8px; }
+.cmp-start-progress .ft-logs.hidden { display: none; }
+
+/* 对照模式下的窄屏：大纲先让位，保证原文 / 译文 / 助读三条流还在 */
+@media (max-width: 1240px) {
+  .cmp-outline { display: none !important; }
+  .cmp-outline + .pn-resizer { display: none !important; }
+  .cmp-flow { padding: 12px 12px 70px; }
+  .cmp-bar .cmp-hint { display: none; }
+}
+@media (max-width: 940px) {
+  .cmp-panes { flex-direction: column; overflow-y: auto; }
+  .cmp-pane { flex: 0 0 auto !important; min-height: 280px; }
+  .cmp-panes > .pn-resizer { display: none; }
+  .cmp-trans { border-left: none; border-top: 1px solid var(--border); }
+  .cmp-assist { border-top: 1px solid var(--border); min-height: 420px; }
+  .cmp-bar { flex-wrap: wrap; row-gap: 6px; }
+  .cmp-bar .cmp-engine-state { max-width: 100%; }
 }
 

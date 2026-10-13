@@ -4405,6 +4405,8 @@
   // ---------- 模式开关 ----------
 
   async function openPnNoteMode() {
+    // 与对照精读互斥：两者都靠隐藏 .pr-body 让位，同时开着会互相盖住
+    if (cmp.on) { try { await closeCmpMode(); } catch (_) { /* ignore */ } }
     pn.on = true;
     loadPnPanes();
     applyPnPanes();
@@ -5724,6 +5726,8 @@
     // 上一位读者若还开着「笔记模式」，先按**旧的** recordId 正常退出（内部会把未落盘的
     // 笔记写盘）。必须放在改写 pr.recordId 之前，否则笔记会存到新记录上。
     if (pn.on) { try { await closePnNoteMode(); } catch (_) { /* ignore */ } }
+    // 对照精读同样按「旧的」recordId 退出：它持有这篇的对照数据与助读面板
+    if (cmp.on) { try { await closeCmpMode(); } catch (_) { /* ignore */ } }
     // 上一本若是 EPUB，先释放它的 iframe 与索引（阅读位置会顺带落盘）
     if (ep.on) destroyEpub();
     pr.source = source;
@@ -5834,6 +5838,8 @@
     // EPUB 没有 PDF 版式：全文翻译（按页解析 PDF 再回写）与「笔记模式」（左原文 PDF + 译文）都不适用
     show($('prTabFulltext'), !epub);
     show($('prToggleNote'), lit && !epub);
+    // 对照精读：依赖版面解析结果（只存在于文献中心）与 PDF 版面 → 与「版面」按钮同一组条件
+    show($('prToggleCmp'), lit && !epub);
     show($('prToggleMd'), !epub);
     // 版面解析针对 PDF 版式，而且结果要写进文献记录（成果附件没有记录）→ 两处都要满足
     show($('prLayoutBtn'), lit && !epub);
@@ -5902,7 +5908,7 @@
   //   3) 图表 / 公式的放大预览，以及「AI 解释」「转 LaTeX」。
   // 文本块刻意不做点击交互 —— 正文已经有划词翻译，再叠一层点击只会互相打架。
 
-  const BLOCK_VIEW = { block: null, zoom: 1, busy: false, asset: false };
+  const BLOCK_VIEW = { block: null, zoom: 1, busy: false, asset: false, modelLabel: '', directVision: false };
 
   function layoutAssetUrl(recordId, imagePath) {
     const name = String(imagePath || '').split('/').pop();
@@ -6109,8 +6115,14 @@
 
   /**
    * 让 AI 看这块裁图。explain = 解释内容；latex = 转写成 LaTeX。
-   * 走的是阅读器 AI 对话那条链路（/api/paper-chat）：模型不支持看图时，
-   * 服务端会自动先用视觉模型把图转成文字，所以这里不必关心模型能力。
+   *
+   * 两个刻意的设计：
+   *   1) **直接走视觉模型**（请求带 preferVision）。图表解释要的是模型「真的看见图」，
+   *      而不是先让视觉模型把图转述成一段文字、再交给文本模型答题 —— 转述会丢掉
+   *      坐标轴数值、表格行列、公式上下标这类关键信息。服务端收到 preferVision 后，
+   *      只要当前模型看不了图，就把回答模型直接换成视觉模型，单段直答。
+   *   2) **结合全文**。把这一篇的解析全文作为 system 上下文喂进去，回答才会把这张图
+   *      放回论文语境（支撑了哪个论点、与正文哪一处对应），而不是就图论图。
    */
   async function runBlockAi(mode) {
     const block = BLOCK_VIEW.block;
@@ -6121,8 +6133,9 @@
     BLOCK_VIEW.busy = true;
     const answerBox = $('pbpAnswer');
     const body = $('pbpAnswerBody');
-    $('pbpAnswerTitle').textContent = mode === 'latex' ? '公式转 LaTeX' : 'AI 解释';
-    body.innerHTML = '<span class="pr-vision-stage"><span class="pr-vision-spin"></span>正在识别图片并生成…</span>';
+    const isLatex = mode === 'latex';
+    $('pbpAnswerTitle').textContent = isLatex ? '公式转 LaTeX' : 'AI 解释（视觉模型直答 · 结合全文）';
+    body.innerHTML = '<span class="pr-vision-stage"><span class="pr-vision-spin"></span>正在读取截图…</span>';
     answerBox.classList.remove('hidden');
 
     let dataUrl;
@@ -6134,28 +6147,61 @@
       return;
     }
 
+    // 结合全文：先把这一篇的解析全文取进来（与 AI 对话共用同一份缓存，不会重复下载）
+    if (!pr.fullTextCache || pr.fullTextCache.forId !== pr.recordId) {
+      body.innerHTML = '<span class="pr-vision-stage"><span class="pr-vision-spin"></span>正在准备论文全文上下文…</span>';
+      await ensurePrFullText(pr.recordId).catch(() => {});
+    }
+    const paperCtx = buildPaperContext();
+
     const label = window.PrBlocks?.labels?.[block.label] || block.label || '区域';
-    const prompt = mode === 'latex'
+    // 对照精读那边能顺手拿到这一块的文字（图题 / 相邻正文），一并给上比只有一张图信息更足
+    const selfText = String(block.text || block.caption || '').trim();
+    const sys = '你是一位严谨的科研助理，正在帮用户精读一篇论文。请只围绕这篇论文回答，'
+      + '并把图中信息放回论文语境里解释（它支撑了哪个论点、与正文哪一处对应）。'
+      + '回答要具体、可核查；论文上下文里没有依据时请明确说明，不要编造。'
+      + '用简体中文和规范 Markdown 回答；公式用 $...$ 或 $$...$$。\n\n【当前论文上下文】\n'
+      + (paperCtx || '（这篇文献还没有解析结果）');
+    const prompt = isLatex
       ? `这是论文第 ${block.page} 页的一个「${label}」区域。请把图中的数学公式准确转写成 LaTeX。`
         + '只输出 LaTeX 源码本身，不要任何解释或开场白；多行公式请整体放在一对 $$ 里。'
         + '如果图中不是公式，就输出最接近的 LaTeX 表示；确实无法转写时只回复“无法识别”。'
-      : `这是论文第 ${block.page} 页的一个「${label}」区域。请说明它表达了什么：`
-        + '若是图表，讲清坐标轴、趋势与关键结论；若是表格，还原行列结构与关键数值；'
-        + '若是公式，说明各符号的含义。用简体中文，简明扼要。';
+      : `这是论文第 ${block.page} 页的一个「${label}」区域。请先说明它表达了什么`
+        + '（若为图表：坐标轴含义、趋势与关键结论；若为表格：行列结构与关键数值；'
+        + '若为公式：各符号的含义），再结合这篇论文的全文说明它在论文里起什么作用、'
+        + '支撑了什么结论、与正文哪一部分对应。'
+        + (selfText ? `\n\n该区域识别出的文字是：\n${selfText.slice(0, 1500)}` : '')
+        + '\n\n用简体中文，简明扼要。';
 
     BLOCK_VIEW.abort = new AbortController();
+    BLOCK_VIEW.modelLabel = '';
+    BLOCK_VIEW.directVision = false;
     let acc = '';
     const r = await streamSSE('/api/paper-chat', withProfileId({
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: dataUrl } },
-        ],
-      }],
+      preferVision: true, // ← 让服务端把回答模型换成视觉模型（单段直答）
+      messages: [
+        { role: 'system', content: sys },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: dataUrl } },
+          ],
+        },
+      ],
     }, 'paperchat'), {
       signal: BLOCK_VIEW.abort.signal,
       onEvent: (o) => {
+        if (o.model) {
+          BLOCK_VIEW.modelLabel = `${o.model.providerName} · ${o.model.model}`;
+          BLOCK_VIEW.directVision = !!o.directVision;
+          body.innerHTML = `<span class="pr-vision-stage"><span class="pr-vision-spin"></span>`
+            + (o.directVision
+              ? `正在用视觉模型「${esc(o.model.model)}」直接看图，并结合论文全文…`
+              : '正在识别图片并生成…')
+            + '</span>';
+        }
+        // 只有「当前模型看不了图」时才会有这个两段式的第一段
         if (o.stage === 'vision') {
           body.innerHTML = `<span class="pr-vision-stage"><span class="pr-vision-spin"></span>`
             + `正在用视觉模型识别图片（${o.imageCount || 1} 张）…</span>`;
@@ -6168,6 +6214,9 @@
     BLOCK_VIEW.busy = false;
     if (r.error && !acc) { body.innerHTML = `<div class="pr-msg-error">${esc(r.error)}</div>`; return; }
     const text = acc.trim();
+    const who = BLOCK_VIEW.modelLabel
+      ? `<div class="pr-answer-by">${BLOCK_VIEW.directVision ? '视觉模型直答' : '模型回答'}：${esc(BLOCK_VIEW.modelLabel)}· 已结合论文全文</div>`
+      : '';
     if (mode === 'latex') {
       const latex = extractLatex(text);
       let rendered = '';
@@ -6175,9 +6224,9 @@
         rendered = window.katex ? window.katex.renderToString(latex.replace(/^\$\$?|\$\$?$/g, ''), { displayMode: true, throwOnError: false }) : '';
       } catch (_) { rendered = ''; }
       body.innerHTML = (rendered || `<div class="pr-msg-error">无法渲染为公式</div>`)
-        + `<div class="pr-latex-src">${esc(latex)}</div>`;
+        + `<div class="pr-latex-src">${esc(latex)}</div>` + who;
     } else {
-      body.innerHTML = mdInline(text) + (r.error ? `\n\n> 出错：${r.error}` : '');
+      body.innerHTML = mdInline(text) + (r.error ? `\n\n> 出错：${r.error}` : '') + who;
     }
   }
 
@@ -6201,6 +6250,894 @@
     });
   }
 
+  // ==================== 对照精读（大纲 ｜ 原文 ｜ 译文 ｜ AI 助读） ====================
+  //
+  // 这是与「普通阅读」「笔记模式」并列的第三种阅读形态，三者互斥：
+  //
+  //   普通阅读（.pr-body）    —— 左论文目录 + 中 PDF 页面 + 右功能面板
+  //   笔记模式（#prNoteMode） —— 原文 | 划词翻译 | 笔记（Markdown + 思维导图）
+  //   对照精读（#prCmpMode）  —— 大纲 | 原文流 | 译文流 | AI 助读（常驻）
+  //
+  // 数据源是「全文翻译」以 layoutSource='manifest' 跑出来的「对照数据」产物
+  //（outputs[].kind === 'align'，见 src/layoutTranslate.js 的 buildAlignOutput）：
+  // 每个块带 id / page / kind / text / translation / 归一化坐标 / 裁图。
+  //
+  // 因为两侧的块 id 完全同源，「点原文 → 译文跟着跳」只是查一次 Map，不需要任何
+  // 对齐猜测；同步滚动也只需要按块做位移补偿。这正是不复用文本层启发式切分的原因。
+  //
+  // 最右的 AI 助读不另起一套 UI，而是把右侧面板（.pr-trans-panel）的 DOM 整个搬进来，
+  // 退出时再搬回去 —— 与笔记模式复用 #prPages 是同一个手法。这样划词、引用池、
+  // 模型切换、按文献持久化这些能力天然一致，不存在两套对话实现互相打架。
+
+  const CMP_KIND_LABEL = {
+    title: '大标题', heading: '小节标题', body: '正文', caption: '图题',
+    footnote: '脚注', reference: '参考文献', figure: '图表', table: '表格', formula: '公式',
+  };
+  const CMP_RATIO_KEY = 'sciterminal.cmpRatios';
+
+  const cmp = {
+    on: false,
+    busy: false,
+    data: null,        // 对照数据（buildAlignOutput 的产物）
+    blockById: new Map(),
+    orderIndex: new Map(),  // blockId -> 序号，用于「选中时高亮最近的标题」
+    heads: [],              // 有序的标题块 id（大纲项）
+    job: null,              // 正在跟踪的翻译作业
+    stream: null,           // 作业进度 EventSource
+    view: 'split',          // split(分栏) | inline(同栏) | trans(仅译文)
+    ratios: { outline: 0.15, src: 0.34, trans: 0.32, assist: 0.30 },
+    activeId: null,
+    transCache: new Map(),  // 单段翻译结果：blockId -> 译文
+    syncing: false,         // 同步滚动加锁，避免两侧互相触发形成回环
+    syncTimer: null,
+    meta: null,             // /api/pdf-translate/settings 的结果
+    hiddenTransPanes: false,
+    structureOnly: false,   // true = 只是版面结构（无译文），false = 已翻译版对照数据
+  };
+
+  function cmpEl(id) { return document.getElementById(id); }
+  function cmpPane(name) { return document.querySelector(`.cmp-pane[data-cmp="${name}"]`); }
+
+  // ---------- 四区宽度（比例持久化，拖分隔条调整） ----------
+
+  function loadCmpRatios() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(CMP_RATIO_KEY) || 'null');
+      if (raw && typeof raw === 'object') {
+        for (const k of ['outline', 'src', 'trans', 'assist']) {
+          const v = Number(raw[k]);
+          if (Number.isFinite(v) && v > 0.02) cmp.ratios[k] = v;
+        }
+      }
+    } catch (_) { /* 用默认值 */ }
+  }
+
+  function saveCmpRatios() {
+    try { localStorage.setItem(CMP_RATIO_KEY, JSON.stringify(cmp.ratios)); } catch (_) { /* ignore */ }
+  }
+
+  function applyCmpRatios() {
+    for (const name of ['outline', 'src', 'trans', 'assist']) {
+      const el = cmpPane(name);
+      if (el) el.style.flex = `${cmp.ratios[name]} 1 0`;
+    }
+  }
+
+  function initCmpResizers() {
+    const panes = cmpEl('cmpPanes');
+    if (!panes || panes.dataset.resizersBound === '1') return;
+    panes.dataset.resizersBound = '1';
+    // 每根分隔条调整它左右相邻的两栏：把宽度增量从右边搬到左边（或反之）
+    const PAIRS = { outline: ['outline', 'src'], trans: ['src', 'trans'], assist: ['trans', 'assist'] };
+    panes.querySelectorAll('[data-cmpresize]').forEach((bar) => {
+      bar.addEventListener('pointerdown', (e) => {
+        const pair = PAIRS[bar.dataset.cmpresize];
+        if (!pair) return;
+        const total = panes.clientWidth || 1;
+        const startX = e.clientX;
+        const [a, b] = pair;
+        const r0 = { [a]: cmp.ratios[a], [b]: cmp.ratios[b] };
+        bar.classList.add('dragging');
+        document.body.classList.add('pn-resizing');
+        bar.setPointerCapture?.(e.pointerId);
+        const move = (ev) => {
+          const d = (ev.clientX - startX) / total;
+          const na = Math.max(0.05, r0[a] + d);
+          const nb = Math.max(0.05, r0[b] - d);
+          cmp.ratios[a] = na;
+          cmp.ratios[b] = nb;
+          applyCmpRatios();
+        };
+        const up = () => {
+          bar.classList.remove('dragging');
+          document.body.classList.remove('pn-resizing');
+          bar.removeEventListener('pointermove', move);
+          bar.removeEventListener('pointerup', up);
+          bar.removeEventListener('pointercancel', up);
+          saveCmpRatios();
+        };
+        bar.addEventListener('pointermove', move);
+        bar.addEventListener('pointerup', up);
+        bar.addEventListener('pointercancel', up);
+      });
+    });
+  }
+
+  // ---------- 模式开关 ----------
+
+  async function openCmpMode() {
+    if (pr.fileKind === 'epub' || !isLiteratureSource()) {
+      toast('对照精读目前只支持文献中心里的 PDF', 'error');
+      return;
+    }
+    // 与笔记模式互斥（两者都靠隐藏 .pr-body 让位）
+    if (pn.on) { try { await closePnNoteMode(); } catch (_) { /* ignore */ } }
+    cmp.on = true;
+    loadCmpRatios();
+    applyCmpRatios();
+    adoptCmpAssist();
+    cmpEl('prCmpMode')?.classList.remove('hidden');
+    document.querySelector('.pr-body')?.classList.add('hidden');
+    $('prToggleCmp')?.classList.add('active');
+    $('prToggleMd')?.classList.add('hidden');
+    // 每次进来都刷新一次启动面板的状态（版面是否已解析 / 是否已有对照数据）
+    await refreshCmpStart();
+    // 已经有版面结构（或已翻译的对照数据）就先铺到四区里：启动面板是浮层，
+    // 关掉它（✕ / 工具条）立刻就能读；要不要整篇翻译由用户决定。
+    if (!cmp.data) await loadCmpAlign({ silent: true });
+    if (cmp.data) await refreshCmpStart(); // 数据到位了，三步状态要跟着变
+    setTimeout(() => { applyCmpRatios(); if (cmp.data) renderCmp(); }, 60);
+  }
+
+  async function closeCmpMode() {
+    cmp.on = false;
+    closeCmpStream();
+    restoreCmpAssist();
+    cmpEl('prCmpMode')?.classList.add('hidden');
+    document.querySelector('.pr-body')?.classList.remove('hidden');
+    $('prToggleCmp')?.classList.remove('active');
+    if (pr.md) $('prToggleMd')?.classList.remove('hidden');
+    // 与笔记模式一致：退出时把这套数据也释放掉，下次进来重新按当前文献拉
+    cmp.data = null;
+    cmp.blockById.clear();
+    cmp.orderIndex.clear();
+    cmp.heads = [];
+    cmp.activeId = null;
+    cmp.transCache.clear();
+  }
+
+  async function toggleCmpMode() {
+    if (cmp.on) await closeCmpMode();
+    else await openCmpMode();
+  }
+
+  /** 把右侧功能面板搬进最右栏（同一份 DOM，不做第二套对话 UI） */
+  function adoptCmpAssist() {
+    const panel = document.querySelector('.pr-body > .pr-trans-panel');
+    const host = cmpEl('cmpAssistHost');
+    if (!panel || !host) return;
+    if (panel.parentElement !== host) host.appendChild(panel);
+  }
+
+  function restoreCmpAssist() {
+    const panel = document.querySelector('.cmp-assist-host > .pr-trans-panel');
+    const body = document.querySelector('.pr-body');
+    if (!panel || !body) return;
+    if (panel.parentElement !== body) body.appendChild(panel);
+  }
+
+  // ---------- 启动面板（引擎选择 / 进度 / 步骤） ----------
+
+  function setCmpStartBusy(busy) {
+    cmp.busy = !!busy;
+    const btn = cmpEl('cmpStartBtn');
+    if (btn) { btn.disabled = !!busy; btn.textContent = busy ? '翻译中…' : '开始对照翻译'; }
+    const load = cmpEl('cmpLoadBtn');
+    if (load) load.disabled = !!busy;
+    cmpEl('cmpStartProgress')?.classList.toggle('hidden', !busy && cmp.job?.status !== 'running');
+  }
+
+  async function fillCmpForm() {
+    try {
+      if (!cmp.meta) cmp.meta = await api('/api/pdf-translate/settings');
+      const meta = cmp.meta;
+      // 目标语言
+      const tgt = cmpEl('cmpTarget');
+      if (tgt && !tgt.options.length) {
+        tgt.innerHTML = (meta.targetLangs || []).map((l) => `<option value="${esc(l.id)}">${esc(l.label)}</option>`).join('');
+        tgt.value = meta.options?.targetLang || 'zh';
+      }
+      // 翻译引擎：跟随设置 / 逐条大模型配置 / DeepL
+      const src = cmpEl('cmpEngine');
+      if (src && !src.options.length) {
+        const opts = ['<option value="auto">跟随「划词翻译」设置</option>'];
+        for (const p of meta.engine?.profiles || []) {
+          opts.push(`<option value="llm:${esc(p.id)}">大模型 · ${esc(p.label || p.model)}${p.hasKey ? '' : '（未填 Key）'}</option>`);
+        }
+        opts.push(`<option value="deepl">DeepL${meta.engine?.deeplReady ? '' : '（未配置 Key）'}</option>`);
+        src.innerHTML = opts.join('');
+      }
+    } catch (_) { /* 拉不到就保留「跟随设置」这一项 */ }
+  }
+
+  /** 刷新启动面板：把「版面识别 → 对照结构 → 全文翻译」三步的当前状态画出来 */
+  async function refreshCmpStart() {
+    await fillCmpForm();
+    const hasLayout = (pr.layoutFor === pr.recordId && !!pr.recordId) || !!cmp.data;
+    const q = await findCmpAlignJob();
+    const hasStruct = !!cmp.data;
+    const steps = [];
+    steps.push({
+      cls: hasLayout ? 'done' : 'now',
+      text: hasLayout ? '① 版面识别：已完成（块的切分 / 页码 / 阅读顺序都取自它）'
+        : '① 版面识别：还没有结果（点下面的「先识别版面」）',
+    });
+    steps.push({
+      cls: hasStruct ? 'done' : hasLayout ? 'now' : 'todo',
+      text: hasStruct ? '② 对照结构：已铺开（大纲 + 原文流，译文按需生成）'
+        : '② 对照结构：版面识别完成后自动铺开',
+    });
+    steps.push({
+      cls: q ? 'done' : hasStruct ? 'now' : 'todo',
+      text: q ? '③ 全文翻译：已完成，逐段译文已就位（整篇最省事）'
+        : '③ 全文翻译（可选）：选好引擎整篇翻一遍；不跑也能点任意段落单独翻',
+    });
+    const box = cmpEl('cmpStartSteps');
+    if (box) box.innerHTML = steps.map((s) => `<li class="${s.cls}">${esc(s.text)}</li>`).join('');
+    // 没有版面结果时，把「先识别版面」这个按钮露出来
+    cmpEl('cmpParseBtn')?.classList.toggle('hidden', hasLayout);
+    const desc = cmpEl('cmpStartDesc');
+    if (desc) {
+      desc.innerHTML = hasLayout
+        ? '版面已经识别好了：左侧列出本章大纲，中间左右对照原文与译文，点击任一段落两侧同步定位，'
+          + '选中的段落可一键送入右侧 AI 助读。<b>不整篇翻译也能用</b> —— 点哪一段就翻哪一段。'
+        : '对照精读要以<b>版面识别</b>的结果为基准：块的切分、页码、顺序都来自它，'
+          + '左右两侧才能逐段对齐。这篇还没有解析过版面 —— 点下面的「先识别版面」，等它跑完再回来。';
+    }
+    const load = cmpEl('cmpLoadBtn');
+    if (load) {
+      load.classList.toggle('hidden', !hasLayout);
+      load.textContent = q ? '读取已有结果' : '铺出版面结构';
+      load.title = q ? '不重新翻译，直接读取这篇已经生成过的对照数据' : '不翻译，先把版面结构（大纲 + 原文流）铺出来';
+    }
+    cmpEl('cmpStartClose')?.classList.toggle('hidden', !hasStruct);
+  }
+
+  // ---------- 找到这篇文献已有的「对照数据」 ----------
+
+  async function findCmpAlignJob() {
+    const litId = pr.recordId;
+    if (!litId) return null;
+    try {
+      const list = await api('/api/pdf-translate/jobs');
+      const mine = (Array.isArray(list) ? list : [])
+        .filter((j) => j.literatureId === litId && j.status === 'done')
+        .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      for (const j of mine) {
+        const out = (j.outputs || []).find((o) => o.kind === 'align' && o.url);
+        if (out) return { job: j, output: out };
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * 装载对照数据。两条来源，块 id / 切分 / 顺序完全同源：
+   *   ① 已经跑过「全文翻译」→ 用它产出的对照数据（带译文），优先
+   *   ② 只做过「版面识别」→ 用 /layout/align 拿到结构（大纲 + 原文流，译文留空），
+   *      让用户不必等整篇翻完就能先读结构，点哪段再翻哪段
+   */
+  async function loadCmpAlign({ silent = true } = {}) {
+    const litId = pr.recordId;
+    if (!litId) return false;
+    const found = await findCmpAlignJob();
+    if (pr.recordId !== litId) return false;
+    if (found) {
+      try {
+        const res = await fetch(found.output.url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (pr.recordId !== litId) return false;
+        setCmpData(data, { translated: true });
+        toast(`已载入对照数据：${data.totalBlocks} 个块，其中 ${data.translatedBlocks} 段有译文`, 'success');
+        return true;
+      } catch (e) {
+        if (!silent) toast('读取对照数据失败：' + e.message, 'error');
+        return false;
+      }
+    }
+    // 没有译文版：退到「结构版」。这一步只需要版面识别结果，秒出。
+    try {
+      const data = await api(`/api/literature/${encodeURIComponent(litId)}/layout/align`);
+      if (pr.recordId !== litId) return false;
+      if (data?.align) {
+        setCmpData(data.align, { translated: false });
+        if (!silent) toast('已铺出版面结构，点任意段落即可按需翻译', 'success');
+        return true;
+      }
+    } catch (_) { /* 连版面都没有，下面统一提示 */ }
+    if (!silent) toast('这篇还没有版面识别结果 —— 先点「🌐 全文翻译」里的「先识别版面」', 'error');
+    return false;
+  }
+
+  function setCmpData(data, { translated = true } = {}) {
+    cmp.structureOnly = !translated;
+    cmp.data = data || null;
+    cmp.blockById.clear();
+    cmp.orderIndex.clear();
+    cmp.heads = [];
+    cmp.activeId = null;
+    cmp.transCache.clear();
+    const blocks = Array.isArray(data?.blocks) ? data.blocks : [];
+    blocks.forEach((b, i) => {
+      cmp.blockById.set(b.id, b);
+      cmp.orderIndex.set(b.id, i);
+      if ((b.kind === 'title' || b.kind === 'heading') && String(b.text || '').trim()) cmp.heads.push(b.id);
+    });
+    renderCmp();
+    // 结构版刻意**不**收起启动面板：用户刚进来，正要选翻译引擎整篇翻一遍。
+    // 已翻译版才收起来（框住四区没意义），用户随时能点「✕」或工具条上的「🌐 全文翻译」再叫出来。
+    const hasData = blocks.length > 0;
+    if (translated) cmpEl('cmpStart')?.classList.add('hidden');
+    cmpEl('cmpStartClose')?.classList.toggle('hidden', !hasData);
+  }
+
+  // ---------- 渲染 ----------
+
+  /** 标题级别：与服务端 layoutTranslate.headingDepth 同一套规则（编号层数 + 1） */
+  function cmpHeadingLevel(b) {
+    const s = String(b.text || '').trim();
+    const m = s.match(/^(\d+(?:\.\d+)*)\b/);
+    if (m) return Math.max(2, Math.min(4, m[1].split('.').length + 1));
+    if (String(b.label || '') === 'doc_title') return 1;
+    return 2;
+  }
+
+  function cmpBlockHtml(b, side) {
+    const kind = b.kind || 'body';
+    const label = window.PrBlocks?.labels?.[b.label] || CMP_KIND_LABEL[kind] || '区域';
+    const id = String(b.id || '');
+    const isTrans = side === 'trans';
+    const bodyText = isTrans ? String(b.translation || '') : String(b.text || '');
+    const parts = [];
+
+    const acts = [];
+    if (!isTrans) {
+      acts.push(`<button class="cmp-act" data-cmp-act="ai" data-cmp-id="${esc(id)}" title="把这一段原文放进右侧 AI 助读的引用池">📌 送 AI</button>`);
+      // 只有「可翻译且还没有译文」时才给「译」按钮 —— 已经有译文时点了也无事可做
+      if (b.translatable && !String(b.translation || '').trim()) {
+        acts.push(`<button class="cmp-act" data-cmp-act="tr" data-cmp-id="${esc(id)}" title="只翻译这一段">🌐 译</button>`);
+      }
+    } else if (bodyText) {
+      acts.push(`<button class="cmp-act" data-cmp-act="copy" data-cmp-id="${esc(id)}" title="复制这段译文">⧉ 复制</button>`);
+    }
+
+    parts.push('<div class="cmp-block-meta">'
+      + `<span class="cmp-block-tag" data-kind="${esc(kind)}">${esc(label)}</span>`
+      + (b.page ? `<span class="cmp-block-page">P${esc(String(b.page))}</span>` : '')
+      + `<span class="cmp-block-acts">${acts.join('')}</span></div>`);
+
+    // 裁图只在原文栏出现（图表 / 表格 / 公式），避免译文栏重复一份
+    if (!isTrans && b.image && pr.recordId) {
+      parts.push(`<img class="cmp-block-img" data-cmp-img="${esc(id)}" src="${esc(layoutAssetUrl(pr.recordId, b.image))}" alt="${esc(label)}" loading="lazy" />`);
+    }
+
+    if (bodyText) {
+      parts.push(`<div class="cmp-block-text">${esc(bodyText)}</div>`);
+    } else if (isTrans) {
+      parts.push('<div class="cmp-block-text cmp-block-missing">—（未翻译）</div>');
+    }
+
+    // 原文栏挂内联译文槽（「同栏对照」视图下显示，单段按需翻译也写在这里）
+    if (!isTrans) {
+      const tr = String(b.translation || '').trim();
+      parts.push(`<div class="cmp-block-trans" data-cmp-trans="${esc(id)}">${tr ? esc(tr) : ''}</div>`);
+    }
+
+    return `<div class="cmp-block ${isTrans ? 'trans' : 'src'}" data-block-id="${esc(id)}" data-kind="${esc(kind)}">${parts.join('')}</div>`;
+  }
+
+  function renderCmp() {
+    const d = cmp.data;
+    renderCmpOutline();
+    const srcFlow = cmpEl('cmpSrcFlow');
+    const transFlow = cmpEl('cmpTransFlow');
+    if (!srcFlow || !transFlow) return;
+    const blocks = Array.isArray(d?.blocks) ? d.blocks : [];
+    if (!blocks.length) {
+      srcFlow.innerHTML = '<div class="cmp-flow-empty">还没有对照数据。<br />先点工具条上的「🧩 版面」完成版面识别。</div>';
+      transFlow.innerHTML = '<div class="cmp-flow-empty">译文将显示在这里。</div>';
+      cmpEl('cmpSrcCount').textContent = '0';
+      cmpEl('cmpTransCount').textContent = '0';
+      return;
+    }
+    srcFlow.innerHTML = blocks.map((b) => cmpBlockHtml(b, 'src')).join('');
+    transFlow.innerHTML = blocks.map((b) => cmpBlockHtml(b, 'trans')).join('');
+    refreshCmpCounts();
+    // 分栏视图下把视图属性写上（CSS 靠它切换显隐）
+    const mode = cmpEl('prCmpMode');
+    if (mode) mode.dataset.view = cmp.view;
+  }
+
+  /** 重算两栏的块数与已译段数（整篇翻译、单段按需翻译后都要跟着变） */
+  function refreshCmpCounts() {
+    const blocks = Array.isArray(cmp.data?.blocks) ? cmp.data.blocks : [];
+    let translated = 0;
+    for (const b of blocks) {
+      if (String(b.translation || '').trim() || cmp.transCache.has(b.id)) translated += 1;
+    }
+    cmpEl('cmpSrcCount').textContent = String(blocks.length);
+    cmpEl('cmpTransCount').textContent = String(translated);
+    const state = cmpEl('cmpEngineState');
+    if (!state) return;
+    state.textContent = `共 ${blocks.length} 块 · ${translated} 段已译`;
+    state.classList.toggle('ready', translated > 0);
+    state.title = cmp.structureOnly
+      ? '当前只铺了版面结构。点任意段落即可单独翻译，或用「🌐 全文翻译」整篇翻译。'
+      : '这是「全文翻译」产出的对照数据，与版面块逐段对齐。';
+  }
+
+  function renderCmpOutline() {
+    const box = cmpEl('cmpOutlineList');
+    if (!box) return;
+    const heads = (cmp.heads || []).map((id) => cmp.blockById.get(id)).filter(Boolean);
+    cmpEl('cmpOutlineCount').textContent = String(heads.length);
+    if (!heads.length) {
+      box.innerHTML = '<div class="cmp-outline-empty">这篇没有识别到章节标题。<br />换一篇，或重新解析版面试试。</div>';
+      return;
+    }
+    box.innerHTML = heads.map((b) => {
+      const lv = cmpHeadingLevel(b);
+      return `<button class="cmp-outline-item" data-level="${lv}" data-cmp-out="${esc(String(b.id))}" title="${esc(String(b.text || ''))}">`
+        + `<span class="cmp-outline-text">${esc(String(b.text || '').trim())}</span>`
+        + `<span class="cmp-outline-page">P${esc(String(b.page || ''))}</span></button>`;
+    }).join('');
+    applyCmpOutlineFilter();
+  }
+
+  function applyCmpOutlineFilter() {
+    const q = String(cmpEl('cmpOutlineSearch')?.value || '').trim().toLowerCase();
+    cmpEl('cmpOutlineList')?.querySelectorAll('.cmp-outline-item').forEach((el) => {
+      el.style.display = !q || el.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+  }
+
+  // ---------- 选中 / 定位 / 同步滚动 ----------
+
+  function cmpScrollIntoView(flow, el, center = true) {
+    if (!flow || !el) return;
+    const fr = flow.getBoundingClientRect();
+    const er = el.getBoundingClientRect();
+    const delta = center
+      ? (er.top - fr.top) - Math.max(0, (fr.height - er.height) / 2)
+      : (er.top - fr.top) - 40;
+    flow.scrollTop += delta;
+  }
+
+  /** 高亮某一块（两侧同步），并把大纲高亮到它所属的章节 */
+  function cmpSelectBlock(id, opts = {}) {
+    if (!id) return;
+    const { scrollSrc = false, scrollTrans = true, flash = false } = opts;
+    cmp.activeId = id;
+    const sEl = cmpEl('cmpSrcFlow')?.querySelector(`.cmp-block[data-block-id="${CSS.escape(id)}"]`);
+    const tEl = cmpEl('cmpTransFlow')?.querySelector(`.cmp-block[data-block-id="${CSS.escape(id)}"]`);
+    for (const flow of [cmpEl('cmpSrcFlow'), cmpEl('cmpTransFlow')]) {
+      flow?.querySelectorAll('.cmp-block.active').forEach((el) => el.classList.remove('active'));
+    }
+    sEl?.classList.add('active');
+    tEl?.classList.add('active');
+    if (flash) {
+      for (const el of [sEl, tEl]) {
+        if (!el) continue;
+        el.classList.remove('flash');
+        // 强制重排，保证连点同一个块也能重放动画
+        void el.offsetWidth;
+        el.classList.add('flash');
+        setTimeout(() => el.classList.remove('flash'), 1000);
+      }
+    }
+    if (scrollSrc && sEl) cmpScrollIntoView(cmpEl('cmpSrcFlow'), sEl);
+    if (scrollTrans && tEl && cmp.view === 'split') cmpScrollIntoView(cmpEl('cmpTransFlow'), tEl);
+    markCmpOutline(id);
+  }
+
+  /** 大纲高亮：选中块本身是标题就高亮它，否则高亮它前面最近的一个标题 */
+  function markCmpOutline(id) {
+    const box = cmpEl('cmpOutlineList');
+    if (!box || !cmp.heads.length) return;
+    const idx = cmp.orderIndex.get(id);
+    let hit = null;
+    if (idx !== undefined) {
+      for (const hid of cmp.heads) {
+        const hi = cmp.orderIndex.get(hid);
+        if (hi === undefined) continue;
+        if (hi <= idx) hit = hid; else break;
+      }
+    }
+    if (!hit) hit = cmp.heads[0];
+    box.querySelectorAll('.cmp-outline-item').forEach((el) => {
+      const on = el.dataset.cmpOut === hit;
+      el.classList.toggle('active', on);
+      if (on && cmp.view === 'split') {
+        const fr = box.getBoundingClientRect();
+        const er = el.getBoundingClientRect();
+        if (er.top < fr.top || er.bottom > fr.bottom) box.scrollTop += (er.top - fr.top) - fr.height / 2;
+      }
+    });
+  }
+
+  /** 按「顶部锚点块」对齐两侧滚动位置 —— 比按比例插值准得多，也不怕块高不一致 */
+  function syncCmpScroll(from, to) {
+    const fromBlocks = from.querySelectorAll('.cmp-block');
+    if (!fromBlocks.length) return;
+    const fr = from.getBoundingClientRect();
+    const anchorY = fr.top + Math.min(72, fr.height * 0.18);
+    let anchor = fromBlocks[0];
+    for (const el of fromBlocks) {
+      if (el.getBoundingClientRect().top <= anchorY) anchor = el; else break;
+    }
+    const mate = to.querySelector(`.cmp-block[data-block-id="${CSS.escape(anchor.dataset.blockId || '')}"]`);
+    if (!mate) return;
+    const delta = mate.getBoundingClientRect().top - anchor.getBoundingClientRect().top;
+    if (Math.abs(delta) < 1) return;
+    to.scrollTop += delta;
+  }
+
+  function initCmpSync() {
+    const pairs = [['cmpSrcFlow', 'cmpTransFlow'], ['cmpTransFlow', 'cmpSrcFlow']];
+    for (const [fromId, toId] of pairs) {
+      const from = cmpEl(fromId);
+      if (!from || from.dataset.syncBound === '1') continue;
+      from.dataset.syncBound = '1';
+      from.addEventListener('scroll', () => {
+        // 只在「分栏对照」下同步；另外两种视图里对面那栏是隐藏的，同步没有意义
+        if (!cmp.on || cmp.view !== 'split' || cmp.syncing) return;
+        const to = cmpEl(toId);
+        if (!to || !to.querySelector('.cmp-block')) return;
+        cmp.syncing = true;
+        syncCmpScroll(from, to);
+        clearTimeout(cmp.syncTimer);
+        cmp.syncTimer = setTimeout(() => { cmp.syncing = false; }, 100);
+      }, { passive: true });
+    }
+  }
+
+  // ---------- 单段按需翻译（点段落即译） ----------
+
+  function setCmpBlockTrans(id, html, pending) {
+    const el = cmpEl('cmpSrcFlow')?.querySelector(`[data-cmp-trans="${CSS.escape(id)}"]`);
+    if (!el) return;
+    el.innerHTML = html;
+    el.classList.toggle('pending', !!pending);
+  }
+
+  async function cmpTranslateBlock(id, { auto = false } = {}) {
+    const b = cmp.blockById.get(id);
+    if (!b || !b.translatable) return;
+    if (String(b.translation || '').trim() || cmp.transCache.has(id)) return; // 已经有译文了，不重复翻
+    const text = String(b.text || '').trim();
+    if (!text) { if (!auto) toast('这一段没有可翻译的文字', 'error'); return; }
+    // 翻译源分两层，就近优先：
+    //   1) 「对照精读」启动面板里选的引擎（#cmpEngine）—— 用户在这个界面上做的选择
+    //   2) 划词翻译面板的设置（#prTranslateSource）—— 没选时的兜底
+    // 少了第一层就会出现「刚选了引擎，点段落却报『未配置 AI 模型』」的断裂体验。
+    const own = cmpEl('cmpEngine')?.value || 'auto';
+    const src = own !== 'auto' ? own : ($('prTranslateSource')?.value || 'auto');
+    let provider;
+    let profileId;
+    if (src.startsWith('llm:')) { provider = 'siliconflow'; profileId = src.slice(4); }
+    else if (src !== 'auto') provider = src;
+    const target = cmpEl('cmpTarget')?.value || $('prLangTo')?.value || 'zh';
+    setCmpBlockTrans(id, '<span class="cmp-pending">翻译中…</span>', true);
+    try {
+      const data = await api('/api/translate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, target, provider, profileId }),
+      });
+      const tr = String(data.translation || '').trim();
+      cmp.transCache.set(id, tr);
+      // 写回块对象：切视图 / 重渲染时译文不会丢（也是「已译段数」的计数依据）
+      b.translation = tr;
+      // 原来挂在块上的「译」按钮，译完之后就没有意义了
+      cmpEl('cmpSrcFlow')?.querySelector(`.cmp-block[data-block-id="${CSS.escape(id)}"] .cmp-act[data-cmp-act="tr"]`)?.remove();
+      setCmpBlockTrans(id, esc(tr), false);
+      // 同栏视图下这次翻译才刚可见；分栏视图把译文栏对应块补上
+      const tText = cmpEl('cmpTransFlow')?.querySelector(`.cmp-block[data-block-id="${CSS.escape(id)}"] .cmp-block-text`);
+      if (tText) { tText.textContent = tr; tText.classList.remove('cmp-block-missing'); }
+      refreshCmpCounts();
+      // 分栏视图里把译文栏滚到这一段，用户点了就有反馈
+      if (cmp.view === 'split') {
+        const tEl = cmpEl('cmpTransFlow')?.querySelector(`.cmp-block[data-block-id="${CSS.escape(id)}"]`);
+        if (tEl) cmpScrollIntoView(cmpEl('cmpTransFlow'), tEl);
+      }
+      if (!auto) toast('已翻译这一段', 'success');
+    } catch (e) {
+      setCmpBlockTrans(id, `<span class="cmp-trans-error">⚠ ${esc(e.message)}</span>`, true);
+    }
+  }
+
+  // ---------- 一键送入 AI 助读 ----------
+
+  function cmpSendToAssist(id) {
+    const b = cmp.blockById.get(id);
+    if (!b) return;
+    const kindLabel = window.PrBlocks?.labels?.[b.label] || CMP_KIND_LABEL[b.kind] || '区域';
+    const label = `第 ${b.page} 页 · ${kindLabel}`;
+    const text = String(b.text || '').trim() || String(b.translation || '').trim();
+    if (!text) { toast('这一段没有可引用的文字', 'error'); return; }
+    addCitePoolItem(text, label);
+    // 送进去就切到 AI 助读（面板就在最右栏，无需移动）
+    switchPrTab('chat');
+  }
+
+  // ---------- 打开裁图预览（复用版面块预览弹层） ----------
+
+  function openCmpBlockImage(id) {
+    const b = cmp.blockById.get(id);
+    if (!b?.image) return;
+    const kindLabel = window.PrBlocks?.labels?.[b.label] || CMP_KIND_LABEL[b.kind] || '区域';
+    // 把块自身带上（含识别出的文字），「AI 解释」就能连图带文一起给模型看
+    openBlockView(
+      { id: b.id, page: b.page, label: b.label, image: b.image, text: b.text, caption: b.caption },
+      { asset: true, label: kindLabel },
+    );
+  }
+
+  // ---------- 作业：开始对照翻译 / 跟踪进度 ----------
+
+  async function startCmpTranslate() {
+    if (cmp.busy) return;
+    const src = ftSourceBody();
+    if (!src?.literatureId) { toast('对照精读只支持文献中心里的文献', 'error'); return; }
+    if (pr.layoutFor !== pr.recordId && !cmp.data) {
+      toast('还没有版面识别结果 —— 先点「先识别版面」，等跑完再开始翻译', 'error');
+      refreshCmpStart();
+      return;
+    }
+    const raw = cmpEl('cmpEngine')?.value || 'auto';
+    const options = {
+      engine: 'auto',
+      profileId: '',
+      targetLang: cmpEl('cmpTarget')?.value || 'zh',
+      mode: 'md',
+      vision: false,
+      pageRange: String(cmpEl('cmpPages')?.value || '').trim(),
+      translateReferences: !!cmpEl('cmpRefs')?.checked,
+    };
+    if (raw.startsWith('llm:')) { options.engine = 'llm'; options.profileId = raw.slice(4); }
+    else if (raw === 'deepl') options.engine = 'deepl';
+
+    setCmpStartBusy(true);
+    cmpEl('cmpLogs').textContent = '';
+    cmpEl('cmpLogToggle')?.classList.remove('active');
+    try {
+      const job = await api('/api/pdf-translate/jobs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...src, layoutSource: 'manifest', options }),
+      });
+      cmp.job = job;
+      renderCmpJob(job);
+      subscribeCmpJob(job.id);
+    } catch (e) {
+      setCmpStartBusy(false);
+      toast('启动对照翻译失败：' + e.message, 'error');
+    }
+  }
+
+  function closeCmpStream() {
+    if (cmp.stream) { try { cmp.stream.close(); } catch (_) { /* ignore */ } cmp.stream = null; }
+  }
+
+  function subscribeCmpJob(id) {
+    closeCmpStream();
+    const onDone = async () => {
+      closeCmpStream();
+      setCmpStartBusy(false);
+      cmp.job = null;
+      const ok = await loadCmpAlign({ silent: false });
+      if (ok) {
+        cmpEl('cmpStart')?.classList.add('hidden');
+        renderCmp();
+      }
+      refreshCmpStart();
+    };
+    if (typeof EventSource === 'undefined') {
+      const timer = setInterval(async () => {
+        try {
+          const j = await api('/api/pdf-translate/jobs/' + encodeURIComponent(id));
+          renderCmpJob(j);
+          if (['done', 'failed', 'cancelled'].includes(j.status)) { clearInterval(timer); onDone(); }
+        } catch (_) { clearInterval(timer); setCmpStartBusy(false); }
+      }, 1500);
+      return;
+    }
+    let es;
+    try { es = new EventSource('/api/pdf-translate/jobs/' + encodeURIComponent(id) + '/stream'); }
+    catch (_) { setCmpStartBusy(false); return; }
+    cmp.stream = es;
+    const consume = (ev) => {
+      let job = null;
+      try { job = JSON.parse(ev.data); } catch (_) { return; }
+      renderCmpJob(job);
+      if (['done', 'failed', 'cancelled'].includes(job.status)) onDone();
+    };
+    es.addEventListener('snapshot', consume);
+    es.addEventListener('update', consume);
+  }
+
+  function renderCmpJob(job) {
+    if (!job) return;
+    cmp.job = job;
+    const stageText = {
+      queued: '排队中', font: '准备字体', analyze: '解析版面', vision: '视觉识别中',
+      translate: '翻译中', render: '生成成品', done: '已完成',
+    }[job.stage] || job.stage || '';
+    cmpEl('cmpStage').textContent = job.message || stageText;
+    cmpEl('cmpPercent').textContent = Math.round(job.percent || 0) + '%';
+    const bar = cmpEl('cmpBarInner');
+    if (bar) {
+      bar.style.width = Math.max(2, Math.min(100, job.percent || 0)) + '%';
+      bar.className = 'ft-bar-inner'
+        + (job.status === 'failed' ? ' ft-bar-fail' : '')
+        + (job.status === 'done' ? ' ft-bar-done' : '');
+    }
+    cmpEl('cmpStartProgress')?.classList.remove('hidden');
+    if (Array.isArray(job.logs)) {
+      const box = cmpEl('cmpLogs');
+      if (box) { box.textContent = job.logs.join('\n'); box.scrollTop = box.scrollHeight; }
+    }
+    if (job.status === 'failed' && job.error) toast('对照翻译失败：' + job.error, 'error');
+  }
+
+  // ---------- 事件绑定 ----------
+
+  function bindCmpView(view) {
+    cmp.view = ['split', 'inline', 'trans'].includes(view) ? view : 'split';
+    cmpEl('cmpViewSeg')?.querySelectorAll('[data-cmpview]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.cmpview === cmp.view);
+    });
+    const mode = cmpEl('prCmpMode');
+    if (mode) mode.dataset.view = cmp.view;
+    const hint = cmpEl('cmpSyncHint');
+    if (hint) {
+      hint.textContent = cmp.view === 'split'
+        ? '两侧同步滚动 · 点段落即定位'
+        : cmp.view === 'inline' ? '译文挂在原段下方' : '只看译文 · 点段落可跳回原文';
+    }
+    // 切回分栏时把两栏对到同一个位置
+    if (cmp.view === 'split' && cmp.activeId) {
+      const tEl = cmpEl('cmpTransFlow')?.querySelector(`.cmp-block[data-block-id="${CSS.escape(cmp.activeId)}"]`);
+      if (tEl) cmpScrollIntoView(cmpEl('cmpTransFlow'), tEl);
+    }
+  }
+
+  function bindCmpEvents() {
+    initCmpResizers();
+    initCmpSync();
+    bindCmpView(cmp.view);
+
+    cmpEl('prToggleCmp')?.addEventListener('click', () => { toggleCmpMode().catch(() => {}); });
+
+    // 视图切换
+    cmpEl('cmpViewSeg')?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-cmpview]');
+      if (b) bindCmpView(b.dataset.cmpview);
+    });
+
+    // 大纲：点章节跳到该段
+    cmpEl('cmpOutlineList')?.addEventListener('click', (e) => {
+      const item = e.target.closest('[data-cmp-out]');
+      if (!item) return;
+      cmpSelectBlock(item.dataset.cmpOut, { scrollSrc: true, scrollTrans: true, flash: true });
+    });
+    cmpEl('cmpOutlineSearch')?.addEventListener('input', applyCmpOutlineFilter);
+
+    // 原文栏：点段落 → 两侧高亮定位；没有译文时顺手翻这一段
+    cmpEl('cmpSrcFlow')?.addEventListener('click', (e) => {
+      const act = e.target.closest('[data-cmp-act]');
+      if (act) {
+        e.stopPropagation();
+        const id = act.dataset.cmpId;
+        if (act.dataset.cmpAct === 'ai') cmpSendToAssist(id);
+        else if (act.dataset.cmpAct === 'tr') cmpTranslateBlock(id);
+        return;
+      }
+      const img = e.target.closest('[data-cmp-img]');
+      if (img) { e.stopPropagation(); openCmpBlockImage(img.dataset.cmpImg); return; }
+      // 正在划词就别抢：用户是在选文字，不是点段落
+      if (window.getSelection()?.toString().trim()) return;
+      const blk = e.target.closest('.cmp-block');
+      if (!blk) return;
+      const id = blk.dataset.blockId;
+      cmpSelectBlock(id, { scrollTrans: true });
+      const b = cmp.blockById.get(id);
+      if (b?.translatable && !String(b.translation || '').trim() && !cmp.transCache.has(id)) {
+        cmpTranslateBlock(id, { auto: true });
+      }
+    });
+
+    // 译文栏：点段落 → 回定位到原文
+    cmpEl('cmpTransFlow')?.addEventListener('click', (e) => {
+      const act = e.target.closest('[data-cmp-act]');
+      if (act) {
+        e.stopPropagation();
+        if (act.dataset.cmpAct === 'copy') {
+          const b = cmp.blockById.get(act.dataset.cmpId);
+          const tr = String(b?.translation || cmp.transCache.get(act.dataset.cmpId) || '').trim();
+          if (!tr) { toast('这一段还没有译文', 'error'); return; }
+          navigator.clipboard.writeText(tr).then(() => toast('已复制译文', 'success')).catch(() => toast('复制失败', 'error'));
+        }
+        return;
+      }
+      if (window.getSelection()?.toString().trim()) return;
+      const blk = e.target.closest('.cmp-block');
+      if (!blk) return;
+      cmpSelectBlock(blk.dataset.blockId, { scrollSrc: true, scrollTrans: false });
+    });
+
+    // 启动面板
+    cmpEl('cmpStartBtn')?.addEventListener('click', () => { startCmpTranslate(); });
+    cmpEl('cmpLoadBtn')?.addEventListener('click', () => {
+      loadCmpAlign({ silent: false }).then((ok) => {
+        if (ok) cmpEl('cmpStart')?.classList.add('hidden');
+        refreshCmpStart();
+      });
+    });
+    // 工具条上的「全文翻译」：把启动面板叫出来 / 收起来（四区已就绪时它是一个浮层）
+    cmpEl('cmpStartToggle')?.addEventListener('click', () => {
+      const box = cmpEl('cmpStart');
+      if (!box) return;
+      if (cmp.data) {
+        box.classList.toggle('hidden');
+        if (!box.classList.contains('hidden')) refreshCmpStart();
+      } else {
+        box.classList.remove('hidden');
+        refreshCmpStart();
+      }
+    });
+    cmpEl('cmpStartClose')?.addEventListener('click', () => {
+      cmpEl('cmpStart')?.classList.add('hidden');
+    });
+    cmpEl('cmpParseBtn')?.addEventListener('click', () => {
+      const id = pr.recordId;
+      if (!id) return;
+      startLayoutParse().then(() => {
+        // 解析是异步作业：订阅进度，完成后自动刷新启动面板
+        watchCmpLayoutReady(id);
+      });
+    });
+    cmpEl('cmpCancelBtn')?.addEventListener('click', async () => {
+      if (!cmp.job?.id) return;
+      try { await api('/api/pdf-translate/jobs/' + encodeURIComponent(cmp.job.id) + '/cancel', { method: 'POST' }); toast('已请求取消', 'success'); }
+      catch (e) { toast('取消失败：' + e.message, 'error'); }
+    });
+    cmpEl('cmpLogToggle')?.addEventListener('click', () => {
+      cmpEl('cmpLogs')?.classList.toggle('hidden');
+    });
+  }
+
+  /** 版面解析是后台作业：轮询它的状态，完成后自动铺出对照结构 */
+  function watchCmpLayoutReady(id) {
+    let tries = 0;
+    const timer = setInterval(async () => {
+      tries++;
+      if (pr.recordId !== id || tries > 300) { clearInterval(timer); return; }
+      if (pr.layoutFor === id) {
+        clearInterval(timer);
+        toast('版面识别完成，已铺出对照结构', 'success');
+        await loadCmpAlign({ silent: true });
+        await refreshCmpStart();
+        return;
+      }
+      if (!pr.layoutBusy && pr.layoutFor !== id) {
+        clearInterval(timer);
+        refreshCmpStart();
+      }
+    }, 1000);
+  }
+
   function closePdfReader() {
     pr.open = false;
     pr.doc = null;
@@ -6216,6 +7153,8 @@
     stopPrChat();
     // 全文翻译只是不再跟踪进度；服务端作业会继续跑完，下次打开面板自动接上
     closeFtStream();
+    // 对照精读：把搬进最右栏的助读面板搬回原位，并收掉四区界面
+    if (cmp.on) closeCmpMode().catch(() => {});
     pr.chatBusy = false;
     // EPUB 内核独立于 PDF：不关掉的话 iframe 与全文索引会留在内存里
     if (ep.on) destroyEpub();
@@ -6957,6 +7896,9 @@
 
     // 笔记模式（三栏）：绑定分隔条、页签与导图工具栏
     initPnNoteMode();
+
+    // 对照精读（四区）：分隔条、大纲 / 双流联动、启动面板
+    bindCmpEvents();
 
     // Markdown 译文 / 原文 PDF 双向切换
     $('prToggleMd').addEventListener('click', toggleMdViewer);
