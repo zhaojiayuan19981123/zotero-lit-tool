@@ -5641,21 +5641,28 @@
       return;
     }
 
-    // 结合全文：先把这一篇的解析全文取进来（与 AI 对话共用同一份缓存，不会重复下载）
-    if (!pr.fullTextCache || pr.fullTextCache.forId !== pr.recordId) {
-      body.innerHTML = '<span class="pr-vision-stage"><span class="pr-vision-spin"></span>正在准备论文全文上下文…</span>';
-      await ensurePrFullText(pr.recordId).catch(() => {});
+    // 公式转 LaTeX 只看图本身，不需要全文上下文（省掉一次全文准备，也更快）；
+    // 只有「AI 解释」才把这一篇的解析全文喂进去，把图放回论文语境。
+    if (!isLatex) {
+      if (!pr.fullTextCache || pr.fullTextCache.forId !== pr.recordId) {
+        body.innerHTML = '<span class="pr-vision-stage"><span class="pr-vision-spin"></span>正在准备论文全文上下文…</span>';
+        await ensurePrFullText(pr.recordId).catch(() => {});
+      }
     }
-    const paperCtx = buildPaperContext();
+    const paperCtx = isLatex ? '' : buildPaperContext();
 
     const label = window.PrBlocks?.labels?.[block.label] || block.label || '区域';
     // 对照精读那边能顺手拿到这一块的文字（图题 / 相邻正文），一并给上比只有一张图信息更足
     const selfText = String(block.text || block.caption || '').trim();
-    const sys = '你是一位严谨的科研助理，正在帮用户精读一篇论文。请只围绕这篇论文回答，'
-      + '并把图中信息放回论文语境里解释（它支撑了哪个论点、与正文哪一处对应）。'
-      + '回答要具体、可核查；论文上下文里没有依据时请明确说明，不要编造。'
-      + '用简体中文和规范 Markdown 回答；公式用 $...$ 或 $$...$$。\n\n【当前论文上下文】\n'
-      + (paperCtx || '（这篇文献还没有解析结果）');
+    const sys = isLatex
+      ? '你是一位严谨的科研助理，正在帮用户把论文中的数学公式转写成 LaTeX。'
+        + '请忠实还原公式里的每一个符号、上下标、括号与结构，不要自行简化或「纠正」。'
+        + '只输出 LaTeX 源码本身，不要任何解释或开场白。'
+      : '你是一位严谨的科研助理，正在帮用户精读一篇论文。请只围绕这篇论文回答，'
+        + '并把图中信息放回论文语境里解释（它支撑了哪个论点、与正文哪一处对应）。'
+        + '回答要具体、可核查；论文上下文里没有依据时请明确说明，不要编造。'
+        + '用简体中文和规范 Markdown 回答；公式用 $...$ 或 $$...$$。\n\n【当前论文上下文】\n'
+        + (paperCtx || '（这篇文献还没有解析结果）');
     const prompt = isLatex
       ? `这是论文第 ${block.page} 页的一个「${label}」区域。请把图中的数学公式准确转写成 LaTeX。`
         + '只输出 LaTeX 源码本身，不要任何解释或开场白；多行公式请整体放在一对 $$ 里。'
@@ -5691,7 +5698,7 @@
           BLOCK_VIEW.directVision = !!o.directVision;
           body.innerHTML = `<span class="pr-vision-stage"><span class="pr-vision-spin"></span>`
             + (o.directVision
-              ? `正在用视觉模型「${esc(o.model.model)}」直接看图，并结合论文全文…`
+              ? `正在用视觉模型「${esc(o.model.model)}」直接看图${isLatex ? '转写公式' : '，并结合论文全文'}…`
               : '正在识别图片并生成…')
             + '</span>';
         }
@@ -5709,7 +5716,7 @@
     if (r.error && !acc) { body.innerHTML = `<div class="pr-msg-error">${esc(r.error)}</div>`; return; }
     const text = acc.trim();
     const who = BLOCK_VIEW.modelLabel
-      ? `<div class="pr-answer-by">${BLOCK_VIEW.directVision ? '视觉模型直答' : '模型回答'}：${esc(BLOCK_VIEW.modelLabel)}· 已结合论文全文</div>`
+      ? `<div class="pr-answer-by">${BLOCK_VIEW.directVision ? '视觉模型直答' : '模型回答'}：${esc(BLOCK_VIEW.modelLabel)}${isLatex ? '' : '· 已结合论文全文'}</div>`
       : '';
     if (mode === 'latex') {
       const latex = extractLatex(text);
@@ -6085,15 +6092,15 @@
   function cmpZoomToBlock(id) {
     const b = cmp.blockById.get(id);
     if (!b || !b.page || cmp.view === 'trans') return;
-    const ZOOM_TARGET = 1.9;                 // 点一下放大到的档位
+    const ZOOM_TARGET = 1.5;                 // 点一下放大到的档位（用户要求 150%，再高会横向溢出太狠）
     let zoomed = false;
     if (pr.scale < ZOOM_TARGET - 0.05) {
       pr.scale = ZOOM_TARGET;
       $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%';
-      rebuildAllPages();                     // 重建占位符（尺寸按新 scale），懒渲染会重新触发
+      rescaleAllPages();                     // 只重排尺寸、重画可见页，不整树重建（避免卡顿）
       zoomed = true;
     }
-    // 定位：跳到该块所在页（触发懒渲染），渲染到位后再把块滚到视口居中。
+    // 定位：跳到该块所在页（触发懒渲染），渲染到位后再把块滚到「原文栏」视口居中。
     const scroller = cmpPdfScroller();
     const locate = () => {
       const wrap = document.querySelector(`#prPages .pr-page-wrap[data-page="${b.page}"]`);
@@ -6108,15 +6115,20 @@
       const p = flat ? window.PrBlocks.blockPercent(flat) : null;
       const wr = wrap.getBoundingClientRect();
       const sr = scroller.getBoundingClientRect();
-      if (!sr.height) return;
+      if (!sr.width || !sr.height) return;
+      const x = p ? wr.left + (p.left / 100) * wr.width : wr.left;
+      const w = p ? (p.width / 100) * wr.width : wr.width;
       const y = p ? wr.top + (p.top / 100) * wr.height : wr.top;
       const h = p ? (p.height / 100) * wr.height : wr.height;
-      // 把块的中心对齐到视口中心
+      // 把块的中心对齐到「原文栏」视口的中心：水平 + 垂直都居中。双栏论文点右栏块时，
+      // 放大后页面宽度会超过栏宽，必须同步滚 scrollLeft 才能把文字框带到栏正中央，
+      // 而不是停在页面边缘看不见。
+      scroller.scrollLeft += (x + w / 2) - (sr.left + sr.width / 2);
       scroller.scrollTop += (y + h / 2) - (sr.top + sr.height / 2);
       cmpRepaintPdfPick();
     };
     if (zoomed) {
-      // 放大重建后页面要重新渲染，给一帧让 IntersectionObserver 生效再定位
+      // 放大重排后页面要重新渲染，给一帧让 IntersectionObserver 生效再定位
       requestAnimationFrame(() => setTimeout(locate, 60));
     } else {
       locate();
@@ -7344,6 +7356,51 @@
     }
   }
 
+  /**
+   * 缩放/换档后重排页面尺寸，但不整树重建占位符。
+   * 与 rebuildAllPages 的区别：后者清空 #prPages 重建所有占位符 + 重建 IntersectionObserver，
+   * 会丢掉已渲染的所有 canvas（几十页的 DOM 树一次扔掉再重建，肉眼可见地卡）。
+   * 这里只做两件事：① 按新 scale 更新每个 wrap 的占位尺寸；② 把已渲染的页退回占位符，
+   * 让既有的懒渲染 observer 用新 scale 重画可见页。未渲染页的占位符结构原样保留。
+   */
+  function rescaleAllPages() {
+    if (!pr.doc) return;
+    const container = $('prPages');
+    if (!container) return;
+    const wraps = container.querySelectorAll('.pr-page-wrap');
+    if (!wraps.length) { buildPlaceholders(); return; }
+    wraps.forEach((wrap) => {
+      const pageNum = parseInt(wrap.dataset.page, 10);
+      const size = getPageDisplaySize(pageNum);
+      if (!size?.w) return;
+      wrap.style.width = (size.w * pr.scale) + 'px';
+      wrap.style.height = (size.h * pr.scale) + 'px';
+      if (pr.rendered.has(pageNum)) {
+        pr.rendered.delete(pageNum);
+        wrap.innerHTML = '';
+        const ph = document.createElement('div');
+        ph.className = 'pr-placeholder';
+        ph.textContent = pageNum;
+        wrap.appendChild(ph);
+      }
+    });
+    // 已渲染的页被清空后退回占位符，但 IntersectionObserver 不会对「一直停在视口内」
+    // 的元素重新触发（isIntersecting 没变化），所以主动重渲染当前可见页；
+    // 视口外的页仍靠懒渲染在滚过去时才渲染。
+    requestAnimationFrame(() => {
+      const cr = container.getBoundingClientRect();
+      const margin = 600; // 与 buildPlaceholders 的 rootMargin 对齐
+      wraps.forEach((wrap) => {
+        const pageNum = parseInt(wrap.dataset.page, 10);
+        if (pr.rendered.has(pageNum)) return;
+        const r = wrap.getBoundingClientRect();
+        if (r.bottom >= cr.top - margin && r.top <= cr.bottom + margin) {
+          renderPageInto(wrap, pageNum);
+        }
+      });
+    });
+  }
+
   function rebuildAllPages() {
     if (!pr.doc) return;
     pr.rendered.clear();
@@ -7912,7 +7969,7 @@
     if (!size?.w) return;
     pr.scale = Math.max(0.5, Math.min(4, avail / size.w));
     $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%';
-    rebuildAllPages();
+    rescaleAllPages();
   }
 
   function bindPdfReader() {
@@ -8028,8 +8085,8 @@
         if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     });
-    $('prZoomOut').addEventListener('click', () => { pr.scale = Math.max(0.5, pr.scale - 0.2); $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%'; rebuildAllPages(); });
-    $('prZoomIn').addEventListener('click', () => { pr.scale = Math.min(4, pr.scale + 0.2); $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%'; rebuildAllPages(); });
+    $('prZoomOut').addEventListener('click', () => { pr.scale = Math.max(0.5, pr.scale - 0.2); $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%'; rescaleAllPages(); });
+    $('prZoomIn').addEventListener('click', () => { pr.scale = Math.min(4, pr.scale + 0.2); $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%'; rescaleAllPages(); });
     $('prFitWidth').addEventListener('click', fitWidth);
     $('prRotateLeft').addEventListener('click', () => rotateCurrentPage(-90));
     $('prRotateRight').addEventListener('click', () => rotateCurrentPage(90));
@@ -8083,7 +8140,7 @@
       zoomDebounce = setTimeout(() => {
         const c = $('prPages');
         const ratio = c.scrollTop / Math.max(1, c.scrollHeight); // 缩放后尽量保持阅读位置
-        rebuildAllPages();
+        rescaleAllPages();
         requestAnimationFrame(() => { c.scrollTop = ratio * c.scrollHeight; });
       }, 60);
     }, { passive: false });
