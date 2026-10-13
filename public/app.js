@@ -6627,7 +6627,10 @@
     if (bodyText) {
       parts.push(`<div class="cmp-block-text">${esc(bodyText)}</div>`);
     } else if (isTrans) {
-      parts.push('<div class="cmp-block-text cmp-block-missing">—（未翻译）</div>');
+      // 区分两种「空」：本来就不可翻译（图表 / 公式 / 参考文献）与「还没翻」。
+      // 一律写「未翻译」会让人以为点一下就能出译文，而图表其实是按原样保留的。
+      const note = b.translatable === false ? `—（${label}，保留原样）` : '—（未翻译）';
+      parts.push(`<div class="cmp-block-text cmp-block-missing">${esc(note)}</div>`);
     }
 
     // 原文栏挂内联译文槽（「同栏对照」视图下显示，单段按需翻译也写在这里）
