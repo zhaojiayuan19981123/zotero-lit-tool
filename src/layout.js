@@ -63,6 +63,13 @@ export function availability() {
   if (!model) {
     return { ok: false, reason: '缺少版面模型（processor/dist/models/*.onnx），请重新安装应用' };
   }
+  const missingPkgs = missingRuntimePackages();
+  if (missingPkgs.length) {
+    return {
+      ok: false,
+      reason: `安装包不完整：缺少版面解析运行库（${missingPkgs.join('、')}），请重新下载安装包覆盖安装`,
+    };
+  }
   if (!hasNativeRuntime()) {
     return {
       ok: false,
@@ -71,6 +78,43 @@ export function availability() {
   }
   return { ok: true, model };
 }
+
+/**
+ * 子进程**启动时就会解析**的运行时依赖（静态 import + 顶层 require.resolve）。
+ * 任何一项缺失，子进程都会在解析阶段直接崩掉。
+ *
+ * 为什么不能只查原生二进制：v1.22.0 踩过一次 —— 打包规则 `!node_modules/**\/canvas/**`
+ * 想排掉 node-canvas，却连坐把 `@napi-rs/canvas` 的 package.json 与入口文件一起删了，
+ * 目录还在、内容全空。子进程崩在 `legacyMainResolve`，而 Node 构造
+ * ERR_MODULE_NOT_FOUND 时撞上自己的参数个数校验 bug，最终只吐出一句
+ * `ERR_INTERNAL_ASSERTION: Code: ERR_MODULE_NOT_FOUND; ...`，
+ * 完全看不出真实原因。所以这里照 Node 的解析方式逐个确认入口文件真实存在。
+ */
+const RUNTIME_PACKAGES = [
+  { name: '@napi-rs/canvas', extra: [] },
+  { name: 'onnxruntime-node', extra: [] },
+  // pdfjs-dist 走的是子路径：require.resolve('pdfjs-dist/package.json') + 动态 import legacy 构建
+  { name: 'pdfjs-dist', extra: ['legacy/build/pdf.mjs'] },
+];
+
+function missingRuntimePackages() {
+  const root = path.join(__dirname, '..', 'node_modules');
+  const missing = [];
+  for (const { name, extra } of RUNTIME_PACKAGES) {
+    const dir = path.join(root, name);
+    let entry;
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+      entry = pkg.main || 'index.js';
+    } catch (_) {
+      missing.push(name); // package.json 不在 —— 正是 v1.22.0 那种「空目录」
+      continue;
+    }
+    if ([entry, ...extra].some((rel) => !fs.existsSync(path.join(dir, rel)))) missing.push(name);
+  }
+  return missing;
+}
+
 
 /**
  * onnxruntime 的原生绑定是按平台分发的，先确认本平台那一份在不在。

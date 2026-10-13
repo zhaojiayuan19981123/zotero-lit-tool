@@ -1,6 +1,6 @@
 {
   "name": "zotero-lit-tool",
-  "version": "1.22.0",
+  "version": "1.22.1",
   "description": "一站式科研终端（经管版） —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
   "type": "module",
   "main": "electron/main.cjs",
@@ -77,7 +77,7 @@
       "processor/model-license/**/*",
       "processor/README.md",
       "!node_modules/canvas/**",
-      "!node_modules/**/canvas/**"
+      "!**/node_modules/canvas/**"
     ],
     "mac": {
       "icon": "build/icon.icns",

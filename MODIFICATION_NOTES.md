@@ -1,3 +1,84 @@
+## 修复：打包排除规则误删 `@napi-rs/canvas`，导致 v1.22.0 版面解析全平台不可用（2026-10-13，v1.22.1）
+
+**现象。** 安装 v1.22.0 后点「版面解析」，界面只报一句：
+
+```
+版面解析失败：node:internal/assert:14 throw new ERR_INTERNAL_ASSERTION(message); ^
+Error [ERR_INTERNAL_ASSERTION]: Code: ERR_MODULE_NOT_FOUND;
+The provided arguments length (2) does not match the required ones (3).
+This is caused by either a bug in Node.js or incorrect usage of Node.js internals.
+```
+
+（这 300 字是 `src/layout.js` 捕获的子进程 stderr 尾部，不是真正的错误信息。）
+
+**两层原因，缺一不可解释它。**
+
+第一层是 **Node.js 自身的 bug**。栈里的关键帧是
+`legacyMainResolve (node:internal/modules/esm/resolve)` —— 它只负责「按 `package.json` 的 `main`
+字段找包入口」这一步。该函数抛 `ERR_MODULE_NOT_FOUND` 时**只传了 2 个参数**，而新版的
+`ERR_MODULE_NOT_FOUND` 消息函数需要 3 个，于是 Node 在「构造错误」时先把自己断言死了
+（nodejs/node#52574，已在较新版本修复）。结果是：**真实原因「找不到模块 X」被这句内部断言完全掩盖**。
+
+第二层是**我们自己的打包规则写错了**。`build.files` 里原本有：
+
+```jsonc
+"!node_modules/canvas/**",
+"!node_modules/**/canvas/**"   // ← 想排掉 node-canvas，却连坐了 @napi-rs/canvas
+```
+
+glob `**/canvas/**` 会匹配**任意一层**名为 `canvas` 的目录，于是 `node_modules/@napi-rs/canvas/**`
+被整包剔除 —— **目录还在、`package.json` 与 `index.js` 等入口文件全被删光**（实测目录里只剩一个
+嵌套的 `node_modules/`）。子进程第 2 行就是 `import { createCanvas, DOMMatrix, ... } from "@napi-rs/canvas"`，
+解析失败即崩在启动阶段。三个平台同一条 `files` 规则，所以 Windows / macOS 全都不可用。
+
+**验证方式（没靠猜）。** 直接拿已安装的产物复现，再逐项排除：
+
+```bash
+# 1) 按 src/layout.js 的方式启动子进程 —— 一字不差地复现了该报错
+cd "<安装目录>/resources/app"
+ELECTRON_RUN_AS_NODE=1 "../../<产品名>.exe" processor/dist/main.mjs \
+  --input <某篇.pdf> --output <空目录> --model processor/dist/models/*.onnx
+
+# 2) 体检同类依赖，确认只有 canvas 这一处缺失
+#    onnxruntime 原生二进制 ✓ / pdfjs-dist legacy 构建 ✓ / 67MB 模型 ✓ / processor 成品 ✓
+```
+
+**修复。**
+
+1. `package.json` —— 把过宽的 glob 换成精确形式，既保住「排除 node-canvas」的原意，
+   又不再波及带作用域的 `@napi-rs/canvas`：
+
+   ```jsonc
+   "!node_modules/canvas/**",
+   "!**/node_modules/canvas/**"   // 只匹配「名为 canvas 的那一层」，不匹配 @napi-rs/canvas
+   ```
+
+2. `src/layout.js` —— `availability()` 增加 `missingRuntimePackages()` 前置校验。
+   原先只检查 onnxruntime 的原生二进制，检查不到「包目录在、入口文件没了」这种形态。
+   现在按 Node 的解析方式逐个确认 `@napi-rs/canvas` / `onnxruntime-node` / `pdfjs-dist`
+   的 `package.json` 与入口文件真实存在，缺失时界面直接说
+   **「安装包不完整：缺少版面解析运行库（…），请重新下载安装包覆盖安装」**，
+   而不是抛一堆栈让用户去猜。
+
+3. `test/packaging-files.test.mjs`（新增）—— 把「排除规则不许命中运行时依赖的入口文件」
+   固化成回归测试，同时钉住事故形态（任何命中 `@napi-rs/canvas` 的排除规则都判失败），
+   并确认 node-canvas 与各平台无关的 onnxruntime 二进制仍按原意被排除。
+
+**验证结果。**
+
+- 重新 `electron-builder --win --dir`：`@napi-rs/canvas` 的 7 个文件回来了，
+  `skia.win32-x64-msvc.node` 在位，`node_modules/canvas` 仍被正确排除；
+- 用**新产物**端到端跑整篇 PDF：**13 页 / 17 个裁图 / exit 0 / 29.6s / 峰值 848MB**，
+  与发版前在 Node 22 上的结果一致；
+- 单测 **442/442**（Node 20.10 与 Node 22.22 各一次；新增 5 条）；
+- 反向验证：把规则临时换回旧写法，新增的回归测试立刻 **3 条失败** —— 确认它真能拦住这个坑。
+
+**教训。** 打包类问题**只能在打包产物上验证**：发版前那次「用 Electron 二进制跑 `processor/dist/main.mjs`」
+的验证之所以全绿，是因为它跑的是**仓库里**的 `node_modules`（完整），完全绕过了 `files` 过滤。
+以后改 `build.files` 或新增原生依赖，至少要跑一次 `--dir` 构建并检查产物树。
+
+---
+
 ## 发版前加固：版面解析子进程的 Node 20 兼容层 + 桌面端运行时实测（2026-10-13，v1.22.0）
 
 **背景。** 版面解析子进程此前所有验证都是在项目开发用的 Node 22 上做的，而**桌面端实际跑的是

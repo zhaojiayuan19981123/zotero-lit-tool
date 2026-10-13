@@ -6,7 +6,60 @@
 
 Windows 客户端自动更新还需要本 Release 中的同名 `.blockmap` 和 `latest.yml`，请勿重命名这些文件。
 
-## 本版本主要更新（v1.22.0）
+## 本版本主要更新（v1.22.1）
+
+**这是一个热修复版本：修掉 v1.22.0 里「版面解析」在 Windows / macOS 上全都用不了的问题。**
+其余功能与 v1.22.0 完全一致，没有新增特性。
+
+### 问题是什么
+
+装完 v1.22.0 后点「版面解析」，只会弹出一句：
+
+```
+版面解析失败：node:internal/assert:14 throw new ERR_INTERNAL_ASSERTION(message); ^
+Error [ERR_INTERNAL_ASSERTION]: Code: ERR_MODULE_NOT_FOUND;
+The provided arguments length (2) does not match the required ones (3).
+```
+
+### 原因（两层叠加，缺一不可）
+
+1. **打包排除规则写得太宽。** `package.json` 的 `build.files` 里有一条
+   `!node_modules/**/canvas/**`，本意是排掉重原生的 node-canvas，
+   但 `**/canvas/**` 会匹配**任意一层**名为 `canvas` 的目录，于是把
+   `node_modules/@napi-rs/canvas/**` 也一起删了 —— 目录还在，`package.json` 与 `index.js`
+   等入口文件全空。版面解析子进程第 2 行就是 `import ... from "@napi-rs/canvas"`，启动即崩。
+
+2. **Node.js 自身的 bug 把这个真实原因盖住了。** 它在 `legacyMainResolve` 里抛
+   `ERR_MODULE_NOT_FOUND` 时只传了 2 个参数，而新版的消息函数需要 3 个，
+   于是 Node 在「构造错误」时先把自己断言死了，本该显示的「找不到模块」变成了上面那句
+   内部断言（nodejs/node#52574，已在较新版本修复）。所以这条报错**完全看不出真实原因**。
+
+### 修了什么
+
+- **打包规则改为精确匹配**：`!**/node_modules/canvas/**`，既保住排除 node-canvas 的原意，
+  又不再波及带作用域的 `@napi-rs/canvas`；
+- **加了一道前置校验**：启动版面解析前，会按 Node 的解析方式逐个确认 `@napi-rs/canvas` /
+  `onnxruntime-node` / `pdfjs-dist` 的入口文件真实存在。以后万一再缺，
+  界面会直接说「安装包不完整：缺少版面解析运行库（…），请重新下载安装包覆盖安装」，
+  而不是抛一堆栈让人猜；
+- **补了一条回归测试**：把「打包排除规则不许命中运行时依赖的入口文件」固化下来，
+  并钉住这次的错误形态（任何命中 `@napi-rs/canvas` 的排除规则一律判失败）。
+
+### 怎么验证的（不是靠猜）
+
+- 用**已安装的 v1.22.0 产物**按应用的方式原样启动子进程，一字不差地复现了那句报错；
+- 逐个体检依赖，确认只有 `@napi-rs/canvas` 一处缺失
+  （onnxruntime 原生二进制、pdfjs-dist legacy 构建、67MB 版面模型、processor 成品都完好）；
+- 重新打包后，用**新产物**端到端跑完整篇 PDF：**13 页识别出 17 个图表 / 公式裁图，
+  退出码 0，耗时 29.6 秒**，与开发机上 Node 22 的结果逐页一致；
+- 单测 **442 / 442**（Node 20 与 Node 22 各跑一次）。
+
+> 如果你装的是 v1.22.0，需要**下载本版本的安装包重新安装**才会生效
+> （Windows 客户端的自动更新也会推到 v1.22.1）。
+
+---
+
+## v1.22.0 主要更新（历史）
 
 **阅读器补齐四块能力：能读电子书了、批注能管起来了、图表表格公式能点开问了、读文献能「攒着问」了。**
 
