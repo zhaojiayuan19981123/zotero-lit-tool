@@ -314,7 +314,7 @@ async function viaFree(text, settings, target) {
 export const TRANSLATE_PROVIDERS = [
   { id: 'siliconflow', label: '硅基流动 DeepSeek（用上方 API Key）', needsKey: false },
   { id: 'deepl', label: 'DeepL（需单独 Key）', needsKey: true },
-  { id: 'volcweb', label: '火山翻译 · 网页版（免密钥）', needsKey: false },
+  { id: 'volcweb', label: '火山翻译 · 网页版（免密钥）（推荐）', needsKey: false },
   { id: 'youdaoweb', label: '有道翻译 · 网页版（免密钥）', needsKey: false },
   { id: 'volcapi', label: '火山引擎机器翻译（需 AccessKey）', needsKey: true },
   { id: 'youdaoapi', label: '有道智云翻译（需 应用ID/密钥）', needsKey: true },

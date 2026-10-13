@@ -6072,7 +6072,55 @@
       toast('这一块还没进对照流，稍后再试', 'error');
       return;
     }
+    // 点原文文字框：自动放大并定位到该块，同时右侧译文同步高亮 + 按需翻译
+    cmpZoomToBlock(block.id);
     cmpSelectBlock(block.id, { scrollTrans: true, flash: true, translate: true });
+  }
+
+  /**
+   * 点原文文字框后自动放大并定位到该块：先把缩放提到一个「看得清」的档位，
+   * 再跳到该块所在页，等页面懒渲染到位后把块滚到视口居中。
+   * 已经是放大态（scale 足够）时不再重复放大，只做定位，避免连点把画面越放越大。
+   */
+  function cmpZoomToBlock(id) {
+    const b = cmp.blockById.get(id);
+    if (!b || !b.page || cmp.view === 'trans') return;
+    const ZOOM_TARGET = 1.9;                 // 点一下放大到的档位
+    let zoomed = false;
+    if (pr.scale < ZOOM_TARGET - 0.05) {
+      pr.scale = ZOOM_TARGET;
+      $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%';
+      rebuildAllPages();                     // 重建占位符（尺寸按新 scale），懒渲染会重新触发
+      zoomed = true;
+    }
+    // 定位：跳到该块所在页（触发懒渲染），渲染到位后再把块滚到视口居中。
+    const scroller = cmpPdfScroller();
+    const locate = () => {
+      const wrap = document.querySelector(`#prPages .pr-page-wrap[data-page="${b.page}"]`);
+      if (!wrap) return;
+      // 页面还没渲染出来（还是占位符）就等下一帧；渲染完成后再精确定位
+      if (!pr.rendered.has(b.page)) {
+        wrap.scrollIntoView({ block: 'start' });
+        requestAnimationFrame(() => setTimeout(locate, 40));
+        return;
+      }
+      const flat = window.PrBlocks?.getBlock(id, b.page);
+      const p = flat ? window.PrBlocks.blockPercent(flat) : null;
+      const wr = wrap.getBoundingClientRect();
+      const sr = scroller.getBoundingClientRect();
+      if (!sr.height) return;
+      const y = p ? wr.top + (p.top / 100) * wr.height : wr.top;
+      const h = p ? (p.height / 100) * wr.height : wr.height;
+      // 把块的中心对齐到视口中心
+      scroller.scrollTop += (y + h / 2) - (sr.top + sr.height / 2);
+      cmpRepaintPdfPick();
+    };
+    if (zoomed) {
+      // 放大重建后页面要重新渲染，给一帧让 IntersectionObserver 生效再定位
+      requestAnimationFrame(() => setTimeout(locate, 60));
+    } else {
+      locate();
+    }
   }
 
   // ---------- 启动面板（引擎选择 / 进度 / 步骤） ----------
@@ -6282,7 +6330,7 @@
 
     const acts = [];
     if (tr) {
-      acts.push(`<button class="cmp-act" data-cmp-act="copy" data-cmp-id="${esc(id)}" title="复制这段译文">⧉ 复制</button>`);
+      acts.push(cmpRetransActs(id));
     } else if (b.translatable) {
       acts.push(`<button class="cmp-act" data-cmp-act="tr" data-cmp-id="${esc(id)}" title="只翻译这一段">🌐 译</button>`);
     }
@@ -6613,22 +6661,31 @@
     el.classList.toggle('cmp-block-missing', missing);
   }
 
-  async function cmpTranslateBlock(id, { auto = false } = {}) {
+  /**
+   * 解析「翻译源字符串」为 provider / profileId。
+   * 三种形态：'llm:<id>'（逐条大模型配置）、'auto'（跟随全局设置）、其余（provider id）。
+   */
+  function cmpResolveSource(src) {
+    if (String(src || '').startsWith('llm:')) return { provider: 'siliconflow', profileId: String(src).slice(4) };
+    if (src && src !== 'auto') return { provider: src, profileId: '' };
+    return { provider: undefined, profileId: '' };
+  }
+
+  /**
+   * 单段翻译。默认就近取引擎（对照精读面板选的 → 设置页翻译源）；重译时可用
+   * `source` 显式指定引擎、用 `force` 覆盖已有译文。
+   */
+  async function cmpTranslateBlock(id, { auto = false, force = false, source } = {}) {
     const b = cmp.blockById.get(id);
     if (!b || !b.translatable) return;
-    if (String(b.translation || '').trim() || cmp.transCache.has(id)) return; // 已经有译文了，不重复翻
+    // 已经有译文且不是「重新翻译」时，不重复翻
+    if (!force && (String(b.translation || '').trim() || cmp.transCache.has(id))) return;
     const text = String(b.text || '').trim();
     if (!text) { if (!auto) toast('这一段没有可翻译的文字', 'error'); return; }
-    // 翻译源分两层，就近优先：
-    //   1) 「对照精读」启动面板里选的引擎（#cmpEngine）—— 用户在这个界面上做的选择
-    //   2) 设置页的「翻译源」（#prTranslateSource）—— 没选时的兜底
-    // 少了第一层就会出现「刚选了引擎，点段落却报『未配置 AI 模型』」的断裂体验。
+    // 翻译源优先级：显式传入（重译选引擎）→ 对照精读面板（#cmpEngine）→ 设置页翻译源（#prTranslateSource）
     const own = cmpEl('cmpEngine')?.value || 'auto';
-    const src = own !== 'auto' ? own : ($('prTranslateSource')?.value || 'auto');
-    let provider;
-    let profileId;
-    if (src.startsWith('llm:')) { provider = 'siliconflow'; profileId = src.slice(4); }
-    else if (src !== 'auto') provider = src;
+    const src = source ?? (own !== 'auto' ? own : ($('prTranslateSource')?.value || 'auto'));
+    const { provider, profileId } = cmpResolveSource(src);
     const target = cmpEl('cmpTarget')?.value || $('prLangTo')?.value || 'zh';
     setCmpTransText(id, '<span class="cmp-pending">翻译中…</span>', { pending: true });
     try {
@@ -6640,10 +6697,10 @@
       cmp.transCache.set(id, tr);
       // 写回块对象：切视图 / 重渲染时译文不会丢（也是「已译段数」的计数依据）
       b.translation = tr;
-      // 译完之后「🌐 译」按钮就没有意义了，换掉它
+      // 译完之后「🌐 译」按钮就没有意义了，换成「复制 + 重译」
       const blk = transBlockEl(id);
       const trBtn = blk?.querySelector('.cmp-act[data-cmp-act="tr"]');
-      if (trBtn) trBtn.outerHTML = `<button class="cmp-act" data-cmp-act="copy" data-cmp-id="${esc(id)}" title="复制这段译文">⧉ 复制</button>`;
+      if (trBtn) trBtn.outerHTML = cmpRetransActs(id);
       // 译出来了就不必再占着裁图（图表除外 —— 它们本来就没有译文）
       if (blk?.querySelector('.cmp-block-img')) blk.querySelector('.cmp-block-img').remove();
       setCmpTransText(id, esc(tr) || '—（空译文）');
@@ -6652,6 +6709,54 @@
     } catch (e) {
       setCmpTransText(id, `<span class="cmp-trans-error">⚠ ${esc(e.message)}</span>`, { pending: true });
     }
+  }
+
+  /** 有译文时的动作按钮：复制 + 重新翻译（点重译弹出引擎选择）。 */
+  function cmpRetransActs(id) {
+    return `<button class="cmp-act" data-cmp-act="copy" data-cmp-id="${esc(id)}" title="复制这段译文">⧉ 复制</button>`
+      + `<button class="cmp-act" data-cmp-act="retrans" data-cmp-id="${esc(id)}" title="换一个引擎重新翻译这一段">🔄 重译</button>`;
+  }
+
+  /**
+   * 重新翻译：弹出一个引擎选择浮层（复用 /api/translate/sources 的提供方与模型配置），
+   * 选好后用该引擎强制重译这一段。取消则不动。
+   */
+  function cmpRetranslateBlock(id) {
+    const b = cmp.blockById.get(id);
+    if (!b) return;
+    const blk = transBlockEl(id);
+    if (!blk) return;
+    // 用一个轻量 popover 承载引擎选择，避免另起一套浮层
+    const pop = $('prPopover');
+    if (!pop) return;
+    // 锚定到「重译」按钮附近，浮层不会跑到屏幕左上角
+    const btn = blk.querySelector('.cmp-act[data-cmp-act="retrans"]');
+    const btnRect = btn?.getBoundingClientRect();
+    const pos = btnRect
+      ? { left: Math.max(10, btnRect.left - 180), top: Math.min(window.innerHeight - 220, btnRect.bottom + 8) }
+      : {};
+    showPopover(pop, '换引擎重译这一段', '<div class="cmp-retrans-body"><select id="cmpRetransEngine" class="tb-select w100"></select></div>', [
+      { text: '重译', cls: 'btn-primary', onClick: async () => {
+          const v = $('cmpRetransEngine')?.value || 'auto';
+          await cmpTranslateBlock(id, { force: true, source: v });
+        } },
+      { text: '取消', cls: '', onClick: () => {} },
+    ], pos);
+    // 填充引擎选项：跟随设置 + 逐条大模型配置 + 各翻译服务（与设置页翻译源同一份来源）
+    const sel = $('cmpRetransEngine');
+    if (!sel) return;
+    api('/api/translate/sources').then((d) => {
+      const opts = ['<option value="auto">跟随全局设置</option>'];
+      for (const p of d.profiles || []) {
+        opts.push(`<option value="llm:${esc(p.id)}">大模型 · ${esc(p.label)}${p.hasKey ? '' : '（未填 Key）'}</option>`);
+      }
+      for (const p of d.providers || []) opts.push(`<option value="${esc(p.id)}">${esc(p.label)}</option>`);
+      sel.innerHTML = opts.join('');
+      // 默认选当前这一段实际会用的源（面板 → 设置）
+      const own = cmpEl('cmpEngine')?.value || 'auto';
+      const cur = own !== 'auto' ? own : ($('prTranslateSource')?.value || 'auto');
+      if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+    }).catch(() => { sel.innerHTML = '<option value="auto">跟随全局设置</option>'; });
   }
 
   // ---------- 一键送入 AI 助读 ----------
@@ -6866,6 +6971,7 @@
         const kind = act.dataset.cmpAct;
         if (kind === 'ai') { cmpSendToAssist(id); return; }
         if (kind === 'tr') { cmpTranslateBlock(id); return; }
+        if (kind === 'retrans') { cmpRetranslateBlock(id); return; }
         if (kind === 'img') { openCmpBlockImage(id); return; }
         if (kind === 'copy') {
           const b = cmp.blockById.get(id);

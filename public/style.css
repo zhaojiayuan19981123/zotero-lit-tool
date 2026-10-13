@@ -177,6 +177,8 @@ input, select, textarea { font-family: inherit; }
 .ml-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
 .ml-title { font-size: 13px; font-weight: 600; color: var(--text); }
 .ml-title b { color: var(--primary); }
+.ml-required { font-size: 11px; font-weight: 600; color: #dc2626; background: #fee2e2; border-radius: 4px; padding: 1px 6px; margin-left: 6px; vertical-align: 1px; }
+label.field > span .ml-required, label.field > span b.ml-required { background: none; padding: 0; margin-left: 2px; font-size: 12px; }
 .ml-hint { font-size: 11px; color: var(--text-3); }
 .ml-desc { font-size: 12px; line-height: 1.7; color: var(--text-2); margin: 0 0 10px; }
 .ml-desc b { color: var(--text); }

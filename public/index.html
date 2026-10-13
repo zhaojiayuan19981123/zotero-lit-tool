@@ -945,6 +945,23 @@
           <div id="mlCheckupResult" class="ml-test-result hidden"></div>
         </div>
 
+        <!-- 视觉模型：看图的核心能力，必填。提到最前面，别让用户翻到「高级设置」里才找到 -->
+        <div class="ml-section" id="visionSection">
+          <div class="ml-head">
+            <span class="ml-title">👁 视觉模型 <b class="ml-required">必填</b></span>
+            <span class="ml-hint">当前模型不支持图片时，先用它「看图转文字」再回答</span>
+          </div>
+          <p class="ml-desc">
+            DeepSeek 这类纯文本模型收到图片会直接报错。指定一个<b>视觉模型</b>后，发图提问时会先让它
+            「看图并写成详细文字描述」，再把描述交给当前模型回答；图表 / 公式的「AI 解释」也会直接走视觉模型直答。
+            <b>留空则自动选用你已配置且被判定为支持视觉的模型。</b>
+          </p>
+          <label class="field"><span>视觉模型（看图的那一双眼睛）<b class="ml-required">*</b></span>
+            <select id="setVisionProfile" class="tb-select"></select>
+          </label>
+          <div id="setVisionHint" class="ml-vision-hint"></div>
+        </div>
+
         <!-- 本地 OpenAI 兼容端口：让别的软件也能用上这里的模型路由 -->
         <div class="ml-section" id="gatewaySection">
           <div class="ml-head">
@@ -1007,21 +1024,17 @@
               <small class="ml-field-hint">有些上游直连不通，但本机已经跑着 v2rayN / Clash 这类软件。默认会自动探测常见的本地端口（10809 / 7890 / 10808 …），并且<b>只在直连失败时才走代理</b> —— 国内中转不会被白白绕一圈。</small>
             </div>
 
-            <!-- 两段式看图：给「看不了图的模型」配一双眼睛 -->
+            <!-- 两段式看图：选择器已提前到上方「视觉模型（必填）」区块，这里只留说明 -->
             <div class="ml-sub">
               <div class="ml-sub-head">
                 <span class="ml-sub-title">👁 两段式看图</span>
-                <span class="ml-hint">当前模型不支持图片时，先用它把图转成文字再回答</span>
+                <span class="ml-hint">视觉模型已在上方「视觉模型（必填）」里设置</span>
               </div>
               <p class="ml-desc">
-                DeepSeek 这类纯文本模型收到图片会直接报错。指定一个<b>视觉模型</b>后，发图提问时会先让它
-                「看图并写成详细文字描述」，再把描述交给当前模型回答；每条模型的“图片能力”可在编辑时自行覆盖。
-                <b>留空则自动选用你已配置且被判定为支持视觉的模型。</b>
+                当当前模型不支持图片时，系统会先用上方指定的<b>视觉模型</b>「看图并写成详细文字描述」，
+                再把描述交给当前模型回答；每条模型的“图片能力”可在编辑时自行覆盖。
+                上方未指定时，自动选用你已配置且被判定为支持视觉的模型。
               </p>
-              <label class="field"><span>视觉模型（看图的那一双眼睛）</span>
-                <select id="setVisionProfile" class="tb-select"></select>
-              </label>
-              <div id="setVisionHint" class="ml-vision-hint"></div>
             </div>
 
             <!-- 模型路由：多条配置互为备份，失败自动切换 + 熔断 -->
@@ -1186,7 +1199,7 @@
           <select id="setTranslateProvider" class="tb-select w100">
             <option value="siliconflow">硅基流动 DeepSeek（用上方 API Key）</option>
             <option value="deepl">DeepL（需单独 Key）</option>
-            <option value="volcweb">火山翻译 · 网页版（免密钥）</option>
+            <option value="volcweb">火山翻译 · 网页版（免密钥）（推荐）</option>
             <option value="youdaoweb">有道翻译 · 网页版（免密钥）</option>
             <option value="volcapi">火山引擎机器翻译（需 AccessKey）</option>
             <option value="youdaoapi">有道智云翻译（需 应用ID/密钥）</option>

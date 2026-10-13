@@ -179,7 +179,7 @@ test('密钥缺失时各服务给出格式提示错误', async () => {
 
 test('服务清单元数据：9 项、标签可查、NON_LLM 不含 LLM', () => {
   assert.equal(TRANSLATE_PROVIDERS.length, 9);
-  assert.equal(translateProviderLabel('volcweb'), '火山翻译 · 网页版（免密钥）');
+  assert.equal(translateProviderLabel('volcweb'), '火山翻译 · 网页版（免密钥）（推荐）');
   assert.equal(translateProviderLabel('youdaoweb'), '有道翻译 · 网页版（免密钥）');
   assert.ok(!NON_LLM_PROVIDERS.has('siliconflow'));
   for (const id of ['deepl', 'volcweb', 'youdaoweb', 'volcapi', 'youdaoapi', 'baidu', 'tencent', 'free']) {
