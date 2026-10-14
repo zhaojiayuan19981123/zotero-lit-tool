@@ -18,6 +18,9 @@ import {
 import {
   createEngine, translateSegments, TranslationCache, parseGlossary, TARGET_LANGS, targetLangInfo, runAdaptivePool,
 } from './engines.js';
+// 传统翻译服务（火山网页版 / 有道 / 百度 …）的 id 集合：engine 字段必须放行它们，
+// 否则 normalizeOptions 会把 'volcweb' 这类值当成非法输入重置成 'auto'（见下方白名单）。
+import { NON_LLM_PROVIDERS } from '../translateProviders.js';
 import { resolveCjkFont, downloadCjkFont, describeFont, defaultBundledFontDir, platformFontHint } from './fonts.js';
 import { toUint8Array } from './util.js';
 // 版面解析 → 翻译管线的适配层：把 processor 的 manifest.json 转成 analyzePdf 的结构，
@@ -142,7 +145,12 @@ function normalizeOptions(raw, settings) {
   if (!Array.isArray(merged.glossary)) merged.glossary = parseGlossary(merged.glossary);
   if (!MODES.includes(merged.mode)) merged.mode = 'md';
   merged.vision = merged.vision === true;
-  if (!['auto', 'llm', 'deepl'].includes(merged.engine)) merged.engine = 'auto';
+  // engine 允许四种取值：auto（跟随划词设置）/ llm / deepl / 任一传统翻译服务 id
+  // （volcweb、youdao、baidu…）。第三种尤其重要：自动管线默认走免密钥的火山网页版，
+  // 若这里把它判成非法而重置为 auto，就会悄悄回落成大模型翻译、继续烧 token。
+  if (!['auto', 'llm', 'deepl'].includes(merged.engine) && !NON_LLM_PROVIDERS.has(merged.engine)) {
+    merged.engine = 'auto';
+  }
   if (!['regular', 'medium', 'bold'].includes(merged.fontWeight)) merged.fontWeight = 'medium';
   if (!['auto', 'sans', 'serif'].includes(merged.fontFamily)) merged.fontFamily = 'auto';
   if (!TARGET_LANGS.some((t) => t.id === merged.targetLang)) merged.targetLang = 'zh';

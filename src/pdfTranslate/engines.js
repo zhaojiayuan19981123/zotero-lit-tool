@@ -744,45 +744,54 @@ export async function translateSegments(args) {
   const totalChars = Math.max(1, stats.chars);
   let completedSegments = 0;
 
-  // 4) 自适应并发翻译（批次级重试；批次彻底失败后降级为逐段重试，尽量少丢内容）
+  // 4) 自适应并发翻译（批次级重试；批次失败按「二分拆批」下探，把坏段隔离到最小范围）
   let rampLogs = 0;
   const poolStat = await runAdaptivePool(batches, async (batch) => {
     if (signal?.aborted) throw abortError();
-    const texts = batch.map((it) => it.payload);
     let throttled = 0;
     let batchFailed = 0;
-    try {
-      const out = await withRetry(
-        () => {
-          stats.requests++;
-          return engine.translateBatch(texts, { signal });
-        },
-        {
-          attempts: 3,
-          signal,
-          onRetry: (e, attempt, delay) => {
-            stats.retries++;
-            if (isThrottleError(e)) stats.throttled++;
-            onLog?.(`批次翻译失败（第 ${attempt} 次重试，${Math.round(delay / 100) / 10}s 后）：${errText(e)}`);
+
+    // 拆批重试：整批失败时先对半拆，递归到单段仍失败才判失败。
+    // 为什么不再「整批失败 → 全量逐段重发」：逐段会把一次批量请求放大成 N 次，
+    // 而每次请求都要带上完整的 system prompt（含术语表），失败时 token 消耗成倍上涨。
+    // 二分拆分只需 O(log N) 次就能把问题段隔离出来，绝大多数情况下只额外发 2–4 次请求。
+    const runBatch = async (items, depth) => {
+      const texts = items.map((it) => it.payload);
+      try {
+        const out = await withRetry(
+          () => {
+            stats.requests++;
+            return engine.translateBatch(texts, { signal });
           },
-        },
-      );
-      out.forEach((t, i) => { batch[i].result = t; });
-    } catch (e) {
-      if (e?.name === 'AbortError') throw e;
-      if (isThrottleError(e)) throttled++;
-      onLog?.(`批次失败，降级为逐段翻译：${errText(e)}`);
-      for (const item of batch) {
-        try {
-          const [t] = await engine.translateBatch([item.payload], { signal });
-          item.result = t;
-        } catch (e2) {
-          item.error = errText(e2);
-          stats.failed++;
-          batchFailed++;
+          {
+            // 只在最外层做 3 次退避重试；拆出来的子批本身已是重试策略，不再叠加重试
+            attempts: depth === 0 ? 3 : 1,
+            signal,
+            onRetry: (e, attempt, delay) => {
+              stats.retries++;
+              if (isThrottleError(e)) stats.throttled++;
+              onLog?.(`批次翻译失败（第 ${attempt} 次重试，${Math.round(delay / 100) / 10}s 后）：${errText(e)}`);
+            },
+          },
+        );
+        out.forEach((t, i) => { items[i].result = t; });
+      } catch (e) {
+        if (e?.name === 'AbortError') throw e;
+        if (isThrottleError(e)) throttled++;
+        if (items.length > 1) {
+          const mid = Math.ceil(items.length / 2);
+          onLog?.(`批次（${items.length} 段）失败，拆成 ${mid} + ${items.length - mid} 段重试：${errText(e)}`);
+          await runBatch(items.slice(0, mid), depth + 1);
+          await runBatch(items.slice(mid), depth + 1);
+          return;
         }
+        items[0].error = errText(e);
+        stats.failed++;
+        batchFailed++;
       }
-    }
+    };
+    await runBatch(batch, 0);
+
     for (const it of batch) {
       completedSegments++;
       completedChars += it.payload.length;

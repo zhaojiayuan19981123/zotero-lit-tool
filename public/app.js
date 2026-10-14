@@ -4551,8 +4551,37 @@
     askPrChatWith(prompt);
   }
 
-  // 组装论文上下文：结构化字段 + 解析出的全文正文，让 AI 的回答贴合这篇论文
-  function buildPaperContext() {
+  // ---------- 论文正文的分段检索（把「每轮灌全文」换成「只送相关片段」） ----------
+  //
+  // 无状态对话接口每轮都要重发全部 messages，所以只要 system 里挂着全文，聊 N 轮就等于
+  // 把全文发 N 次，token 随轮次线性放大。这里的做法：
+  //   ① 全文在本地切段缓存；② 每轮按当前提问检索最相关的若干段；
+  //   ③ 只有「总结全文」这类全局性问题（或检索无命中）才退回压缩后的全文节选。
+  // 一篇文章的注入量因此从 ~6 万字符降到 ~1 万字符，回答依旧能引用原文。
+  // 纯算法（切段 / 分词 / 打分 / 压缩）在 pdf-reader-utils.js 里，可单测；这里只做
+  // 「读缓存 + 套注入上限」的壳。
+
+  const PR_CTX_CACHE_LIMIT = 30000;  // 全文缓存上限（字符）
+  const PR_CTX_INJECT_MAX = 16000;   // 单轮注入正文上限（服务端单条消息截断在 20000，留余量）
+  const PR_CTX_SEGMENT_MAX = 9000;   // 检索命中片段合计上限
+
+  const prSplitSegments = (text) => pdfReaderUtils.splitContextSegments(text);
+  const prNeedsWholePaper = (query) => pdfReaderUtils.needsWholePaper(query);
+
+  /** 检索最相关的正文片段（按原文顺序拼回）；命中太少返回空串，交给兜底 */
+  function prPickContextSegments(query) {
+    const segs = pr.fullTextCache?.forId === pr.recordId ? pr.fullTextCache.segments : null;
+    return pdfReaderUtils.pickContextSegments(segs, query, { maxChars: PR_CTX_SEGMENT_MAX }).text;
+  }
+
+  /** 兜底正文：压缩版全文（头 72% + 尾 28%），用于全局性问题或检索无命中 */
+  function prCondensedFullText() {
+    const text = pr.fullTextCache?.forId === pr.recordId ? pr.fullTextCache.text : '';
+    return pdfReaderUtils.condenseContextText(text, PR_CTX_INJECT_MAX);
+  }
+
+  // 组装论文上下文：结构化字段 + （按提问检索到的）正文片段，让 AI 的回答贴合这篇论文
+  function buildPaperContext(query = '') {
     // items 是阅读器打开时列表页的快照；若此刻列表还没加载/已过期，
     // 退回到打开阅读器时缓存下来的记录，避免上下文整段丢失（只剩一句「没有解析结果」）。
     const it = items.find((x) => x.id === pr.recordId) || pr.meta || null;
@@ -4568,11 +4597,14 @@
     }
     if (String(it.thoughts || '').trim()) lines.push(`我的思考：${String(it.thoughts).slice(0, 400)}`);
 
-    // 正文：优先用已加载/已缓存的解析全文（译文 Markdown 里就是带结构的论文正文）。
+    // 正文：优先只送「与本问题相关」的片段（省 token 且够用）；只有全局性问题
+    // 或检索无命中时，才退回压缩后的全文节选（头 72% + 尾 28%）。
     // 只给标题摘要的话，AI 会因为「看不到正文」而答得空泛或说「没提到」。
-    const body = pr.fullTextCache?.forId === pr.recordId ? pr.fullTextCache.text : '';
-    if (body) {
-      lines.push('', '【论文正文（解析全文）】', body);
+    const cached = pr.fullTextCache?.forId === pr.recordId ? pr.fullTextCache : null;
+    if (cached?.text) {
+      const picked = prNeedsWholePaper(query) ? '' : prPickContextSegments(query);
+      const body = picked || prCondensedFullText();
+      if (body) lines.push('', picked ? '【与本问题相关的论文片段】' : '【论文正文（解析全文节选）】', body);
     } else if (pr.fullTextLoading) {
       lines.push('', '（论文正文仍在解析中，本次回答可能不够完整）');
     }
@@ -4616,15 +4648,17 @@
         .replace(/\]\(crop:[^)]*\)/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
-      // 上下文有上限：大概按字符裁到 ~6 万字，超长时保留开头（摘要/引言/方法）与结尾（结论/参考文献）
-      const LIMIT = 60000;
+      // 缓存上限：按字符裁到 ~3 万字，超长时保留开头（摘要/引言/方法）与结尾（结论/参考文献）。
+      // 送进模型的实际用量还要更小 —— 见 prPickContextSegments（按提问检索）与 prCondensedFullText（兜底节选）。
+      const LIMIT = PR_CTX_CACHE_LIMIT;
       const text = raw.length > LIMIT
-        ? raw.slice(0, LIMIT * 0.75) + '\n\n……（中间内容略）……\n\n' + raw.slice(-LIMIT * 0.25)
+        ? raw.slice(0, Math.floor(LIMIT * 0.75)) + '\n\n……（中间内容略）……\n\n' + raw.slice(-Math.floor(LIMIT * 0.25))
         : raw;
-      pr.fullTextCache = { forId: litId, text };
+      // 同时存一份切好的段落，供每轮按提问检索（省掉每次重新切分）
+      pr.fullTextCache = { forId: litId, text, segments: prSplitSegments(text) };
       return text;
     } catch (_) {
-      pr.fullTextCache = { forId: litId, text: '' };
+      pr.fullTextCache = { forId: litId, text: '', segments: [] };
       return '';
     } finally {
       pr.fullTextLoading = false;
@@ -4675,7 +4709,8 @@
     pr.chatBusy = true;
     setPrChatBusyUI(true);
 
-    const ctx = buildPaperContext();
+    // 按本轮提问检索相关正文片段（全局性问题自动退回全文节选），不再每轮重发整篇全文
+    const ctx = buildPaperContext(text);
     const sys = '你是一位严谨的科研助理。用户正在精读一篇文献，请只围绕这篇论文回答，'
       + '回答要具体、可核查，必要时指明依据来自论文的哪一部分。如果论文上下文里没有相关信息，'
       + '请明确说「论文解析结果中没有提到」，不要编造。用简体中文和规范 Markdown 回答；适合比较的信息可用 Markdown 表格，代码使用带语言标识的围栏代码块，公式使用 $...$ 或 $$...$$。\n\n【当前论文解析结果】\n' + (ctx || '（这篇文献还没有解析结果）');    // 组织为多模态 content：文本 + 图片
@@ -6171,6 +6206,8 @@
           opts.push(`<option value="llm:${esc(p.id)}">大模型 · ${esc(p.label || p.model)}${p.hasKey ? '' : '（未填 Key）'}</option>`);
         }
         opts.push(`<option value="deepl">DeepL${meta.engine?.deeplReady ? '' : '（未配置 Key）'}</option>`);
+        // 传统翻译服务（免密钥的火山网页版默认排在最前，它是自动翻译的默认引擎）
+        opts.push('<option value="volcweb">火山翻译 · 网页版（免密钥，不耗 token）</option>');
         src.innerHTML = opts.join('');
       }
       // 工具条引擎选择器（点段落即译 / 重译统一用）：完整提供方（跟随设置 + 各模型 + 各服务）
@@ -6789,7 +6826,11 @@
 
   // ---------- 作业：开始对照翻译 / 跟踪进度 ----------
 
-  async function startCmpTranslate() {
+  // 自动管线（用户零操作）默认使用的翻译源：火山翻译网页版 —— 免密钥、走外部网页接口，
+  // 不消耗任何大模型 token。这是「打开阅读器就自动整篇翻译」不烧钱的前提。
+  const CMP_AUTO_ENGINE = 'volcweb';
+
+  async function startCmpTranslate(opts = {}) {
     if (cmp.busy) return;
     const src = cmpSourceBody();
     if (!src?.literatureId) { toast('对照精读只支持文献中心里的文献', 'error'); return; }
@@ -6798,7 +6839,12 @@
       refreshCmpStart();
       return;
     }
-    const raw = cmpEl('cmpEngine')?.value || 'auto';
+    // 引擎选择：自动管线固定用免密钥的火山网页版（不烧 token）；手动模式以启动面板的选择为准。
+    // window.__cmpAutoEngine 与 __cmpAutoOff 同属调试钩子：E2E 用它把自动翻译指向本机假模型，
+    // 免得测试真的去打外部网页接口（正常用户永远碰不到）。
+    const raw = opts.auto
+      ? (opts.engine || window.__cmpAutoEngine || CMP_AUTO_ENGINE)
+      : (cmpEl('cmpEngine')?.value || 'auto');
     const options = {
       engine: 'auto',
       profileId: '',
@@ -6809,7 +6855,8 @@
       translateReferences: !!cmpEl('cmpRefs')?.checked,
     };
     if (raw.startsWith('llm:')) { options.engine = 'llm'; options.profileId = raw.slice(4); }
-    else if (raw === 'deepl') options.engine = 'deepl';
+    // 'auto' / 'deepl' / 'volcweb' / 其它传统翻译服务 id 一律原样透传（服务端 createEngine 分流）
+    else options.engine = raw;
 
     setCmpStartBusy(true);
     cmpEl('cmpLogs').textContent = '';
@@ -6847,7 +6894,12 @@
       // 自动管线收尾：翻译完成后自动进入对照精读（用户全程没有点过任何按钮）
       if (cmp.autoEnter) {
         cmp.autoEnter = false;
-        if (ok && !cmp.on && pr.recordId && cmp.autoId === pr.recordId) {
+        // 用户在自动管线跑完之前已经自己进了「笔记模式」→ 不抢界面。
+        // 长文档整篇翻译要几分钟，用户早就开始记笔记了，这时被强行切到对照精读很唐突；
+        // 译文已就绪，徽标提示一句，想看时点「📖 对照精读」即可（v1.24.6）。
+        if (pn.on) {
+          if (cmp.autoId === pr.recordId) setCmpAutoChip(ok ? 'done' : null, ok ? '翻译完成，可点「📖 对照精读」进入' : '');
+        } else if (ok && !cmp.on && pr.recordId && cmp.autoId === pr.recordId) {
           setCmpAutoChip('busy', '正在打开对照精读…');
           await openCmpMode();
         } else if (cmp.autoId === pr.recordId) {
@@ -7103,6 +7155,11 @@
     const found = await findCmpAlignJob();
     if (pr.recordId !== recordId) return;
     if (found) {
+      // 用户已经在笔记模式里（或刚切过去）→ 不抢界面，只提示译文已就绪（v1.24.6）
+      if (pn.on) {
+        setCmpAutoChip('done', '翻译已完成，可点「📖 对照精读」进入');
+        return;
+      }
       setCmpAutoChip('busy', '正在打开对照精读…');
       await openCmpMode();
       return;
@@ -7133,10 +7190,11 @@
     const layoutOk = await waitLayoutDone(recordId);
     if (pr.recordId !== recordId) return;
     if (!layoutOk) { setCmpAutoChip('fail', '版面解析未完成，翻译没有开始'); return; }
-    // ④ 自动整篇翻译。引擎 / 目标语言都用默认值（跟随「划词翻译」设置 → 中文）
+    // ④ 自动整篇翻译。引擎固定用免密钥的火山网页版（对齐「打开即用、不烧 token」），
+    //    目标语言跟随设置（默认中文）。
     setCmpAutoChip('busy', '正在整篇翻译…');
     cmp.autoEnter = true;
-    await startCmpTranslate();
+    await startCmpTranslate({ auto: true });
     if (cmp.autoEnter && !cmp.job) {
       // startCmpTranslate 没把作业起起来（内部已 toast 原因）
       cmp.autoEnter = false;

@@ -1,3 +1,65 @@
+## AI 用量优化：对话按需注入、翻译失败二分拆批、自动翻译默认免密钥引擎（2026-10-14，v1.24.6）
+
+> 用户指令：「仔细检查这个项目，为什么 token 消耗得那么快，尤其是解析版面的功能，用的是什么」
+> → 追问后选定：优化 ①②④，且「自动翻译默认使用免费翻译引擎，火山那个」。
+
+- **先定位，别乱改**：版面解析（`processor/dist/main.mjs` + `processor/dist/models/*.onnx`，
+  PP-DocLayoutV3-FP16，67MB，随包分发）由 `src/layout.js` spawn 成独立子进程，纯本地推理。
+  `grep -c "fetch(" processor/dist/main.mjs` = **0**；全仓唯一 `fetch` 在
+  `processor/src/prepare-model.ts`（仅构建期下模型，运行时不执行）→ **零 token**。
+  真正的消耗来自「解析完自动接上的整篇翻译」与「AI 对话每轮重发全文」，账单记错了地方。
+- **① 对话不再每轮灌全文**（`public/app.js` + `public/pdf-reader-utils.js`）：
+  - 旧行为：`buildPaperContext()` 把解析全文直接拼进 system prompt，`LIMIT = 60000`，
+    且 `sendPrChat` **每发一条消息都重发一遍**（还带最近 8 条历史）→ 多轮近似 N²。
+  - 新行为：全文先切段缓存，每轮 `prPickContextSegments(query)` 按提问打分取最相关的 3–12 段
+    （按原文顺序拼回），单轮注入 ≤ `PR_CTX_INJECT_MAX = 16000` 字符；
+    仅 `prNeedsWholePaper(query)`（总结 / 概括 / 全文 / overview / main point…）才退回
+    `prCondensedFullText()`（头 72% + 尾 28%）。
+  - 纯算法抽到 `public/pdf-reader-utils.js`（`splitContextSegments` / `queryTokens` /
+    `pickContextSegments` / `condensedFullText` / `needsWholePaper`），app.js 只留「读缓存 + 套上限」的壳，
+    便于 vm 沙箱单测。
+- **② 全文字符上限 60000 → 30000**（`PR_CTX_CACHE_LIMIT`），单轮注入硬顶 16000（服务端单条消息截断在 20000，留余量）。
+- **③ 翻译批次失败改「二分拆批」**（`src/pdfTranslate/engines.js` 的 `translateSegments`）：
+  旧行为是整批 3 次退避仍失败后 → **逐段各发一次请求**，每次仍带完整 system prompt
+  （12 段的批坏 1 段 = 1 + 12 = 13 次请求）。新行为 `translateBatchRecursive()` 递归对半拆，
+  先探测哪一半坏、只把真正失败的段隔离出来（同例 13 → 9 次）；`withRetry` 只在最外层做退避，
+  子批不叠加重试（`retryAttempts: 1`）。
+- **④ 自动整篇翻译默认走免密钥火山网页版**：`CMP_AUTO_ENGINE = 'volcweb'`，`autoCmpPipeline`
+  ④ 步 `startCmpTranslate({ engine: 'volcweb' })`。顺手修了三处会让这条失效的坑：
+  - 服务端 `normalizeOptions` 白名单只认 `['auto','llm','deepl']` → **`volcweb` 被静默重置成
+    `auto`**（= 回落大模型继续烧 token）→ 改为放行 `volcweb`（`src/pdfTranslate/index.js`）；
+  - 前端 `startCmpTranslate` 只处理 `llm:` / `deepl` 前缀，其余 provider id 被吞成 `auto`
+    → 改为把 `raw` 原样透传（并写回 `cmp.engineSrc`）；
+  - 启动面板 `#cmpEngine` 下拉补上「火山翻译 · 网页版（免密钥）（推荐）」项
+    （手动模式仍以面板选择为准，`opts.engine` 优先）。
+- **⑤ 顺带修掉自动管线「抢界面」的打断问题**（`public/app.js`）：自动管线在译文就绪时会
+  自动 `openCmpMode()`；但长文档整篇翻译要好几分钟，用户往往已经点开「笔记模式」在记笔记了，
+  这时被强行切到对照精读很唐突（且 `openCmpMode` 内部会 `closePnNoteMode()`，正在写的笔记被挤掉）。
+  现在两条自动入口都先看 `pn.on`：
+  - 作业完成回调（`subscribeCmpJob` 的 `onDone`）：用户在笔记模式时只把徽标置为
+    「翻译完成，可点『📖 对照精读』进入」，不再调 `openCmpMode()`；
+  - 打开即有译文的快进分支（`autoCmpPipeline` ①）：同理，只提示不抢。
+  手动入口不受影响（`openCmpMode` 里仍会关掉笔记模式），想看译文随时点工具条按钮。
+  该问题自 v1.24.1 引入自动管线起就存在，本轮跑全量浏览器回归时暴露
+  （老脚本在「进入笔记模式」处被自动切走的对照精读挡住，卡住 30s 超时）。
+- **取舍（已在 UI 说明）**：火山网页版接口 `maxItems: 1` → **逐段请求**，且节流是全局共享的
+  （220ms），一篇 300 段的论文约需 1 分钟以上。零 token，但比大模型批量翻译慢。
+- **调试钩子**：`window.__cmpAutoEngine`（覆盖自动管线的引擎选择）—— 否则 E2E 会打真实外部接口。
+- 测试：新增 `test/ai-token-budget.test.mjs`（拆批的真实行为断言 + 「改回去就红」的接线断言：
+  引擎白名单、注入上限、自动引擎默认值）；`test/pdf-reader-utils.test.mjs` 补检索/切段用例。
+- 验证：单测 Node 22 / Node 20 全量各 **471/471**（两版本都跑了）；
+  浏览器全量功能回归 **75/75**（修复「自动管线抢界面」后，此前被卡住的「笔记模式 / 思维导图」
+  23 项全部恢复）；自动管线 E2E **11/11**（零点击 7.3s 进对照）。
+- 环境备注（供下次发版复用）：`verify-features.mjs` 有两处前置数据要求 ——
+  ① 新数据目录会弹一次性引导层（`#obBackdrop`）拦点击，须先 `POST /api/onboarding/done`；
+  ② 脚本按源码直接调 `store`，默认写仓库 `data/`，须 `store.configure({ dataDir })` 对齐
+  服务实例的数据目录（否则「AI 助手导入笔记」组读不到会话）；顶刊 DOI 组需要
+  数据目录里有 `top-journals.json`。
+- 改动文件：`public/app.js`、`public/pdf-reader-utils.js`、`src/pdfTranslate/engines.js`、
+  `src/pdfTranslate/index.js`、`test/ai-token-budget.test.mjs`(新)、`test/pdf-reader-utils.test.mjs`。
+
+---
+
 ## 划词翻译可选引擎 + 重译统一引擎（2026-10-14，v1.24.5）
 
 > 用户指令：「划词翻译要支持选择翻译引擎，而且原文框重译不要每重译一次都选择一次，可以在顶端统一设置」
