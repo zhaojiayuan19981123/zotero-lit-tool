@@ -1,3 +1,81 @@
+## 界面整体重构：三套主题 + 导航重排 + SVG 图标系统（2026-10-15，v1.25.0）
+
+> 用户指令：「用这个 skill（ui-ux-pro-max）重新设计这个软件的 UI 界面，去除 AI 模板式的图标，
+> 配色自拟，要参考 iOS 系统配色，支持深色、浅色、护眼模式等」
+> → 追问后明确扩大范围：「**我要的是整体界面的重构，就保留功能，具体的排布方式等等都要改变**」。
+> 设计方向取 skill 检索出的 **Minimalism & Swiss Style**（明确支持明暗双模式、适合信息密集型专业工具）。
+
+- **主题系统换核**（`public/style.css` + `public/app.js`）：
+  - 旧方案「单变量色相派生」（`deriveTheme` / `applyTheme` / `renderThemePresets` / `hexToHsl` /
+    `hslToHex` / `THEME_PRESETS` / `DEFAULT_THEME`）**整体删除** —— 它只能从主色算出一套明度反转的
+    深色，**做不出护眼模式**（护眼要换色相，不是调明度）。
+  - 新方案：`<html data-theme="light|dark|sepia">` 驱动 `style.css` 里**三块完整的 CSS 变量集**
+    （`:root,[data-theme="light"]` / `[data-theme="dark"]` / `[data-theme="sepia"]`，各 60+ 变量）。
+    JS 只负责切属性 + `localStorage`(`uiThemeMode` / `uiThemeFollowSystem`) + 监听系统外观。
+  - 配色取 iOS 系统色：主色 System Indigo `#5856D6`、强调 System Blue `#007AFF`；
+    深色按 iOS 层级灰 `#000 / #1C1C1E / #2C2C2E / #3A3A3C` 分层；
+    语义色明暗两套（`#34C759/#FF9F0A/#FF453A` → `#30D158/#FF9F0A/#FF453A`）。
+    护眼模式是暖米底 `#f4ede0` + 暖黑字 `#3a3327` + 暖褐主色 `#8a6b3f`。
+  - ⚠️ **踩坑（最隐蔽的一处）**：从 `index.html` 删掉旧主题选择器（`#themeColorPicker` /
+    `#themeColorInput` / `#btnThemeApply` / `#btnThemeReset`）后，**`bindEvents` 里对应的 6 行
+    事件绑定没删** → 元素为 `null` → `null.addEventListener` 在 `init()` 早期抛
+    `TypeError`，**整个应用初始化中断、15 个导航项全部点了没反应**。
+    表面上页面"长得正常"（CSS 与 HTML 已经渲染），所以只靠肉眼看很难发现，是**截图脚本
+    收集 pageerror 才暴露的**。教训：删 DOM 元素必须同步删事件绑定。
+- **服务端放行 `themeMode`**：`src/store.js` 加默认值 `themeMode:'light'`；
+  `server.js` 的 `POST /api/settings` 加**白名单校验**（只认三个值，非法回落 `light`），
+  防手改 `settings.json` 写入非法主题导致前端一片空白。
+  （注：`saveSettings → migrateSettings(modelCatalog) → syncLegacyFields` 这条链**不会**吃掉
+  未知字段，已读代码确认；白名单是额外的一道防线。）
+- **信息架构重排：15 个模块从 3 组 → 5 组**，按真实科研动线（文献 → 读 → 投稿）排序：
+  | 分组 | 模块 |
+  | --- | --- |
+  | 概览 | `home` |
+  | 文献 | `library` `thesis` `topjournals` **`papers`** |
+  | 研究 | **`projects`** **`tasks`** `mail` |
+  | 写作 | `notes` `markdown` `ideas` `reviewer` **`achievements`** `ai` |
+  | 工具 | `worldlib` |
+  三处关键移动：`papers` 从「研究工作」末尾**提到「文献」组**（投稿与文献本就相连）；
+  `projects`/`tasks` 独立成「研究」组；`achievements` 归入「写作」组。
+- **布局改动**：
+  - **顶栏**：去掉搜索框 → 换 `#topbarPageTitle`（当前页面名 + 一句副标题）。
+    新增 `VIEW_META` 常量（`public/app.js`，15 条 `name`/`sub`），`switchView(v)` 里同步
+    `#topbarPageTitle` 与 `document.title`。
+  - **侧边栏**：搜索框入驻（`.side-search` / `#sideSearchInput`），**只在「文献中心」显示**
+    （搜索本就只作用于文献）。`switchView` 里原 `$('searchInput').classList.toggle(...)`
+    改为切 `.side-search` 的显隐；`#searchInput` 已从 HTML 移除，JS 侧保留 `if` 兜底。
+    底部「设置 / 检查更新」两个按钮改成一排 `.side-icon-btn`；宽度 224 → 232px；
+    `.nav-item.active` 前景色从 `--side-text` 改为 `--side-marker`。
+  - `.profile-avatar` 从固定 emoji `🎓` 改为**姓名首字**（`profile.name.slice(0,1)`，
+    用户自定义 `profile.avatar` 仍优先）。
+- **SVG 图标系统替代 emoji**：
+  - `index.html` 的 `<body>` 起始处新增 `<svg class="icon-sprite">` + **54 个 `<symbol id="i-*">`**，
+    统一 **24 网格 / `stroke-width:1.5` / `stroke:currentColor`** → 图标颜色**永远跟随所在文字**，
+    三套主题零额外适配。用法 `<svg class="ico ico-sm"><use href="#i-xxx"/></svg>`。
+    CSS 侧 `.ico`(17px) / `.ico-sm`(14px) / `.ico-lg`(20px)。
+  - **静态 HTML 里的 emoji：136 行 → 2 行**（剩 1 行是说明注释、1 行是「头像 Emoji」输入框本身）。
+    分 5 轮脚本替换（`D:/work/.wbverify/swap-emoji-html{,2,3,4,5}.mjs`），**全部白名单精确匹配、
+    不做泛化正则**（避免误伤正文里的 emoji）。
+  - 模型健康状态图例 `🟢🟡🔴` 改为 CSS 圆点 `.rt-led.ok/.warn/.bad`（语义色由主题驱动）。
+  - ⚠️ **未完成**：`app.js`（254 行）/ `thesis.js` / `achievements.js` 里以 **JS 字符串动态拼接**的
+    emoji 尚未替换 —— 那些是 `'<div class="side-lib-ico">📁</div>'` 之类的片段，
+    要么改字符串、要么改 CSS `content:`，需成对动 HTML+CSS，风险高于静态替换，留作下一轮。
+- **验证**（脚本在 `D:/work/.wbverify/`，起独立数据目录服务，**不碰项目 `data/`**）：
+  - 单元测试 **Node 20.10.0（贴近 CI 的 20.19.0）与 Node 22.22.2 各跑一次，均 471/471 全绿**。
+  - `public/app.js` 无语法错误；`node -e` 脚本核对 **54 个 symbol 全部有引用、0 处失效引用**。
+  - Playwright 截图 + 断言（`shot-ui.mjs`）：结构 / 三主题实渲色逐字节核对 / 14 视图切换 /
+    主题卡片 / **pageerror 收集（0 条）**。
+  - 浏览器全量回归 `verify-features.mjs`：**63/64**，唯一失败项「打开会话后 AI 气泡带
+    「📥 导入笔记」按钮」经定位与本次改动无关 —— E2E 把会话写入**隔离数据目录**
+    （`tmp/serve-data/data`），需配套跑 `serve-3000.mjs`。
+  - ⚠️ **数据保护教训**：本轮先用 `node server.js` 起了实例（指向**项目真实 `data/`**），
+    导致 E2E 的写操作落在真实数据上（`conversations.json` / `pdf-translate-cache.json` /
+    `translations/` 被改动）。已 `rm -rf data && cp -r <备份> data` **字节级还原**并二次 `diff -rq` 确认。
+    **正确做法：必须跑 `zotero-lit-e2e/serve-3000.mjs`**（它指向隔离目录）。
+    另：隔离目录若被 `rm -rf` 重建，需把 `settings.json` 的 `onboarded` 置 `true`，
+    否则新手引导遮罩 `#onboarding` 会拦截全部点击（`verify-features.mjs` 不处理引导）。
+  - 设计说明页产出在 `docs/ui-redesign-v1.25.0.html`（自带三主题切换的静态报告）。
+
 ## AI 用量优化：对话按需注入、翻译失败二分拆批、自动翻译默认免密钥引擎（2026-10-14，v1.24.6）
 
 > 用户指令：「仔细检查这个项目，为什么 token 消耗得那么快，尤其是解析版面的功能，用的是什么」

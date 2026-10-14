@@ -13,6 +13,70 @@
   <link rel="stylesheet" href="achievements.css" />
 </head>
 <body>
+  <!-- ======================================================================
+       SVG 图标精灵（线性图标，1.5px 描边、24 网格、currentColor）
+       全部图标统一定义在这里，页面其余位置只用 <svg class="ico"><use href="#i-xxx"/></svg> 引用。
+       这样既避免 emoji 的 AI 模板感与跨平台渲染差异，也让图标随主题文字色自动适配。
+       ====================================================================== -->
+  <svg class="icon-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.2 12 3l9 7.2"/><path d="M5.5 9.3V20a1 1 0 0 0 1 1H10v-5.4h4V21h3.5a1 1 0 0 0 1-1V9.3"/></symbol>
+    <symbol id="i-library" viewBox="0 0 24 24"><path d="M4 4.5h5.2a2.6 2.6 0 0 1 2.6 2.6v12.4a2 2 0 0 0-2-2H4z"/><path d="M20 4.5h-5.2a2.6 2.6 0 0 0-2.6 2.6v12.4a2 2 0 0 1 2-2H20z"/></symbol>
+    <symbol id="i-thesis" viewBox="0 0 24 24"><path d="M12 4.5 2.5 9 12 13.5 21.5 9z"/><path d="M5.6 11v4.4c0 1.5 2.9 2.8 6.4 2.8s6.4-1.3 6.4-2.8V11"/><path d="M21.5 9v5"/></symbol>
+    <symbol id="i-journal" viewBox="0 0 24 24"><path d="M12 3.2 14.7 8.7l6 .9-4.35 4.25 1.03 6-5.38-2.83L8.62 19.9l1.03-6L5.3 9.6l6-.9z"/></symbol>
+    <symbol id="i-projects" viewBox="0 0 24 24"><path d="M3 7.2a1.7 1.7 0 0 1 1.7-1.7h4.1l2 2.3h8.5A1.7 1.7 0 0 1 21 9.5v8.8a1.7 1.7 0 0 1-1.7 1.7H4.7A1.7 1.7 0 0 1 3 18.3z"/></symbol>
+    <symbol id="i-tasks" viewBox="0 0 24 24"><rect x="3.4" y="4.4" width="17.2" height="15.2" rx="3"/><path d="m8 12.2 2.6 2.6L16 9.4"/></symbol>
+    <symbol id="i-papers" viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5z"/><path d="m4 14.8 4.2-4.2 3.1 3.1 2.6-2.6L20 17"/><circle cx="9" cy="9" r="1.3"/></symbol>
+    <symbol id="i-trophy" viewBox="0 0 24 24"><path d="M7.5 4h9v4.4a4.5 4.5 0 0 1-9 0z"/><path d="M7.5 5.4H5.2a1.7 1.7 0 0 0 0 3.4h2.3M16.5 5.4h2.3a1.7 1.7 0 0 1 0 3.4h-2.3"/><path d="M12 12.9V16M9 20h6M10 20l.6-4h2.8l.6 4"/></symbol>
+    <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5.2" width="18" height="13.6" rx="2.4"/><path d="m4.2 7.4 7.1 5.2a1.2 1.2 0 0 0 1.4 0l7.1-5.2"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M10 3.5v6.2L4.9 18a2 2 0 0 0 1.7 3h10.8a2 2 0 0 0 1.7-3L14 9.7V3.5"/><path d="M8.6 3.5h6.8M7.2 14.6h9.6"/></symbol>
+    <symbol id="i-note" viewBox="0 0 24 24"><path d="m4 20 .9-4L16.4 4.5a2 2 0 0 1 2.8 0l.3.3a2 2 0 0 1 0 2.8L8 19.1z"/><path d="m14.9 6 3.1 3.1"/></symbol>
+    <symbol id="i-ideas" viewBox="0 0 24 24"><path d="M9.2 17.4a6.4 6.4 0 1 1 5.6 0"/><path d="M9.6 17.4h4.8M10.6 20.4h2.8"/></symbol>
+    <symbol id="i-reviewer" viewBox="0 0 24 24"><path d="M4 11.4a8 8 0 1 1 16 0 8 8 0 0 1-16 0z"/><path d="M4 11.4a8 8 0 0 1 16 0"/><path d="M14 6.6h.01M10 6.6h.01M14 11.9h2M10 16.4h4"/></symbol>
+    <symbol id="i-ai" viewBox="0 0 24 24"><path d="M12 3.6 13.4 8 17.8 9.4 13.4 10.8 12 15.2 10.6 10.8 6.2 9.4 10.6 8z"/><path d="M18.4 14.6l.7 2.1 2.1.7-2.1.7-.7 2.1-.7-2.1-2.1-.7 2.1-.7z"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M3.6 12h16.8"/><path d="M12 3.6c2.1 2.3 3.3 5.2 3.3 8.4S14.1 18.1 12 20.4c-2.1-2.3-3.3-5.2-3.3-8.4S9.9 5.9 12 3.6z"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.1"/><path d="M12 2.8v2.3M12 18.9v2.3M2.8 12h2.3M18.9 12h2.3M5.5 5.5l1.6 1.6M16.9 16.9l1.6 1.6M18.5 5.5l-1.6 1.6M7.1 16.9l-1.6 1.6"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.2A8.4 8.4 0 0 1 9.8 4 8.4 8.4 0 1 0 20 14.2z"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 6.4C10.6 5.2 8.6 4.6 6 4.6a1.6 1.6 0 0 0-1.6 1.6v10.4a1.6 1.6 0 0 0 1.6 1.6c2.6 0 4.6.6 6 1.8 1.4-1.2 3.4-1.8 6-1.8a1.6 1.6 0 0 0 1.6-1.6V6.2A1.6 1.6 0 0 0 18 4.6c-2.6 0-4.6.6-6 1.8z"/><path d="M12 6.4v13.6"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1"/><path d="M19.2 14.6a1.6 1.6 0 0 0 .32 1.77l.06.06a1.94 1.94 0 1 1-2.74 2.74l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-.97 1.47v.17a1.94 1.94 0 1 1-3.88 0v-.09a1.6 1.6 0 0 0-1.05-1.47 1.6 1.6 0 0 0-1.77.32l-.06.06a1.94 1.94 0 1 1-2.74-2.74l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.47-.97h-.17a1.94 1.94 0 1 1 0-3.88h.09a1.6 1.6 0 0 0 1.47-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a1.94 1.94 0 1 1 2.74-2.74l.06.06a1.6 1.6 0 0 0 1.77.32h.08a1.6 1.6 0 0 0 .97-1.47v-.17a1.94 1.94 0 1 1 3.88 0v.09a1.6 1.6 0 0 0 .97 1.47 1.6 1.6 0 0 0 1.77-.32l.06-.06a1.94 1.94 0 1 1 2.74 2.74l-.06.06a1.6 1.6 0 0 0-.32 1.77v.08a1.6 1.6 0 0 0 1.47.97h.17a1.94 1.94 0 1 1 0 3.88h-.09a1.6 1.6 0 0 0-1.47.97z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20.4 12a8.4 8.4 0 1 1-2.46-5.94"/><path d="M20.4 4.6V10h-5.4"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.6"/><path d="m16 16 4.2 4.2"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7.6 4.9 19 12 7.6 19.1z"/></symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9.5 6 6 6-6"/></symbol>
+    <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 15.4V3.6"/><path d="m7.6 8 4.4-4.4L16.4 8"/><path d="M4.4 15.2v3.2a2 2 0 0 0 2 2h11.2a2 2 0 0 0 2-2v-3.2"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3.2 14.7 8.7l6 .9-4.35 4.25 1.03 6-5.38-2.83L8.62 19.9l1.03-6L5.3 9.6l6-.9z"/></symbol>
+
+    <!-- 序号 / 状态 / 文件类型 -->
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.6 4.6 4.6L19 7.6"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6 18 18M18 6 6 18"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 6.6h15"/><path d="M9.2 6.6V4.9a1.3 1.3 0 0 1 1.3-1.3h3a1.3 1.3 0 0 1 1.3 1.3v1.7"/><path d="M6.6 6.6 7.5 19a1.4 1.4 0 0 0 1.4 1.3h6.2A1.4 1.4 0 0 0 16.5 19l.9-12.4"/><path d="M10.4 10.4v6M13.6 10.4v6"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M13.4 3.4H7a2 2 0 0 0-2 2v13.2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M13.4 3.4V9H19"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3.5" y="5.4" width="17" height="15" rx="2.4"/><path d="M3.5 10h17M8 3.6v3.6M16 3.6v3.6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.2V12l3.2 2"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8.4a6 6 0 1 0-12 0c0 6-2.4 7.6-2.4 7.6h16.8S18 14.4 18 8.4z"/><path d="M13.7 19.6a2 2 0 0 1-3.4 0"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3.2 2.8 8 12 12.8 21.2 8z"/><path d="m2.8 12.6 9.2 4.8 9.2-4.8M2.8 16.8 12 21.6l9.2-4.8"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.2a1.7 1.7 0 0 1 1.7-1.7h4.1l2 2.3h8.5A1.7 1.7 0 0 1 21 9.5v8.8a1.7 1.7 0 0 1-1.7 1.7H4.7A1.7 1.7 0 0 1 3 18.3z"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15.6V3.6"/><path d="m7.6 8 4.4-4.4L16.4 8"/><path d="M4.4 15.4v3.2a2 2 0 0 0 2 2h11.2a2 2 0 0 0 2-2v-3.2"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3.6v12"/><path d="m7.6 11.2 4.4 4.4 4.4-4.4"/><path d="M4.4 15.4v3.2a2 2 0 0 0 2 2h11.2a2 2 0 0 0 2-2v-3.2"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.2 12S5.8 5.6 12 5.6 21.8 12 21.8 12 18.2 18.4 12 18.4 2.2 12 2.2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m4 20 .9-4L16.4 4.5a2 2 0 0 1 2.8 0l.3.3a2 2 0 0 1 0 2.8L8 19.1z"/><path d="m14.9 6 3.1 3.1"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10.4 13.6a3.6 3.6 0 0 0 5.1 0l2.8-2.8a3.6 3.6 0 0 0-5.1-5.1L11.7 7"/><path d="M13.6 10.4a3.6 3.6 0 0 0-5.1 0l-2.8 2.8a3.6 3.6 0 0 0 5.1 5.1L12.3 17"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.4" y="4.6" width="17.2" height="14.8" rx="2.4"/><circle cx="8.6" cy="9.6" r="1.5"/><path d="m4.4 17.4 4.6-4.6 3.1 3.1 2.9-2.9 4.6 4.6"/></symbol>
+    <symbol id="i-pen" viewBox="0 0 24 24"><path d="m4 20 .9-4L16.4 4.5a2 2 0 0 1 2.8 0l.3.3a2 2 0 0 1 0 2.8L8 19.1z"/><path d="M4.9 16 8 19.1"/></symbol>
+    <symbol id="i-feather" viewBox="0 0 24 24"><path d="M20.2 3.8a5.4 5.4 0 0 0-7.6 0L5 11.4V19h7.6l7.6-7.6a5.4 5.4 0 0 0 0-7.6z"/><path d="M16 8 4.6 19.4"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13.2 2.8 4.6 13.4h6.2l-1.2 7.8 8.6-10.6h-6.2z"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9.2 3.4v5.2M14.8 3.4v5.2"/><path d="M6.4 8.6h11.2v3.2a5.6 5.6 0 0 1-11.2 0z"/><path d="M12 17.4v3.2"/></symbol>
+    <symbol id="i-puzzle" viewBox="0 0 24 24"><path d="M9.6 4.2a2 2 0 0 1 4 0V6h3.2a1 1 0 0 1 1 1v3.2h1.8a2 2 0 0 1 0 4h-1.8V18a1 1 0 0 1-1 1h-3.4v-1.8a2 2 0 0 0-4 0V19H6.2a1 1 0 0 1-1-1v-3.4H7a2 2 0 0 0 0-4H5.2V7a1 1 0 0 1 1-1h3.4z"/></symbol>
+    <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.2" ry="2.8"/><path d="M4.8 6v12c0 1.55 3.22 2.8 7.2 2.8s7.2-1.25 7.2-2.8V6"/><path d="M4.8 12c0 1.55 3.22 2.8 7.2 2.8s7.2-1.25 7.2-2.8"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.6" y="3.6" width="7" height="7" rx="1.6"/><rect x="13.4" y="3.6" width="7" height="7" rx="1.6"/><rect x="3.6" y="13.4" width="7" height="7" rx="1.6"/><rect x="13.4" y="13.4" width="7" height="7" rx="1.6"/></symbol>
+    <symbol id="i-brain" viewBox="0 0 24 24"><path d="M9.4 4.2a2.6 2.6 0 0 0-2.6 2.6 2.4 2.4 0 0 0-1.4 4.3A2.6 2.6 0 0 0 6.6 15a2.6 2.6 0 0 0 2.8 3.9V4.2z"/><path d="M14.6 4.2a2.6 2.6 0 0 1 2.6 2.6 2.4 2.4 0 0 1 1.4 4.3A2.6 2.6 0 0 1 17.4 15a2.6 2.6 0 0 1-2.8 3.9V4.2z"/><path d="M12 3.8v16.4"/></symbol>
+    <symbol id="i-fire" viewBox="0 0 24 24"><path d="M12 2.8s5.4 4 5.4 9.6a5.4 5.4 0 0 1-10.8 0c0-1.6.6-2.8 1.4-3.8.4 1.2 1.2 2 2.2 2.2-.6-2.6.4-5.6 1.8-8z"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><circle cx="12" cy="12" r="4.4"/><circle cx="12" cy="12" r="1"/></symbol>
+    <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5.6 21V3.6"/><path d="M5.6 4.4h11.2l-1.8 3.8 1.8 3.8H5.6"/></symbol>
+    <symbol id="i-package" viewBox="0 0 24 24"><path d="M20.4 8.4v7.2a1.6 1.6 0 0 1-.84 1.4l-6.4 3.5a1.6 1.6 0 0 1-1.52 0l-6.4-3.5a1.6 1.6 0 0 1-.84-1.4V8.4a1.6 1.6 0 0 1 .84-1.4l6.4-3.5a1.6 1.6 0 0 1 1.52 0l6.4 3.5a1.6 1.6 0 0 1 .84 1.4z"/><path d="m3.9 7.6 8.1 4.4 8.1-4.4M12 12v9.2"/></symbol>
+    <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M3.6 6.6h3.6c1.2 0 2 .5 2.8 1.4l5.7 7.9c.8.9 1.6 1.4 2.8 1.4h1.9"/><path d="m18.4 4.5 2.6 2.6-2.6 2.6M18.4 14.7l2.6 2.6-2.6 2.6"/><path d="M3.6 17.4h3.6c1.2 0 2-.5 2.8-1.4"/></symbol>
+    <symbol id="i-swatch" viewBox="0 0 24 24"><path d="M4.4 16.8 14.6 6.6a2 2 0 0 1 2.8 0l1.8 1.8a2 2 0 0 1 0 2.8L9 21.4H4.4z"/><circle cx="7" cy="18.8" r="1.1"/><path d="M4.4 21.4h15.2"/></symbol>
+  </svg>
+
   <!-- 顶栏 -->
   <header class="topbar">
     <div class="brand">
@@ -24,12 +88,15 @@
       <span class="ai-badge">AI READY</span>
     </div>
     <div class="topbar-actions">
-      <input type="search" id="searchInput" class="search" placeholder="🔍 搜索标题 / 作者 / 关键词…" />
+      <div class="topbar-page-title" id="topbarPageTitle">
+        <b>首页</b>
+        <span id="topbarPageSub">今日概览与科研日历</span>
+      </div>
       <div class="model-switch">
         <button id="btnModelSwitch" class="btn model-btn" title="切换当前使用的 AI 模型">
           <span class="model-dot" id="modelDot"></span>
           <span class="model-btn-text" id="modelBtnText">未配置模型</span>
-          <span class="model-caret">▾</span>
+          <svg class="ico model-caret" aria-hidden="true"><use href="#i-chevron-down"/></svg>
         </button>
         <div id="modelPanel" class="model-panel hidden">
           <div class="model-panel-head">
@@ -38,14 +105,14 @@
           </div>
           <div id="modelPanelBody" class="model-panel-body"></div>
           <div class="model-panel-foot">
-            <button id="btnModelManage" class="btn btn-ghost btn-sm">⚙ 管理模型配置</button>
+            <button id="btnModelManage" class="btn btn-ghost btn-sm"><svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>管理模型配置</button>
           </div>
         </div>
       </div>
-      <button id="btnParseAll" class="btn btn-primary">▶ 解析全部</button>
-      <button id="btnRefreshRanks" class="btn">🏅 更新期刊等级</button>
-      <button id="btnExport" class="btn">导出</button>
-      <button id="btnSettings" class="btn">⚙ AI 设置</button>
+      <button id="btnParseAll" class="btn btn-primary"><svg class="ico" aria-hidden="true"><use href="#i-play"/></svg>解析全部</button>
+      <button id="btnRefreshRanks" class="btn"><svg class="ico" aria-hidden="true"><use href="#i-trophy"/></svg>更新期刊等级</button>
+      <button id="btnExport" class="btn"><svg class="ico" aria-hidden="true"><use href="#i-export"/></svg>导出</button>
+      <button id="btnSettings" class="btn"><svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>设置</button>
     </div>
   </header>
 
@@ -53,44 +120,65 @@
   <div class="workbench">
     <!-- 应用级侧边栏 -->
     <aside class="sidebar" id="sidebar">
+      <!-- SVG 图标精灵：全部 1.5px 线宽、24 网格、currentColor 描边，
+           取代原先混杂的 emoji（🏠📚🎓…）。用 <symbol> + <use> 复用。 -->
+
       <div class="profile-card" id="profileCard" title="点击编辑个人资料">
-        <span class="profile-avatar" id="profileAvatar">🎓</span>
+        <span class="profile-avatar" id="profileAvatar">研</span>
         <div class="profile-info">
           <b id="profileName">研究生</b>
           <span id="profileSub">完善个人资料</span>
         </div>
-        <span class="profile-edit">✎</span>
+        <svg class="ico profile-edit" aria-hidden="true"><use href="#i-note"/></svg>
       </div>
+
+      <div class="side-search">
+        <svg class="ico side-search-ico" aria-hidden="true"><use href="#i-search"/></svg>
+        <input type="search" id="sideSearchInput" class="side-search-input" placeholder="搜索标题 / 作者 / 关键词" autocomplete="off" />
+        <button type="button" class="side-search-clear hidden" id="sideSearchClear" aria-label="清空搜索">×</button>
+      </div>
+
       <nav class="side-nav">
-        <div class="nav-section-label">研究工作</div>
-        <div class="nav-item active" data-view="home"><span class="nav-ico">🏠</span>首页</div>
-        <div class="nav-item" data-view="library"><span class="nav-ico">📚</span>文献中心</div>
-        <div class="nav-item" data-view="thesis"><span class="nav-ico">🎓</span>学位论文阅读</div>
-        <div class="nav-item" data-view="topjournals"><span class="nav-ico">🏛️</span>顶刊追踪<span id="navTopJournalBadge" class="nav-badge hidden">0</span></div>
-        <div class="nav-item" data-view="projects"><span class="nav-ico">📂</span>项目管理</div>
-        <div class="nav-item" data-view="tasks"><span class="nav-ico">✅</span>任务安排</div>
-        <div class="nav-item" data-view="papers"><span class="nav-ico">📮</span>论文进度</div>
-        <div class="nav-item" data-view="achievements"><span class="nav-ico">🏆</span>成果管理</div>
-        <div class="nav-item" data-view="mail"><span class="nav-ico">📧</span>邮箱<span id="navMailBadge" class="nav-badge hidden">0</span></div>
-        <div class="nav-section-label">写作与思考</div>
-        <div class="nav-item" data-view="notes"><span class="nav-ico">🧪</span>研究记录</div>
-        <div class="nav-item" data-view="markdown"><span class="nav-ico">✎</span>Markdown 笔记</div>
-        <div class="nav-item" data-view="ideas"><span class="nav-ico">💡</span>灵感孵化</div>
-        <div class="nav-item" data-view="reviewer"><span class="nav-ico">🔎</span>模拟审稿</div>
-        <div class="nav-item" data-view="ai"><span class="nav-ico">🤖</span>AI 助手</div>
+        <div class="nav-section-label">概览</div>
+        <div class="nav-item active" data-view="home"><svg class="ico" aria-hidden="true"><use href="#i-home"/></svg>首页</div>
+
+        <div class="nav-section-label">文献</div>
+        <div class="nav-item" data-view="library"><svg class="ico" aria-hidden="true"><use href="#i-library"/></svg>文献中心</div>
+        <div class="nav-item" data-view="thesis"><svg class="ico" aria-hidden="true"><use href="#i-thesis"/></svg>学位论文</div>
+        <div class="nav-item" data-view="topjournals"><svg class="ico" aria-hidden="true"><use href="#i-journal"/></svg>顶刊追踪<span id="navTopJournalBadge" class="nav-badge hidden">0</span></div>
+        <div class="nav-item" data-view="papers"><svg class="ico" aria-hidden="true"><use href="#i-papers"/></svg>论文进度</div>
+
+        <div class="nav-section-label">研究</div>
+        <div class="nav-item" data-view="projects"><svg class="ico" aria-hidden="true"><use href="#i-projects"/></svg>项目管理</div>
+        <div class="nav-item" data-view="tasks"><svg class="ico" aria-hidden="true"><use href="#i-tasks"/></svg>任务安排</div>
+        <div class="nav-item" data-view="mail"><svg class="ico" aria-hidden="true"><use href="#i-mail"/></svg>邮箱<span id="navMailBadge" class="nav-badge hidden">0</span></div>
+
+        <div class="nav-section-label">写作</div>
+        <div class="nav-item" data-view="notes"><svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg>研究记录</div>
+        <div class="nav-item" data-view="markdown"><svg class="ico" aria-hidden="true"><use href="#i-note"/></svg>Markdown 笔记</div>
+        <div class="nav-item" data-view="ideas"><svg class="ico" aria-hidden="true"><use href="#i-ideas"/></svg>灵感孵化</div>
+        <div class="nav-item" data-view="reviewer"><svg class="ico" aria-hidden="true"><use href="#i-reviewer"/></svg>模拟审稿</div>
+        <div class="nav-item" data-view="achievements"><svg class="ico" aria-hidden="true"><use href="#i-trophy"/></svg>成果管理</div>
+        <div class="nav-item" data-view="ai"><svg class="ico" aria-hidden="true"><use href="#i-ai"/></svg>AI 助手</div>
+
         <div class="nav-section-label">工具</div>
-        <div class="nav-item" data-view="worldlib"><span class="nav-ico">🌍</span>世图下载助手</div>
+        <div class="nav-item" data-view="worldlib"><svg class="ico" aria-hidden="true"><use href="#i-globe"/></svg>世图下载助手</div>
       </nav>
+
       <div class="side-foot">
         <div class="side-progress-row"><span class="dot dot-done"></span>已阅读 <b id="cntDone">0</b></div>
         <div class="side-progress-row"><span class="dot dot-reading"></span>阅读中 <b id="cntReading">0</b></div>
         <div class="side-progress-row"><span class="dot dot-unread"></span>未阅读 <b id="cntUnread">0</b></div>
-        <button id="btnCheckUpdate" class="side-action-btn" type="button">
-          <span class="side-action-icon">↻</span>
-          <span id="updateNavLabel">检查更新</span>
-          <span id="updateNavBadge" class="update-nav-badge hidden">新版本</span>
-        </button>
-        <button id="btnNavSettings" class="btn btn-ghost w100" style="margin-top:6px">⚙ 设置</button>
+        <div class="side-foot-actions">
+          <button id="btnNavSettings" class="side-icon-btn" type="button" title="设置" aria-label="设置">
+            <svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>
+          </button>
+          <button id="btnCheckUpdate" class="side-icon-btn" type="button" title="检查更新" aria-label="检查更新">
+            <svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg>
+            <span id="updateNavBadge" class="update-nav-badge hidden">新版本</span>
+          </button>
+          <span id="updateNavLabel" class="side-foot-label">检查更新</span>
+        </div>
       </div>
     </aside>
 
@@ -101,7 +189,7 @@
       <section id="viewHome" class="view">
         <div class="home-banner">
           <div class="hb-left">
-            <span class="hb-avatar" id="homeAvatar">🎓</span>
+            <span class="hb-avatar" id="homeAvatar">研</span>
             <div class="hb-info">
               <div class="hb-greet" id="homeGreet">你好，研究生</div>
               <div class="hb-sub" id="homeSub">完善个人资料后显示学校 / 专业 / 年级</div>
@@ -114,12 +202,12 @@
             </div>
           </div>
           <div class="hb-right">
-            <button class="btn hb-edit" id="btnHomeProfile">✎ 编辑资料</button>
+            <button class="btn hb-edit" id="btnHomeProfile"><svg class="ico" aria-hidden="true"><use href="#i-edit"/></svg>编辑资料</button>
             <div class="hb-stats">
-              <div class="hb-stat"><b id="hbLit">0</b><span>📚 文献</span></div>
-              <div class="hb-stat"><b id="hbJournal">0</b><span>📮 小论文</span></div>
-              <div class="hb-stat"><b id="hbUnderway">0</b><span>🚀 在投 / 返修</span></div>
-              <div class="hb-stat"><b id="hbToday">0</b><span>⏰ 今日待办</span></div>
+              <div class="hb-stat"><b id="hbLit">0</b><span><svg class="ico ico-sm" aria-hidden="true"><use href="#i-library"/></svg>文献</span></div>
+              <div class="hb-stat"><b id="hbJournal">0</b><span><svg class="ico ico-sm" aria-hidden="true"><use href="#i-papers"/></svg>小论文</span></div>
+              <div class="hb-stat"><b id="hbUnderway">0</b><span><svg class="ico ico-sm" aria-hidden="true"><use href="#i-zap"/></svg>在投 / 返修</span></div>
+              <div class="hb-stat"><b id="hbToday">0</b><span><svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg>今日待办</span></div>
             </div>
           </div>
         </div>
@@ -127,7 +215,7 @@
         <div class="home-mid">
           <div class="card home-card home-cal">
             <div class="card-head">
-              <b>📅 科研日历</b>
+              <b><svg class="ico" aria-hidden="true"><use href="#i-calendar"/></svg>科研日历</b>
               <div class="cal-nav">
                 <button class="cal-nav-btn" id="calOptions" title="历法显示设置">历法</button>
                 <button class="cal-nav-btn" id="calImport" title="导入 ICS 日历">导入</button>
@@ -151,7 +239,7 @@
           </div>
 
           <div class="card home-card home-today">
-            <div class="card-head"><b>☀ 今日工作计划</b><span class="side-count" id="todayDate"></span></div>
+            <div class="card-head"><b><svg class="ico" aria-hidden="true"><use href="#i-tasks"/></svg>今日工作计划</b><span class="side-count" id="todayDate"></span></div>
             <div id="todayList" class="check-list"></div>
             <div class="quick-add">
               <input id="todayInput" class="tb-input" placeholder="＋ 添加今日任务，回车确认…" />
@@ -162,7 +250,7 @@
 
         <div class="home-bottom">
           <div class="card home-card home-feed">
-            <div class="card-head"><b>📡 科研动态</b><span class="side-count">自动生成</span></div>
+            <div class="card-head"><b><svg class="ico" aria-hidden="true"><use href="#i-zap"/></svg>科研动态</b><span class="side-count">自动生成</span></div>
             <div id="feedList" class="feed-list"></div>
           </div>
 
@@ -172,7 +260,7 @@
           </div>
 
           <div class="card home-card home-reading">
-            <div class="card-head"><b>📖 本周阅读进度</b><button class="btn-ghost as-link" data-goto-lib>去文献中心 →</button></div>
+            <div class="card-head"><b><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg>本周阅读进度</b><button class="btn-ghost as-link" data-goto-lib>去文献中心 →</button></div>
             <div id="readingList" class="reading-list"></div>
           </div>
         </div>
@@ -182,10 +270,10 @@
       <section id="viewLibrary" class="view hidden">
         <div class="lib-bar" id="libBar">
           <div class="lib-root-chip active" data-rootlib="empirical">
-            <span>🧪</span><b>实证类文库</b><span class="side-count" data-rootcount="empirical"></span>
+            <span><svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg></span><b>实证类文库</b><span class="side-count" data-rootcount="empirical"></span>
           </div>
           <div class="lib-root-chip" data-rootlib="model">
-            <span>🧮</span><b>模型类文库</b><span class="side-count" data-rootcount="model"></span>
+            <span><svg class="ico" aria-hidden="true"><use href="#i-brain"/></svg></span><b>模型类文库</b><span class="side-count" data-rootcount="model"></span>
           </div>
           <button class="tb-btn" id="btnAddCol">＋ 新建分类</button>
           <span class="lib-hint">拖动文献行到分类上即可归类</span>
@@ -193,10 +281,10 @@
         <div class="col-chips" id="colChips"></div>
 
         <nav class="view-tabs">
-          <div class="tab active" data-tab="all">📄 全部</div>
-          <div class="tab" data-tab="未阅读">🕓 未阅读</div>
-          <div class="tab" data-tab="阅读中">📖 阅读中</div>
-          <div class="tab" data-tab="已阅读">✅ 已阅读</div>
+          <div class="tab active" data-tab="all"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-file"/></svg>全部</div>
+          <div class="tab" data-tab="未阅读"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg>未阅读</div>
+          <div class="tab" data-tab="阅读中"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-book"/></svg>阅读中</div>
+          <div class="tab" data-tab="已阅读"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-check"/></svg>已阅读</div>
           <div class="tab-spacer"></div>
           <span id="statBadge" class="stat-badge"></span>
         </nav>
@@ -208,8 +296,8 @@
             <button class="tb-btn" id="btnBulkReparse" title="忽略解析状态，强制对选中文献重新跑一遍 AI 解析">↻ 批量重新解析</button>
             <button class="tb-btn" id="btnBulkProgress">◔ 标记进度</button>
             <button class="tb-btn" id="btnBulkCollection">▣ 移动到分类</button>
-            <button class="tb-btn" id="btnBulkRank" title="按当前期刊名重新查询 easyScholar 等级">🏅 更新等级</button>
-            <button class="tb-btn danger" id="btnBulkDelete">🗑 批量删除</button>
+            <button class="tb-btn" id="btnBulkRank" title="按当前期刊名重新查询 easyScholar 等级"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trophy"/></svg>更新等级</button>
+            <button class="tb-btn danger" id="btnBulkDelete"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg>批量删除</button>
           </div>
           <div class="bulk-right">
             <button class="tb-btn ghost" id="btnBulkInvert">反选</button>
@@ -219,7 +307,7 @@
 
         <div class="toolbar">
           <button id="btnAddRecord" class="tb-btn accent">＋ 添加记录</button>
-          <button id="btnUploadTop" class="tb-btn accent">⬆ 批量上传 PDF</button>
+          <button id="btnUploadTop" class="tb-btn accent"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-upload"/></svg>批量上传 PDF</button>
           <div class="tb-sep"></div>
           <button id="btnFields" class="tb-btn">▦ 字段配置</button>
           <select id="statusFilter" class="tb-select">
@@ -256,9 +344,9 @@
             <tbody id="tbody"></tbody>
           </table>
           <div id="emptyState" class="empty-state hidden">
-            <div class="empty-icon">🗂️</div>
+            <div class="empty-icon"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-layers"/></svg></div>
             <p>当前文库暂无文献</p>
-            <p class="empty-hint">点击「⬆ 批量上传 PDF」或把 PDF 直接拖入窗口；也可拖动行到上方分类进行归类</p>
+            <p class="empty-hint">点击「批量上传 PDF」或把 PDF 直接拖入窗口；也可拖动行到上方分类进行归类</p>
           </div>
         </div>
       </section>
@@ -281,7 +369,7 @@
           </div>
           <div class="top-journal-head-actions">
             <button id="btnTopJournalSync" class="tb-btn">↻ 同步最新文章</button>
-            <button id="btnTopJournalCheckin" class="tb-btn accent">✓ 签到并领取今日文章</button>
+            <button id="btnTopJournalCheckin" class="tb-btn accent"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-check"/></svg>签到并领取今日文章</button>
           </div>
         </div>
         <div id="topJournalStats" class="top-journal-stats"></div>
@@ -311,8 +399,8 @@
           <input id="taskInput" class="tb-input" placeholder="＋ 输入任务内容，回车快速添加…" />
           <select id="taskProject" class="tb-select"></select>
           <select id="taskPriority" class="tb-select">
-            <option value="高">🔥 高优先</option>
-            <option value="中" selected>🔸 中优先</option>
+            <option value="高">高优先</option>
+            <option value="中" selected>中优先</option>
             <option value="低">· 低优先</option>
           </select>
           <input type="date" id="taskDue" class="tb-select" />
@@ -325,8 +413,8 @@
       <section id="viewPapers" class="view hidden">
         <div class="view-toolbar">
           <div class="seg-tabs" id="paperTabs">
-            <button class="seg-tab active" data-ptab="journal">📮 小论文 · 投稿管理</button>
-            <button class="seg-tab" data-ptab="thesis">🎓 大论文 · 学位论文进度</button>
+            <button class="seg-tab active" data-ptab="journal"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-papers"/></svg>小论文 · 投稿管理</button>
+            <button class="seg-tab" data-ptab="thesis"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-thesis"/></svg>大论文 · 学位论文进度</button>
           </div>
           <div class="tb-spacer"></div>
           <button class="tb-btn accent" id="btnAddPaper">＋ 添加小论文</button>
@@ -365,7 +453,7 @@
               <span id="mdSaveState" class="md-save-state"></span>
               <button class="btn btn-sm" id="btnMdExport">导出 MD</button>
               <button class="btn btn-sm" id="btnMdPdf">导出 PDF</button>
-              <button class="icon-btn danger" id="btnMdDelete" title="删除笔记">🗑</button>
+              <button class="icon-btn danger" id="btnMdDelete" title="删除笔记"><svg class="ico ico" aria-hidden="true"><use href="#i-trash"/></svg></button>
             </div>
             <div class="md-toolbar" id="mdToolbar">
               <select class="md-tool-select" data-md-command="heading" title="标题级别">
@@ -448,7 +536,7 @@
               <div class="review-export-actions">
                 <button class="btn btn-sm" id="btnReviewExportMd">导出 MD</button>
                 <button class="btn btn-sm" id="btnReviewExportPdf">导出 PDF</button>
-                <button class="icon-btn danger" id="btnReviewDelete" title="删除文稿和审稿意见">🗑</button>
+                <button class="icon-btn danger" id="btnReviewDelete" title="删除文稿和审稿意见"><svg class="ico ico" aria-hidden="true"><use href="#i-trash"/></svg></button>
               </div>
             </div>
             <div class="review-config-grid">
@@ -470,7 +558,7 @@
       <section id="viewWorldlib" class="view hidden">
         <div class="worldlib-wrap">
           <div class="wl-intro card">
-            <b>🌍 世图科研下载助手</b>
+            <b><svg class="ico ico-sm" aria-hidden="true"><use href="#i-globe"/></svg>世图科研下载助手</b>
             <p>把从世图科研（worldlib）复制的「标题 + 链接地址」文本粘贴到下方，自动解析成下载列表。支持这两种格式（可多选整段粘贴）：</p>
             <pre>标题：10.1093/jcr/ucaf065
 链接地址：https://research.worldlib.site/tools/submit_ajax.ashx?action=getdownfile&...=xxx.pdf&uid=...</pre>
@@ -479,11 +567,11 @@
           <label class="field"><span>粘贴文本（支持一次粘贴多条）</span><textarea id="wlInput" rows="6" placeholder="标题：10.1093/jcr/ucaf065
 链接地址：https://research.worldlib.site/..."></textarea></label>
           <div class="wl-actions">
-            <button class="btn btn-primary" id="btnWlParse">🔍 解析列表</button>
+            <button class="btn btn-primary" id="btnWlParse"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-search"/></svg>解析列表</button>
             <button class="btn" id="btnWlClear">清空</button>
             <span class="ob-spacer"></span>
-            <button class="btn" id="btnWlDownloadAll" disabled>⬇ 全部下载并导入</button>
-            <button class="btn btn-primary" id="btnWlImport" disabled>📥 下载勾选并导入</button>
+            <button class="btn" id="btnWlDownloadAll" disabled><svg class="ico ico-sm" aria-hidden="true"><use href="#i-download"/></svg>全部下载并导入</button>
+            <button class="btn btn-primary" id="btnWlImport" disabled><svg class="ico ico-sm" aria-hidden="true"><use href="#i-download"/></svg>下载勾选并导入</button>
           </div>
           <div id="wlList" class="wl-list"></div>
         </div>
@@ -495,7 +583,7 @@
           <!-- 左栏：账户与文件夹 -->
           <aside class="mail-side">
             <div class="mail-side-head">
-              <b>📧 邮箱</b>
+              <b><svg class="ico ico-sm" aria-hidden="true"><use href="#i-mail"/></svg>邮箱</b>
               <button class="btn-ghost as-link" id="btnMailManage">＋ 账户管理</button>
             </div>
             <div id="mailAccounts" class="mail-accounts"></div>
@@ -508,8 +596,8 @@
             <div class="mail-list-head">
               <input id="mailSearch" class="tb-input mail-search" placeholder="搜索主题 / 发件人，回车确认…" />
               <button class="tb-btn" id="btnMailRefresh" title="刷新当前文件夹">⟳</button>
-              <button class="tb-btn" id="btnMailMarkAllRead" title="将当前文件夹所有未读邮件标记为已读">✓ 全部已读</button>
-              <button class="tb-btn" id="btnMailCompose" title="写邮件">✎ 写邮件</button>
+              <button class="tb-btn" id="btnMailMarkAllRead" title="将当前文件夹所有未读邮件标记为已读"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-check"/></svg>全部已读</button>
+              <button class="tb-btn" id="btnMailCompose" title="写邮件"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-edit"/></svg>写邮件</button>
             </div>
             <div id="mailListHead" class="mail-list-title"></div>
             <div id="mailList" class="mail-list"></div>
@@ -533,7 +621,7 @@
           <div class="chat-main">
             <div id="chatMsgs" class="chat-msgs">
               <div class="chat-welcome">
-                <div class="chat-welcome-ico">🤖</div>
+                <div class="chat-welcome-ico"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-ai"/></svg></div>
                 <b>AI 科研助手已就绪</b>
                 <p>基于你的文献知识库、项目与任务进行定制化对话。<br />支持多会话与上下文记忆，试试左侧快捷指令，或直接输入问题。</p>
               </div>
@@ -542,32 +630,32 @@
             <div class="ai-model-row" id="chatModelRow"></div>
             <div class="chat-input-row">
               <textarea id="chatInput" rows="2" placeholder="输入问题，Enter 发送 / Shift+Enter 换行…"></textarea>
-              <button id="btnChatAttach" class="btn btn-ghost" title="上传 PDF">📎</button>
-              <button id="btnChatKnowledge" class="btn btn-ghost" title="选择本地知识">🧠</button>
+              <button id="btnChatAttach" class="btn btn-ghost" title="上传 PDF"><svg class="ico ico" aria-hidden="true"><use href="#i-link"/></svg></button>
+              <button id="btnChatKnowledge" class="btn btn-ghost" title="选择本地知识"><svg class="ico ico" aria-hidden="true"><use href="#i-brain"/></svg></button>
               <button id="btnChatSend" class="btn btn-primary">发送</button>
             </div>
           </div>
           <aside class="chat-side">
             <div class="card chat-kb">
-              <div class="card-head"><b>🧠 知识库</b></div>
-              <div class="kb-row">📚 已解析文献 <b id="kbLit">0</b> 篇</div>
-              <div class="kb-row">📂 科研项目 <b id="kbProj">0</b> 个</div>
-              <div class="kb-row">📮 小论文 <b id="kbPaper">0</b> 篇</div>
-              <div class="kb-row">🎓 大论文 <b id="kbThesis">0</b> 项</div>
-              <div class="kb-row">🧪 研究记录 <b id="kbNote">0</b> 条</div>
+              <div class="card-head"><b><svg class="ico ico-sm" aria-hidden="true"><use href="#i-brain"/></svg>知识库</b></div>
+              <div class="kb-row"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-library"/></svg>已解析文献 <b id="kbLit">0</b> 篇</div>
+              <div class="kb-row"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-projects"/></svg>科研项目 <b id="kbProj">0</b> 个</div>
+              <div class="kb-row"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-papers"/></svg>小论文 <b id="kbPaper">0</b> 篇</div>
+              <div class="kb-row"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-thesis"/></svg>大论文 <b id="kbThesis">0</b> 项</div>
+              <div class="kb-row"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-flask"/></svg>研究记录 <b id="kbNote">0</b> 条</div>
               <div class="kb-tip">对话时会自动检索与你问题最相关的文献摘要、项目、任务与论文投稿状态作为上下文回答。同一会话内支持上下文追问，过长历史会自动压缩为摘要。</div>
             </div>
             <div class="card chat-quick">
-              <div class="card-head"><b>⚡ 快捷指令</b></div>
-              <button class="quick-btn" data-quick="innovation">💡 构思论文创新点</button>
-              <button class="quick-btn" data-quick="submission">📮 投稿策略与期刊推荐</button>
-              <button class="quick-btn" data-quick="thesis">🎓 大论文进度诊断</button>
-              <button class="quick-btn" data-quick="weekly">📄 生成本周科研周报</button>
-              <button class="quick-btn" data-quick="gap">🔍 寻找研究空白</button>
-              <button class="quick-btn" data-quick="review">📚 文献综述思路</button>
-              <button class="quick-btn" data-quick="plan">🗓 制定两周科研计划</button>
+              <div class="card-head"><b><svg class="ico ico-sm" aria-hidden="true"><use href="#i-zap"/></svg>快捷指令</b></div>
+              <button class="quick-btn" data-quick="innovation"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-ideas"/></svg>构思论文创新点</button>
+              <button class="quick-btn" data-quick="submission"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-papers"/></svg>投稿策略与期刊推荐</button>
+              <button class="quick-btn" data-quick="thesis"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-thesis"/></svg>大论文进度诊断</button>
+              <button class="quick-btn" data-quick="weekly"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-file"/></svg>生成本周科研周报</button>
+              <button class="quick-btn" data-quick="gap"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-search"/></svg>寻找研究空白</button>
+              <button class="quick-btn" data-quick="review"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-library"/></svg>文献综述思路</button>
+              <button class="quick-btn" data-quick="plan"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-calendar"/></svg>制定两周科研计划</button>
             </div>
-            <button class="btn w100" id="btnClearChat">🗑 清空全部对话</button>
+            <button class="btn w100" id="btnClearChat"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg>清空全部对话</button>
           </aside>
         </div>
       </section>
@@ -591,8 +679,8 @@
       <span id="drawerFilename" class="drawer-filename"></span>
       <div class="drawer-head-right">
         <button id="btnReparse" class="btn">↻ 重新解析</button>
-        <button id="btnEdit" class="btn">✎ 编辑</button>
-        <button id="btnRead" class="btn btn-primary">📖 阅读 PDF</button>
+        <button id="btnEdit" class="btn"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-edit"/></svg>编辑</button>
+        <button id="btnRead" class="btn btn-primary"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-book"/></svg>阅读 PDF</button>
         <button id="btnOpenPdf" class="btn">↗ 原 PDF</button>
       </div>
     </div>
@@ -603,7 +691,7 @@
   <div id="colModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog" style="width:360px">
-      <div class="modal-head"><h3 id="colModalTitle">新建分类</h3><button class="modal-close" id="btnColClose">✕</button></div>
+      <div class="modal-head"><h3 id="colModalTitle">新建分类</h3><button class="modal-close" id="btnColClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
         <label class="field"><span>分类名称</span><input id="colModalInput" class="tb-input w100" placeholder="例如：技术、算法、咨询…" /></label>
       </div>
@@ -618,7 +706,7 @@
   <div id="classModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog" style="width:400px">
-      <div class="modal-head"><h3>移动文献到分类</h3><button class="modal-close" id="btnClassClose">✕</button></div>
+      <div class="modal-head"><h3>移动文献到分类</h3><button class="modal-close" id="btnClassClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
         <p id="classModalHint" class="modal-desc"></p>
         <label class="field"><span>目标分类</span><select id="classTarget" class="tb-select w100"></select></label>
@@ -634,7 +722,7 @@
   <div id="ideaModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog modal-wide">
-      <div class="modal-head"><h3 id="ideaModalTitle">记录灵感</h3><button class="modal-close" id="btnIdeaClose">✕</button></div>
+      <div class="modal-head"><h3 id="ideaModalTitle">记录灵感</h3><button class="modal-close" id="btnIdeaClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
         <label class="field"><span>标题</span><input id="ideaTitle" class="tb-input w100" maxlength="120" placeholder="一句话概括这个想法" /></label>
         <label class="field"><span>灵感原文 *</span><textarea id="ideaContent" rows="7" placeholder="记录问题、观察、矛盾、可能机制或任何尚未成形的想法"></textarea></label>
@@ -657,7 +745,7 @@
   <div id="profileModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog" style="width:400px">
-      <div class="modal-head"><h3>个人资料</h3><button class="modal-close" id="btnProfileClose">✕</button></div>
+      <div class="modal-head"><h3>个人资料</h3><button class="modal-close" id="btnProfileClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
         <label class="field"><span>用户名（显示名）</span><input id="profName" class="tb-input w100" placeholder="例如：姚同学" /></label>
         <div class="prof-grid">
@@ -681,7 +769,7 @@
   <div id="projModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog modal-wide">
-      <div class="modal-head"><h3 id="projModalTitle">新建项目</h3><button class="modal-close" id="btnProjClose">✕</button></div>
+      <div class="modal-head"><h3 id="projModalTitle">新建项目</h3><button class="modal-close" id="btnProjClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
         <div class="prof-grid">
           <label class="field"><span>项目名称 *</span><input id="projName" class="tb-input" placeholder="如：基于机器学习的材料性能预测研究" /></label>
@@ -704,7 +792,7 @@
         </label>
       </div>
       <div class="modal-foot">
-        <button id="btnProjDelete" class="btn" style="color:var(--red);margin-right:auto">🗑 删除项目</button>
+        <button id="btnProjDelete" class="btn" style="color:var(--red);margin-right:auto"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg>删除项目</button>
         <button id="btnProjSave" class="btn btn-primary">保存</button>
         <button id="btnProjCancel" class="btn">取消</button>
       </div>
@@ -715,7 +803,7 @@
   <div id="noteModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog modal-wide">
-      <div class="modal-head"><h3 id="noteModalTitle">新建研究记录</h3><button class="modal-close" id="btnNoteClose">✕</button></div>
+      <div class="modal-head"><h3 id="noteModalTitle">新建研究记录</h3><button class="modal-close" id="btnNoteClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
         <div class="prof-grid">
           <label class="field"><span>记录标题 *</span><input id="noteTitle" class="tb-input" placeholder="如：基准回归结果（数字金融 → 创新）" /></label>
@@ -735,8 +823,8 @@
           <textarea id="noteContent" rows="10" placeholder="研究问题、假设、数据、模型、结果与下一步…" style="min-height:220px"></textarea>
         </label>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn" id="btnNoteTemplateEcon">📋 插入经管实证研究模板</button>
-          <button class="btn" id="btnNoteTemplate">📋 通用实验 SOP 模板</button>
+          <button class="btn" id="btnNoteTemplateEcon"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-grid"/></svg>插入经管实证研究模板</button>
+          <button class="btn" id="btnNoteTemplate"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-grid"/></svg>通用实验 SOP 模板</button>
         </div>
         <section class="note-ai-panel" aria-labelledby="noteAiHeading">
           <div class="note-ai-head">
@@ -744,7 +832,7 @@
           </div>
           <textarea id="noteAiDraft" class="note-ai-input" rows="4" placeholder="粘贴零散想法、实验现象、待核查事项或会议速记…"></textarea>
           <div class="note-ai-actions">
-            <button id="btnNoteAiGenerate" class="btn btn-primary">✨ 整理为研究记录</button>
+            <button id="btnNoteAiGenerate" class="btn btn-primary"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-ai"/></svg>整理为研究记录</button>
             <button id="btnNoteAiStop" class="btn hidden">停止生成</button>
             <button id="btnNoteAiInsert" class="btn hidden" disabled>↳ 插入到记录</button>
           </div>
@@ -753,7 +841,7 @@
         </section>
       </div>
       <div class="modal-foot">
-        <button id="btnNoteDelete" class="btn hidden" style="color:var(--red);margin-right:auto">🗑 删除记录</button>
+        <button id="btnNoteDelete" class="btn hidden" style="color:var(--red);margin-right:auto"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg>删除记录</button>
         <button id="btnNoteSave" class="btn btn-primary">保存</button>
         <button id="btnNoteCancel" class="btn">取消</button>
       </div>
@@ -764,14 +852,14 @@
   <div id="paperModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog modal-wide">
-      <div class="modal-head"><h3 id="paperModalTitle">添加小论文</h3><button class="modal-close" id="btnPaperClose">✕</button></div>
+      <div class="modal-head"><h3 id="paperModalTitle">添加小论文</h3><button class="modal-close" id="btnPaperClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
         <div class="prof-grid">
           <label class="field"><span>论文标题 *</span><input id="paperTitle" class="tb-input" placeholder="如：数字普惠金融对企业创新的影响研究" /></label>
           <label class="field"><span>目标期刊（拒稿转投时更新）</span>
             <div class="rank-input-row">
               <input id="paperJournal" class="tb-input" placeholder="如：经济研究 / 管理世界 / Journal of Banking & Finance" />
-              <button class="tb-btn" id="btnQueryRank" title="用 easyScholar 查询期刊等级">🏅 查等级</button>
+              <button class="tb-btn" id="btnQueryRank" title="用 easyScholar 查询期刊等级"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trophy"/></svg>查等级</button>
             </div>
           </label>
           <label class="field"><span>当前状态</span><select id="paperStatus" class="tb-select"></select></label>
@@ -795,7 +883,7 @@
           <button class="btn" id="btnReviewTransToggle" title="展开 / 收起">展开全文</button>
         </div>
         <div class="field-sep"></div>
-        <div class="paper-hist-head"><b>📮 投稿时间线</b><span class="side-count" id="paperHistCount">0</span></div>
+        <div class="paper-hist-head"><b><svg class="ico ico-sm" aria-hidden="true"><use href="#i-papers"/></svg>投稿时间线</b><span class="side-count" id="paperHistCount">0</span></div>
         <div id="paperHistory" class="paper-history"></div>
         <div class="hist-add">
           <select id="histStatus" class="tb-select"></select>
@@ -806,7 +894,7 @@
         <p class="modal-desc">时间线自动留痕。被拒稿后：把状态改回「投稿中」并更换目标期刊，即可在同一篇论文下记录完整转投历史。</p>
       </div>
       <div class="modal-foot">
-        <button id="btnPaperDelete" class="btn" style="color:var(--red);margin-right:auto">🗑 删除</button>
+        <button id="btnPaperDelete" class="btn" style="color:var(--red);margin-right:auto"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg>删除</button>
         <button id="btnPaperSave" class="btn btn-primary">保存</button>
         <button id="btnPaperCancel" class="btn">取消</button>
       </div>
@@ -817,7 +905,7 @@
   <div id="thesisModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog modal-wide">
-      <div class="modal-head"><h3 id="thesisModalTitle">添加大论文</h3><button class="modal-close" id="btnThesisClose">✕</button></div>
+      <div class="modal-head"><h3 id="thesisModalTitle">添加大论文</h3><button class="modal-close" id="btnThesisClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
         <div class="prof-grid">
           <label class="field"><span>学位论文题目 *</span><input id="thesisTitle" class="tb-input" placeholder="如：数字经济对区域绿色创新效率的影响研究" /></label>
@@ -826,20 +914,20 @@
           <label class="field"><span>计划完成（答辩）日期</span><input type="date" id="thesisTarget" class="tb-select" /></label>
         </div>
         <div class="field-sep"></div>
-        <div class="paper-hist-head"><b>📑 章节清单</b><span class="side-count" id="thesisChapCount">0</span></div>
+        <div class="paper-hist-head"><b><svg class="ico ico-sm" aria-hidden="true"><use href="#i-grid"/></svg>章节清单</b><span class="side-count" id="thesisChapCount">0</span></div>
         <div id="thesisChapters" class="chap-list"></div>
         <div style="display:flex;gap:8px;margin-top:6px">
           <button class="tb-btn" id="btnChapAdd">＋ 添加章节</button>
-          <button class="tb-btn" id="btnChapPreset" title="插入经管硕士论文常用五章框架">📋 经管常用章节框架</button>
+          <button class="tb-btn" id="btnChapPreset" title="插入经管硕士论文常用五章框架"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-grid"/></svg>经管常用章节框架</button>
         </div>
         <div class="field-sep"></div>
-        <div class="paper-hist-head"><b>🏁 重要节点</b><span class="side-count" id="thesisMsCount">0</span></div>
+        <div class="paper-hist-head"><b><svg class="ico ico-sm" aria-hidden="true"><use href="#i-flag"/></svg>重要节点</b><span class="side-count" id="thesisMsCount">0</span></div>
         <div id="thesisMilestones" class="ms-list"></div>
         <button class="tb-btn" id="btnMsAdd" style="margin-top:6px">＋ 添加节点</button>
         <label class="field" style="margin-top:10px"><span>备注</span><textarea id="thesisNotes" rows="2" placeholder="导师要求、盲审时间安排等…"></textarea></label>
       </div>
       <div class="modal-foot">
-        <button id="btnThesisDelete" class="btn" style="color:var(--red);margin-right:auto">🗑 删除</button>
+        <button id="btnThesisDelete" class="btn" style="color:var(--red);margin-right:auto"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg>删除</button>
         <button id="btnThesisSave" class="btn btn-primary">保存</button>
         <button id="btnThesisCancel" class="btn">取消</button>
       </div>
@@ -851,7 +939,7 @@
   <div id="mailAccountModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog modal-wide">
-      <div class="modal-head"><h3>📧 邮箱账户管理</h3><button class="modal-close" id="btnMaClose">✕</button></div>
+      <div class="modal-head"><h3><svg class="ico ico-sm" aria-hidden="true"><use href="#i-mail"/></svg>邮箱账户管理</h3><button class="modal-close" id="btnMaClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
         <p class="modal-desc">支持添加多个邮箱账户（如个人 163 邮箱 + 学校邮箱），随时切换查看。不需要邮箱也可以留空，不影响其他功能。<br />账号与授权码仅保存在<b>本机数据目录</b>（mail.json），不会上传到任何服务器。</p>
         <div id="maList" class="ma-list"></div>
@@ -891,7 +979,7 @@
         <div id="maTestResult" class="ma-test-result hidden"></div>
       </div>
       <div class="modal-foot">
-        <button id="btnMaTest" class="btn">🔌 测试连接</button>
+        <button id="btnMaTest" class="btn"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-plug"/></svg>测试连接</button>
         <span class="ob-spacer"></span>
         <button id="btnMaSave" class="btn btn-primary">保存账户</button>
         <button id="btnMaCancel" class="btn">取消编辑</button>
@@ -903,7 +991,7 @@
   <div id="mailComposeModal" class="modal hidden">
     <div class="modal-mask"></div>
     <div class="modal-dialog modal-wide">
-      <div class="modal-head"><h3>✎ 写邮件</h3><button class="modal-close" id="btnMcClose">✕</button></div>
+      <div class="modal-head"><h3><svg class="ico ico-sm" aria-hidden="true"><use href="#i-edit"/></svg>写邮件</h3><button class="modal-close" id="btnMcClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
         <div class="prof-grid">
           <label class="field"><span>发件账户</span><select id="mcFrom" class="tb-select"></select></label>
@@ -925,22 +1013,22 @@
     <div class="modal-dialog">
       <div class="modal-head">
         <h3>AI 解析设置</h3>
-        <button class="modal-close" id="btnSettingsClose">✕</button>
+        <button class="modal-close" id="btnSettingsClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
       <div class="modal-body">
         <p class="modal-desc">配置大模型后可获得精准的「研究背景 / 方法 / 结果 / 创新点」分点解析；模型同时驱动 AI 助手对话、论文对话与划词翻译。<b>可以添加多个模型</b>（例如：硅基流动的 DeepSeek 做日常解析 + 通义的 Qwen-VL 专门看图表），在<b>主界面顶栏一键切换</b>。</p>
 
         <div class="ml-section">
           <div class="ml-head">
-            <span class="ml-title">🧩 已配置的模型 <b id="mlCount">0</b>/20</span>
+            <span class="ml-title"><svg class="ico ico" aria-hidden="true"><use href="#i-puzzle"/></svg>已配置的模型 <b id="mlCount">0</b>/20</span>
             <span class="ml-hint">点「使用中」的卡片可切换激活模型；同一时刻只有一个生效</span>
           </div>
           <div id="mlList" class="ml-list"></div>
           <div class="ml-actions">
             <button type="button" id="btnMlAdd" class="btn btn-ghost btn-sm">＋ 添加模型</button>
-            <button type="button" id="btnMlAddPreset" class="btn btn-ghost btn-sm">⚡ 一键添加常用模型</button>
+            <button type="button" id="btnMlAddPreset" class="btn btn-ghost btn-sm"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-zap"/></svg>一键添加常用模型</button>
             <span class="ob-spacer"></span>
-            <button type="button" id="btnMlCheckup" class="btn btn-ghost btn-sm">🔌 一键体检</button>
+            <button type="button" id="btnMlCheckup" class="btn btn-ghost btn-sm"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-plug"/></svg>一键体检</button>
           </div>
           <div id="mlCheckupResult" class="ml-test-result hidden"></div>
         </div>
@@ -948,7 +1036,7 @@
         <!-- 视觉模型：看图的核心能力，必填。提到最前面，别让用户翻到「高级设置」里才找到 -->
         <div class="ml-section" id="visionSection">
           <div class="ml-head">
-            <span class="ml-title">👁 视觉模型 <b class="ml-required">必填</b></span>
+            <span class="ml-title"><svg class="ico ico" aria-hidden="true"><use href="#i-eye"/></svg>视觉模型 <b class="ml-required">必填</b></span>
             <span class="ml-hint">当前模型不支持图片时，先用它「看图转文字」再回答</span>
           </div>
           <p class="ml-desc">
@@ -965,7 +1053,7 @@
         <!-- 本地 OpenAI 兼容端口：让别的软件也能用上这里的模型路由 -->
         <div class="ml-section" id="gatewaySection">
           <div class="ml-head">
-            <span class="ml-title">🌐 本地端口（给别的软件用）</span>
+            <span class="ml-title"><svg class="ico ico" aria-hidden="true"><use href="#i-globe"/></svg>本地端口（给别的软件用）</span>
             <label class="rt-switch" title="开启后本机会监听一个 OpenAI 兼容端口，供别的软件调用">
               <input type="checkbox" id="gwEnabled" /> 开启
             </label>
@@ -991,7 +1079,7 @@
 
         <!-- 高级设置：日常不用动的东西都收在这里，默认折叠，界面保持清爽 -->
         <details class="adv-block" id="advSettings">
-          <summary>⚙️ 高级设置<span class="adv-note">请求超时 · 出站代理 · 两段式看图 · 故障转移与熔断</span></summary>
+          <summary><svg class="ico ico" aria-hidden="true"><use href="#i-settings"/></svg>高级设置<span class="adv-note">请求超时 · 出站代理 · 两段式看图 · 故障转移与熔断</span></summary>
           <div class="adv-body">
 
             <!-- 请求超时 + 出站代理 -->
@@ -1027,7 +1115,7 @@
             <!-- 两段式看图：选择器已提前到上方「视觉模型（必填）」区块，这里只留说明 -->
             <div class="ml-sub">
               <div class="ml-sub-head">
-                <span class="ml-sub-title">👁 两段式看图</span>
+                <span class="ml-sub-title"><svg class="ico ico" aria-hidden="true"><use href="#i-eye"/></svg>两段式看图</span>
                 <span class="ml-hint">视觉模型已在上方「视觉模型（必填）」里设置</span>
               </div>
               <p class="ml-desc">
@@ -1040,7 +1128,7 @@
             <!-- 模型路由：多条配置互为备份，失败自动切换 + 熔断 -->
             <div class="ml-sub" id="routerSection">
               <div class="ml-sub-head">
-                <span class="ml-sub-title">🔀 模型路由</span>
+                <span class="ml-sub-title"><svg class="ico ico" aria-hidden="true"><use href="#i-shuffle"/></svg>模型路由</span>
                 <label class="rt-switch" title="开启后，模型调用会经过路由：失败时按队列换下一条配置">
                   <input type="checkbox" id="rtEnabled" /> 启用
                 </label>
@@ -1082,7 +1170,7 @@
                 <small class="ml-field-hint">连续失败到阈值、或者错误率超过阈值，都会让这条配置进入熔断；冷却结束后半开试探，连续成功到「恢复成功阈值」就恢复正常。填 0 秒表示不冷却、下一条请求立刻再试。</small>
               </details>
 
-              <div class="rt-sub">各模型健康状态<span class="rt-sub-note">🟢 正常 · 🟡 近期有失败 · 🔴 已熔断</span></div>
+              <div class="rt-sub">各模型健康状态<span class="rt-sub-note"><i class="rt-led ok"></i>正常 · <i class="rt-led warn"></i>近期有失败 · <i class="rt-led bad"></i>已熔断</span></div>
               <div id="rtProviders" class="rt-providers"></div>
 
               <div class="rt-actions">
@@ -1172,7 +1260,7 @@
           <div id="mlModelChips" class="ml-chips"></div>
           <div id="mlTestResult" class="ml-test-result hidden"></div>
           <div class="ml-editor-foot">
-            <button type="button" id="btnMlTest" class="btn btn-ghost btn-sm">🔌 测试连接</button>
+            <button type="button" id="btnMlTest" class="btn btn-ghost btn-sm"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-plug"/></svg>测试连接</button>
             <span class="ob-spacer"></span>
             <button type="button" id="btnMlSave" class="btn btn-primary btn-sm">保存这条配置</button>
             <button type="button" id="btnMlCancel" class="btn btn-sm">取消</button>
@@ -1242,22 +1330,18 @@
         <div class="field-sep"></div>
         <label class="field"><span>全文翻译中文字体（可选）</span><input id="setPdfFontPath" class="tb-input" placeholder="留空 = 自动探测系统字体，找不到会自动下载 Noto Sans SC" /></label>
         <p class="modal-desc">译文的字体家族（黑体系 / 宋体系 / 跟随原文）、粗细、字号与并发数，在
-          <b>对照精读</b>的「🌐 全文翻译」面板里按篇调整，并可用「存为默认」持久化。这里只需在需要指定某个特定字体文件时填写。</p>
+          <b>对照精读</b>的「全文翻译」面板里按篇调整，并可用「存为默认」持久化。这里只需在需要指定某个特定字体文件时填写。</p>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:var(--primary-soft)">主题配色会同步应用于主操作、选中状态、链接与侧边栏；语义状态色保持稳定，以保证信息识别和阅读对比度。</p>
-        <label class="field"><span>预设配色</span>
-          <div id="themePresets" class="theme-presets"></div>
+        <p class="modal-desc" style="background:var(--primary-soft)">主题模式同步应用于整个界面（含阅读器）。三套模式各自独立配色，非简单地反转明暗。</p>
+        <label class="field"><span>主题模式</span>
+          <div id="themeModes" class="theme-modes"></div>
         </label>
-        <label class="field"><span>自定义主色（点色块取色或直接输入色号，如 #176B87）</span>
-          <div class="rank-input-row">
-            <input type="color" id="themeColorPicker" class="theme-color-picker" value="#176B87" />
-            <input id="themeColorInput" class="tb-input" placeholder="#176B87" />
-            <button class="tb-btn" id="btnThemeApply">应用</button>
-            <button class="tb-btn" id="btnThemeReset">恢复默认</button>
-          </div>
+        <label class="field field-inline"><span>跟随系统外观</span>
+          <input type="checkbox" id="themeFollowSystem" class="tb-check" />
+          <em class="field-hint">开启后随系统深色/浅色自动切换（护眼模式需手动选择）</em>
         </label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:var(--primary-soft)">🔤 全局字体（选择后所有界面文字统一使用该字体，立即预览；保存后跨启动生效）。</p>
+        <p class="modal-desc" style="background:var(--primary-soft)">全局字体（选择后所有界面文字统一使用该字体，立即预览；保存后跨启动生效）。</p>
         <label class="field"><span>界面字体</span>
           <select id="setAppFont" class="tb-select w100">
             <option value="">默认（跟随系统）</option>
@@ -1284,14 +1368,14 @@
         <div class="field-sep"></div>
         <div class="bk-section">
           <div class="bk-head">
-            <span class="bk-head-title">🗄 数据备份与恢复</span>
+            <span class="bk-head-title"><svg class="ico ico" aria-hidden="true"><use href="#i-database"/></svg>数据备份与恢复</span>
             <span class="bk-head-hint">每次启动自动备份，保留最近 10 份</span>
           </div>
           <p class="modal-desc">重装或升级前不必担心：应用每次启动都会把文献、配置、邮箱账户与 PDF 附件快照到数据目录下的 <code>backups/</code>。误删文献或配置出错时，可从这里一键恢复。</p>
           <div class="bk-actions">
             <button id="btnBkCreate" class="btn btn-ghost btn-sm">＋ 立即备份</button>
-            <button id="btnBkExport" class="btn btn-ghost btn-sm">⬇ 导出整包数据</button>
-            <button id="btnBkOpenDir" class="btn btn-ghost btn-sm">📂 打开数据目录</button>
+            <button id="btnBkExport" class="btn btn-ghost btn-sm"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-download"/></svg>导出整包数据</button>
+            <button id="btnBkOpenDir" class="btn btn-ghost btn-sm"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-folder"/></svg>打开数据目录</button>
           </div>
           <div id="bkListWrap" class="bk-list-wrap">
             <div class="bk-loading">正在读取备份列表…</div>
@@ -1299,7 +1383,7 @@
         </div>
       </div>
       <div class="modal-foot">
-        <button id="btnReplayOnboarding" class="btn btn-ghost">🎓 重新查看新手引导</button>
+        <button id="btnReplayOnboarding" class="btn btn-ghost"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-thesis"/></svg>重新查看新手引导</button>
         <span class="ob-spacer"></span>
         <button id="btnSettingsSave" class="btn btn-primary">保存设置</button>
         <button id="btnSettingsCancel" class="btn">取消</button>
@@ -1346,7 +1430,7 @@
   <!-- 新版本提醒卡片：由主进程的 pendingPrompt 驱动，同一版本只弹一次 -->
   <aside id="updateNotify" class="update-notify hidden" role="status" aria-live="polite">
     <div class="update-notify-head">
-      <span class="update-notify-icon">🎉</span>
+      <span class="update-notify-icon"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-star"/></svg></span>
       <p class="update-notify-title">发现新版本 <b id="updateNotifyVersion">--</b></p>
       <button class="update-notify-close" id="btnUpdateNotifyClose" data-update-notify="dismiss" title="关闭">×</button>
     </div>
@@ -1363,7 +1447,7 @@
     <div class="modal-dialog modal-wide">
       <div class="modal-head">
         <h3>编辑文献信息</h3>
-        <button class="modal-close" id="btnEditClose">✕</button>
+        <button class="modal-close" id="btnEditClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
       <div class="modal-body" id="editBody"></div>
       <div class="modal-foot">
@@ -1378,8 +1462,8 @@
     <div class="modal-mask"></div>
     <div class="modal-dialog modal-wide tj-analysis-modal">
       <div class="modal-head">
-        <h3>✨ 顶刊样本分析</h3>
-        <button class="modal-close" id="btnTopJournalAnalysisClose">✕</button>
+        <h3><svg class="ico ico" aria-hidden="true"><use href="#i-star"/></svg>顶刊样本分析</h3>
+        <button class="modal-close" id="btnTopJournalAnalysisClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
       <div class="modal-body" id="topJournalAnalysisBody"></div>
       <div class="modal-foot"><button id="btnTopJournalAnalysisSave" class="btn">保存至 Markdown</button><button id="btnTopJournalAnalysisHistory" class="btn">查看历史分析</button><button id="btnTopJournalAnalysisDone" class="btn btn-primary">完成</button></div>
@@ -1387,7 +1471,7 @@
   </div>
 
 
-  <div id="chatKnowledgeModal" class="modal hidden"><div class="modal-mask"></div><div class="modal-dialog modal-wide"><div class="modal-head"><h3>选择本地知识库内容</h3><button class="modal-close" id="btnChatKnowledgeClose">✕</button></div><div class="modal-body"><div id="chatKnowledgeList" class="chat-knowledge-list"></div></div><div class="modal-foot"><button id="btnChatKnowledgeDone" class="btn btn-primary">使用所选内容</button></div></div></div>
+  <div id="chatKnowledgeModal" class="modal hidden"><div class="modal-mask"></div><div class="modal-dialog modal-wide"><div class="modal-head"><h3>选择本地知识库内容</h3><button class="modal-close" id="btnChatKnowledgeClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div><div class="modal-body"><div id="chatKnowledgeList" class="chat-knowledge-list"></div></div><div class="modal-foot"><button id="btnChatKnowledgeDone" class="btn btn-primary">使用所选内容</button></div></div></div>
   <input id="chatPdfInput" type="file" accept="application/pdf" class="hidden" />
 
   <div id="toast" class="toast hidden"></div>
@@ -1397,14 +1481,14 @@
 
   <!-- 拖拽上传覆盖层 -->
   <div id="dragOverlay" class="drag-overlay hidden">
-    <div class="drag-overlay-box">📄 松开鼠标，添加 PDF 文献</div>
+    <div class="drag-overlay-box"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-file"/></svg>松开鼠标，添加 PDF 文献</div>
   </div>
 
   <!-- PDF 阅读器：左 PDF 划词 + 右翻译面板 -->
   <div id="pdfReader" class="pdf-reader hidden">
     <div class="pr-toolbar">
       <button id="prClose" class="btn">← 返回</button>
-      <button id="prDirToggle" class="btn btn-ghost" title="展开 / 收起论文目录 —— 不必先返回列表，直接跳到另一篇">📚 目录</button>
+      <button id="prDirToggle" class="btn btn-ghost" title="展开 / 收起论文目录 —— 不必先返回列表，直接跳到另一篇"><svg class="ico ico" aria-hidden="true"><use href="#i-layers"/></svg> 目录</button>
       <span id="prFilename" class="pr-filename"></span>
       <div class="pr-nav" id="prPdfNav">
         <input type="number" id="prPageInput" class="pr-page-input" value="1" min="1" />
@@ -1418,10 +1502,10 @@
         <button id="prRotateLeft" class="btn btn-ghost" title="向左旋转当前页（仅本次阅读）">↶ 左转</button>
         <span id="prRotationLabel" class="pr-rotation-label" title="当前页的显示旋转角度">0°</span>
         <button id="prRotateRight" class="btn btn-ghost" title="向右旋转当前页（仅本次阅读）">右转 ↷</button>
-        <button id="prToggleMd" class="btn btn-ghost hidden" title="在 Markdown 译文与原文 PDF 之间切换">📑 查看译文</button>
-        <button id="prToggleNote" class="btn btn-ghost" title="笔记模式：左侧原文 / 中间划词翻译 / 右侧笔记（Markdown + 思维导图）">📓 笔记模式</button>
-        <button id="prToggleCmp" class="btn btn-ghost" title="对照精读：左大纲 ｜ 中左原文 ｜ 中右译文 ｜ 右 AI 助读。先识别版面，再逐段对照翻译，点原文译文同步定位">📖 对照精读</button>
-        <button id="prLayoutBtn" class="btn btn-ghost" title="版面解析：识别图表 / 表格 / 公式区域，悬停看类型、点击放大或送 AI 解释">🧩 版面</button>
+        <button id="prToggleMd" class="btn btn-ghost hidden" title="在 Markdown 译文与原文 PDF 之间切换"><svg class="ico ico" aria-hidden="true"><use href="#i-edit"/></svg> 查看译文</button>
+        <button id="prToggleNote" class="btn btn-ghost" title="笔记模式：左侧原文 / 中间划词翻译 / 右侧笔记（Markdown + 思维导图）"><svg class="ico ico" aria-hidden="true"><use href="#i-note"/></svg> 笔记模式</button>
+        <button id="prToggleCmp" class="btn btn-ghost" title="对照精读：左大纲 ｜ 中左原文 ｜ 中右译文 ｜ 右 AI 助读。先识别版面，再逐段对照翻译，点原文译文同步定位"><svg class="ico ico" aria-hidden="true"><use href="#i-grid"/></svg> 对照精读</button>
+        <button id="prLayoutBtn" class="btn btn-ghost" title="版面解析：识别图表 / 表格 / 公式区域，悬停看类型、点击放大或送 AI 解释"><svg class="ico ico" aria-hidden="true"><use href="#i-puzzle"/></svg> 版面</button>
         <!-- 自动对照管线状态：打开文献 → 自动版面识别 → 自动整篇翻译 → 自动进对照精读 -->
         <span id="cmpAutoChip" class="cmp-auto-chip hidden"></span>
       </div>
@@ -1447,7 +1531,7 @@
         </select>
         <span class="tb-label">行距</span>
         <input id="epLineHeight" class="ep-range" type="range" min="1.2" max="2.4" step="0.1" value="1.6" title="行距" />
-        <button id="epThemeToggle" class="btn btn-ghost" title="切换阅读主题：浅色 → 米黄 → 深色">🌗 主题</button>
+        <button id="epThemeToggle" class="btn btn-ghost" title="切换阅读主题：浅色 → 米黄 → 深色"><svg class="ico ico" aria-hidden="true"><use href="#i-sun"/></svg> 主题</button>
         <div class="pr-nav">
           <button id="epPrev" class="btn btn-ghost" title="上一章 / 上一页">‹</button>
           <span id="epLocLabel" class="pr-page-total">—</span>
@@ -1543,7 +1627,7 @@
                 <button id="pnMindZoomIn" class="pn-mini-btn" title="放大">＋</button>
                 <button id="pnMindZoomOut" class="pn-mini-btn" title="缩小">－</button>
                 <span class="pn-mind-sep"></span>
-                <button id="pnMindStyleBtn" class="pn-mini-btn" title="打开样式面板：结构、配色方案、背景、字体、分支线">🎨 样式</button>
+                <button id="pnMindStyleBtn" class="pn-mini-btn" title="打开样式面板：结构、配色方案、背景、字体、分支线"><svg class="ico ico" aria-hidden="true"><use href="#i-swatch"/></svg> 样式</button>
                 <span class="pn-mind-spacer"></span>
                 <button id="pnMindExportXmind" class="pn-mini-btn pn-mini-primary" title="导出为 .xmind 文件（可用 XMind 打开继续编辑）">⤓ .xmind</button>
                 <button id="pnMindExportPng" class="pn-mini-btn" title="导出为 PNG 图片">⤓ PNG</button>
@@ -1554,7 +1638,7 @@
               <aside class="pn-mind-style hidden" id="pnMindStylePanel" aria-label="思维导图样式">
                 <div class="pn-ms-head">
                   <span class="pn-ms-title">样式</span>
-                  <button class="pn-ms-close" id="pnMindStyleClose" title="关闭样式面板" aria-label="关闭">✕</button>
+                  <button class="pn-ms-close" id="pnMindStyleClose" title="关闭样式面板" aria-label="关闭"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button>
                 </div>
                 <div class="pn-ms-body">
                   <div class="pn-ms-group">
@@ -1599,7 +1683,7 @@
                     <div class="pn-ms-label">导图样式</div>
                     <label class="pn-ms-check">
                       <input type="checkbox" id="pnMsRainbow" />
-                      <span>🌈 彩虹分支</span>
+                      <span>彩虹分支</span>
                     </label>
                     <label class="pn-ms-check">
                       <input type="checkbox" id="pnMsAutoBalance" checked />
@@ -1636,10 +1720,10 @@
            ② 跑过全文翻译后换成「已翻译」版（GET /jobs 里 kind==='align' 的产物）
          所以从结构切到已翻译不会错位，用户点哪一段就按需翻哪一段（走 /api/translate）。 -->
     <div id="prCmpMode" class="pr-cmp-mode hidden">
-      <!-- 启动面板：选翻译引擎整篇翻译。四区已经就绪时它是可收起的浮层（右上 ✕）。 -->
+      <!-- 启动面板：选翻译引擎整篇翻译。四区已经就绪时它是可收起的浮层（右上关闭按钮）。 -->
       <div class="cmp-start" id="cmpStart">
         <div class="cmp-start-card">
-          <div class="cmp-start-emoji">📖</div>
+          <div class="cmp-start-emoji"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-book"/></svg></div>
           <h3 class="cmp-start-title">对照精读</h3>
           <p class="cmp-start-desc" id="cmpStartDesc">
             把这篇 PDF 的<b>版面识别结果</b>逐段译成目标语言：左侧列出本章大纲，中间左右对照原文与译文，
@@ -1658,7 +1742,7 @@
             </label>
           </div>
           <label class="ml-switch cmp-start-switch"><input type="checkbox" id="cmpRefs" /> 参考文献也翻译</label>
-          <button id="cmpStartClose" class="cmp-start-close hidden" title="收起，直接看四区对照">✕</button>
+          <button id="cmpStartClose" class="cmp-start-close hidden" title="收起，直接看四区对照"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button>
           <div class="cmp-start-actions">
             <button id="cmpStartBtn" class="btn btn-primary">开始对照翻译</button>
             <button id="cmpLoadBtn" class="btn btn-ghost" title="不重新翻译，直接读取这篇已经生成过的对照数据">读取已有结果</button>
@@ -1694,7 +1778,7 @@
         <span class="cmp-engine-state" id="cmpEngineState"></span>
         <span class="cmp-hint" id="cmpSyncHint"></span>
         <span class="cmp-bar-spacer"></span>
-        <button id="cmpStartToggle" class="cmp-bar-btn" title="选择翻译引擎，把整篇按版面块逐段翻译">🌐 整篇翻译</button>
+        <button id="cmpStartToggle" class="cmp-bar-btn" title="选择翻译引擎，把整篇按版面块逐段翻译"><svg class="ico ico" aria-hidden="true"><use href="#i-globe"/></svg>整篇翻译</button>
       </div>
 
       <div class="cmp-panes" id="cmpPanes">
@@ -1757,7 +1841,7 @@
         <div id="prMdViewer" class="pr-md-viewer hidden">
           <div class="pr-md-toolbar">
             <span id="prMdTitle" class="pr-md-title">Markdown 译文</span>
-            <button id="prMdClose" class="btn btn-ghost btn-sm" title="回到原文 PDF（译文保留，可随时切回）">✕ 关闭译文</button>
+            <button id="prMdClose" class="btn btn-ghost btn-sm" title="回到原文 PDF（译文保留，可随时切回）"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg> 关闭译文</button>
           </div>
           <div id="prMdContent" class="pr-md-content"></div>
         </div>
@@ -1768,10 +1852,10 @@
       <!-- 右：功能面板（划词翻译 / 解析结果 / AI 对话） -->
       <aside class="pr-trans-panel">
         <div class="pr-tabs" id="prTabs">
-          <button class="pr-tab" data-prtab="translate" id="prTabTranslate">🌐 划词翻译</button>
-          <button class="pr-tab active" data-prtab="analysis" id="prTabAnalysis">📋 解析结果</button>
-          <button class="pr-tab" data-prtab="notes" id="prTabNotes">📝 笔记</button>
-          <button class="pr-tab" data-prtab="chat" id="prTabChat">🤖 AI 助读</button>
+          <button class="pr-tab" data-prtab="translate" id="prTabTranslate"><svg class="ico ico" aria-hidden="true"><use href="#i-globe"/></svg>划词翻译</button>
+          <button class="pr-tab active" data-prtab="analysis" id="prTabAnalysis"><svg class="ico ico" aria-hidden="true"><use href="#i-grid"/></svg>解析结果</button>
+          <button class="pr-tab" data-prtab="notes" id="prTabNotes"><svg class="ico ico" aria-hidden="true"><use href="#i-note"/></svg>笔记</button>
+          <button class="pr-tab" data-prtab="chat" id="prTabChat"><svg class="ico ico" aria-hidden="true"><use href="#i-ai"/></svg>AI 助读</button>
         </div>
 
         <!-- ---------- 划词翻译 ----------
@@ -1799,16 +1883,16 @@
              阅读成果管理里的附件时没有对应记录，按来源整块隐藏（见 app.js 的 applyReaderMode）。 -->
         <div class="pr-panel-body pr-pane hidden" data-prpane="notes">
           <div id="prLitOnly">
-            <div class="pr-panel-sub">💭 我的思考 <span class="side-count" id="prThoughtsState"></span></div>
+            <div class="pr-panel-sub"><svg class="ico ico" aria-hidden="true"><use href="#i-ideas"/></svg>我的思考 <span class="side-count" id="prThoughtsState"></span></div>
             <textarea id="prThoughts" class="pr-src pr-thoughts" placeholder="阅读时随手记录自己的小想法：疑问、灵感、与课题的联系…保存后写入文献库的「我的思考」字段"></textarea>
             <button id="btnPrThoughtsSave" class="btn btn-primary w100" style="margin-top:6px">保存思考</button>
             <div class="pr-panel-sep"></div>
             <div class="pr-panel-sub pr-notes-head">
-              <span>📝 笔记与高亮 <span class="side-count" id="prNotesCount">0</span></span>
+              <span><svg class="ico ico" aria-hidden="true"><use href="#i-note"/></svg>笔记与高亮 <span class="side-count" id="prNotesCount">0</span></span>
               <span class="pr-notes-head-actions">
                 <button class="pr-mini-btn" id="prNotesPrev" title="跳到上一处批注">↑</button>
                 <button class="pr-mini-btn" id="prNotesNext" title="跳到下一处批注">↓</button>
-                <button class="pr-mini-btn" id="prNotesExport" title="把这篇文献的笔记与高亮导出为 Markdown">📤</button>
+                <button class="pr-mini-btn" id="prNotesExport" title="把这篇文献的笔记与高亮导出为 Markdown"><svg class="ico ico" aria-hidden="true"><use href="#i-export"/></svg></button>
               </span>
             </div>
             <div class="pr-notes-filter" id="prNotesFilter">
@@ -1849,15 +1933,15 @@
           <div class="pr-chat-bar">
             <span class="pr-chat-bar-title">对话记录 <span class="pr-chat-bar-note">按文献保存，退出应用不丢</span></span>
             <span class="pr-chat-bar-actions">
-              <button id="btnPrChatSummary" class="btn btn-ghost btn-sm" title="把当前页 / 当前章节的正文交给 AI 总结">📝 <span id="prSummaryLabel">总结本页</span></button>
-              <button id="prChatClear" class="btn btn-ghost btn-sm" disabled title="清除本篇论文的对话记录">🗑 清除记录</button>
+              <button id="btnPrChatSummary" class="btn btn-ghost btn-sm" title="把当前页 / 当前章节的正文交给 AI 总结"><svg class="ico ico" aria-hidden="true"><use href="#i-note"/></svg><span id="prSummaryLabel">总结本页</span></button>
+              <button id="prChatClear" class="btn btn-ghost btn-sm" disabled title="清除本篇论文的对话记录"><svg class="ico ico" aria-hidden="true"><use href="#i-trash"/></svg> 清除记录</button>
             </span>
           </div>
           <div id="prChatMsgs" class="pr-chat-msgs"></div>
-          <!-- AI 引用池：划词时点「📌 引用」累积多段原文，提问时一起交给 AI -->
+          <!-- AI 引用池：划词时点「引用」累积多段原文，提问时一起交给 AI -->
           <div id="prCitePoolWrap" class="pr-cite-pool hidden">
             <div class="pr-cite-head">
-              <span class="pr-cite-title">📌 引用池 <span class="side-count" id="prCiteCount">0</span>
+              <span class="pr-cite-title"><svg class="ico ico" aria-hidden="true"><use href="#i-link"/></svg>引用池 <span class="side-count" id="prCiteCount">0</span>
                 <span class="pr-cite-hint">提问时连同这些原文一起交给 AI，发出后自动清空</span></span>
               <span class="pr-cite-actions">
                 <button class="btn btn-ghost btn-sm" id="prCiteAsk" title="就以引用池里的内容向 AI 提问">就这些提问</button>
@@ -1868,8 +1952,8 @@
           </div>
           <div id="prChatAttach" class="pr-chat-attach"></div>
           <div class="pr-chat-input-row">
-            <button id="btnPrChatImg" class="pr-chat-icon-btn" title="上传图片（截图 / 图表 / 手写笔记），AI 会看图回答">🖼️</button>
-            <button id="btnPrChatText" class="pr-chat-icon-btn" title="把当前页文字附给 AI">📄</button>
+            <button id="btnPrChatImg" class="pr-chat-icon-btn" title="上传图片（截图 / 图表 / 手写笔记），AI 会看图回答"><svg class="ico ico" aria-hidden="true"><use href="#i-image"/></svg></button>
+            <button id="btnPrChatText" class="pr-chat-icon-btn" title="把当前页文字附给 AI"><svg class="ico ico" aria-hidden="true"><use href="#i-file"/></svg></button>
             <input id="prChatFile" type="file" accept="image/*" multiple class="hidden" />
             <textarea id="prChatInput" class="pr-chat-input" rows="1" placeholder="就这篇论文提问，Enter 发送 / Shift+Enter 换行。可粘贴或上传图片…"></textarea>
             <button id="btnPrChatSend" class="btn btn-primary pr-chat-send">发送</button>
@@ -1883,12 +1967,12 @@
       <!-- 高亮 / 下划线 / 笔记都会写回「文献库」的 annotations 字段；成果管理的附件没有文献记录，
            按来源整体隐藏（见 app.js 的 applyReaderMode），只保留「复制 / 翻译」。 -->
       <span class="pr-sel-sep" data-litonly></span>
-      <button class="pr-sel-btn" data-sel="highlight" data-litonly title="高亮选中文字"><span class="pr-sel-ico">🖍️</span>高亮</button>
+      <button class="pr-sel-btn" data-sel="highlight" data-litonly title="高亮选中文字"><span class="pr-sel-ico"><svg class="ico ico" aria-hidden="true"><use href="#i-pen"/></svg></span>高亮</button>
       <button class="pr-sel-btn" data-sel="underline" data-litonly title="给选中文字加下划线"><span class="pr-sel-ico pr-ico-u">U</span>下划线</button>
-      <button class="pr-sel-btn" data-sel="note" data-litonly title="写笔记"><span class="pr-sel-ico">📝</span>笔记</button>
-      <button class="pr-sel-btn" data-sel="cite" data-litonly title="把选中文字放进 AI 引用池，可累积多段后一起提问"><span class="pr-sel-ico">📌</span>引用</button>
+      <button class="pr-sel-btn" data-sel="note" data-litonly title="写笔记"><span class="pr-sel-ico"><svg class="ico ico" aria-hidden="true"><use href="#i-note"/></svg></span>笔记</button>
+      <button class="pr-sel-btn" data-sel="cite" data-litonly title="把选中文字放进 AI 引用池，可累积多段后一起提问"><span class="pr-sel-ico"><svg class="ico ico" aria-hidden="true"><use href="#i-link"/></svg></span>引用</button>
       <span class="pr-sel-sep"></span>
-      <button class="pr-sel-btn" data-sel="translate" title="翻译选中文字"><span class="pr-sel-ico">🌐</span>翻译</button>
+      <button class="pr-sel-btn" data-sel="translate" title="翻译选中文字"><span class="pr-sel-ico"><svg class="ico ico" aria-hidden="true"><use href="#i-globe"/></svg></span>翻译</button>
     </div>
     <!-- 笔记输入浮层 -->
     <div id="prPopover" class="pr-popover hidden"></div>
@@ -1900,7 +1984,7 @@
       <div class="pr-sel-trans-head">
         <span class="pr-sel-trans-title" id="prSelTransTitle">译文</span>
         <button class="pr-sel-trans-copy" id="prSelTransCopy" title="复制译文">复制</button>
-        <button class="pr-sel-trans-close" id="prSelTransClose" title="关闭">✕</button>
+        <button class="pr-sel-trans-close" id="prSelTransClose" title="关闭"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
       <div class="pr-sel-trans-body" id="prSelTransBody"></div>
     </div>
@@ -1916,7 +2000,7 @@
           <button class="btn btn-ghost" id="pbpZoomOut" title="缩小">－</button>
           <button class="btn btn-ghost" id="pbpZoomFit" title="适应窗口">适应</button>
           <button class="btn btn-ghost" id="pbpZoomIn" title="放大">＋</button>
-          <button class="btn btn-ghost" id="pbpAsk" title="把这张图交给 AI 解释（自动用视觉模型看图）">✨ AI 解释</button>
+          <button class="btn btn-ghost" id="pbpAsk" title="把这张图交给 AI 解释（自动用视觉模型看图）"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-ai"/></svg>AI 解释</button>
           <button class="btn btn-ghost" id="pbpLatex" title="让 AI 把图中的公式转成 LaTeX">∑ 转 LaTeX</button>
           <button class="btn" id="pbpClose">关闭</button>
         </div>
@@ -1939,7 +2023,7 @@
     <div class="ob-card" id="obCard">
       <div class="ob-progress"><div class="ob-progress-bar" id="obProgressBar"></div></div>
       <div class="ob-step-badge" id="obStepBadge">1 / 8</div>
-      <div class="ob-emoji" id="obEmoji">👋</div>
+      <div class="ob-emoji" id="obEmoji"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-ai"/></svg></div>
       <h2 class="ob-title" id="obTitle"></h2>
       <p class="ob-desc" id="obDesc"></p>
       <ul class="ob-points" id="obPoints"></ul>

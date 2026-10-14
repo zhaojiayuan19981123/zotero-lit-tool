@@ -139,6 +139,27 @@
   let updateNotifyGate = false;
   let updateNotifyTimer = null;
 
+  // ============ 视图元信息（顶栏「当前页面」指示 + 文档标题） ============
+  // 15 个模块按「概览 / 文献 / 研究 / 写作 / 工具」五组归位后，靠这条副标题说明
+  // 「这一屏是干什么的」，降低模块之间的迷路感。
+  const VIEW_META = {
+    home: { name: '首页', sub: '今日概览与科研日历' },
+    library: { name: '文献中心', sub: '你的全部文献与批量解析' },
+    thesis: { name: '学位论文', sub: '学位论文库与精读' },
+    topjournals: { name: '顶刊追踪', sub: '目标期刊动态与投稿窗口' },
+    papers: { name: '论文进度', sub: '在投 / 返修论文的推进状态' },
+    projects: { name: '项目管理', sub: '课题、文献与任务的归集' },
+    tasks: { name: '任务安排', sub: '待办清单与时间安排' },
+    mail: { name: '邮箱', sub: '期刊来信与导师沟通' },
+    notes: { name: '研究记录', sub: '实验记录与过程笔记' },
+    markdown: { name: 'Markdown 笔记', sub: '结构化写作与思维导图' },
+    ideas: { name: '灵感孵化', sub: '零散想法沉淀成选题' },
+    reviewer: { name: '模拟审稿', sub: '投稿前自查与审稿意见预演' },
+    achievements: { name: '成果管理', sub: '论文、专利与获奖归档' },
+    ai: { name: 'AI 助手', sub: '与已有文献对话、生成材料' },
+    worldlib: { name: '世图下载助手', sub: '批量检索与下载文献' },
+  };
+
   const $ = (id) => document.getElementById(id);
   const el = {
     searchInput: $('searchInput'), statusFilter: $('statusFilter'), sortField: $('sortField'),
@@ -298,10 +319,8 @@
     if (settings.colWidths && typeof settings.colWidths === 'object' && !Array.isArray(settings.colWidths)) {
       colWidths = { ...settings.colWidths };
     }
-    // 旧版本的默认紫色在 1.4.0 迁移为新的研究蓝；用户选择的其他自定义色保留。
-    renderThemePresets();
-    const savedTheme = String(settings.themeColor || '').toUpperCase();
-    applyTheme(!savedTheme || savedTheme === '#81308C' ? DEFAULT_THEME : settings.themeColor, false);
+    // 主题：三套模式（浅色 / 深色 / 护眼），可跟随系统
+    initTheme();
     // 恢复全局字体与字号
     applyFont(settings.appFont || '');
     applyFontSize(settings.fontSize || 'medium');
@@ -502,7 +521,8 @@
     if (tab !== 'all') list = list.filter((i) => (i.readingProgress || '未阅读') === tab);
     const st = el.statusFilter.value;
     if (st !== 'all') list = list.filter((i) => i.status === st);
-    const q = el.searchInput.value.trim().toLowerCase();
+    // 搜索关键字来源：侧边栏输入框（顶栏那个已随重构移除），兜底回落到旧 #searchInput
+    const q = (($('sideSearchInput') || el.searchInput)?.value || '').trim().toLowerCase();
     if (q) list = list.filter((i) => Object.values(CONTENT_COLS).map((c) => i[c.key] || '').join(' ').toLowerCase().includes(q));
     const f = el.sortField.value;
     list.sort((a, b) => {
@@ -1319,52 +1339,79 @@
     return '#' + to(f(0)) + to(f(8)) + to(f(4));
   }
 
-  // 主色驱动操作区和侧边栏的同一套主题，语义色仍保持稳定。
-  function deriveTheme(primary) {
-    const c = hexToHsl(primary);
-    if (!c) return null;
-    const cl = (v) => Math.max(0, Math.min(100, v));
-    return {
-      '--primary': primary,
-      '--primary-hover': hslToHex(c.h, cl(c.s + 4), cl(c.l * 0.82)),
-      '--primary-light': hslToHex(c.h, cl(c.s - 6), cl(c.l * 1.18 + 6)),
-      '--primary-soft': hslToHex(c.h, cl(c.s * 0.42), 95.5),
-      '--btn-border': hslToHex(c.h, cl(c.s * 0.20), 84),
-      '--side-1': hslToHex(c.h, cl(c.s * 0.42 + 18), 26),
-      '--side-2': hslToHex(c.h, cl(c.s * 0.38 + 14), 18),
-      '--side-text': hslToHex(c.h, cl(c.s * 0.20 + 12), 92),
-      '--side-muted': hslToHex(c.h, cl(c.s * 0.20 + 10), 72),
-      '--side-hover': `hsla(${Math.round(c.h)}, ${Math.round(cl(c.s * 0.42 + 12))}%, 86%, .12)`,
-      '--side-active': `hsla(${Math.round(c.h)}, ${Math.round(cl(c.s * 0.42 + 12))}%, 92%, .19)`,
-      '--side-border': `hsla(${Math.round(c.h)}, ${Math.round(cl(c.s * 0.3 + 8))}%, 96%, .18)`,
-      '--side-marker': hslToHex(c.h, cl(c.s * 0.64 + 12), 72),
-      '--accent-2': '#D7654F',
-    };
+  // ============ 主题模式（浅色 / 深色 / 护眼） ============
+  // 三套主题的完整色值定义在 style.css 的 [data-theme="..."] 块里，
+  // 这里只负责切换 <html data-theme> 属性 + 持久化偏好。
+  const THEME_MODES = [
+    { id: 'light', name: '浅色', icon: 'sun', desc: '明亮清爽，白天首选' },
+    { id: 'dark', name: '深色', icon: 'moon', desc: '低亮度，夜间护眼' },
+    { id: 'sepia', name: '护眼', icon: 'book', desc: '暖米色，长时间阅读' },
+  ];
+  const MODE_KEY = 'uiThemeMode';
+  const FOLLOW_KEY = 'uiThemeFollowSystem';
+
+  function systemMode() {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
 
-  function applyTheme(primary, persist) {
-    const vars = deriveTheme(primary);
-    if (!vars) { toast('色值格式不正确，请输入如 #176B87 的色号', 'error'); return; }
-    const root = document.documentElement;
-    for (const [k, v] of Object.entries(vars)) root.style.setProperty(k, v);
-    $('themeColorPicker').value = primary;
-    $('themeColorInput').value = primary;
-    document.querySelectorAll('.theme-swatch').forEach((s) => s.classList.toggle('active', s.dataset.color === primary.toLowerCase()));
+  function applyThemeMode(mode, persist) {
+    const valid = THEME_MODES.some((m) => m.id === mode) ? mode : 'light';
+    document.documentElement.setAttribute('data-theme', valid);
+    document.querySelectorAll('.theme-mode-card').forEach((c) => {
+      c.classList.toggle('active', c.dataset.mode === valid);
+    });
+    try { localStorage.setItem(MODE_KEY, valid); } catch { /* 隐私模式忽略 */ }
     if (persist) {
-      api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ themeColor: primary }) })
-        .then((s) => { settings = s; })
-        .catch(() => {});
+      api('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ themeMode: valid }),
+      }).then((s) => { settings = s; }).catch(() => {});
     }
   }
 
-  function renderThemePresets() {
-    const box = $('themePresets');
-    box.innerHTML = THEME_PRESETS.map((t) => `
-      <div class="theme-swatch" data-color="${t.primary}" title="${esc(t.name)}（${t.primary}）">
-        <span class="theme-dot" style="background:${t.primary}"></span>
-        <span>${esc(t.name)}</span>
-      </div>`).join('');
-    box.querySelectorAll('.theme-swatch').forEach((s) => s.addEventListener('click', () => applyTheme(s.dataset.color, true)));
+  function renderThemeModes() {
+    const box = $('themeModes');
+    if (!box) return;
+    box.innerHTML = THEME_MODES.map((m) => `
+      <button type="button" class="theme-mode-card" data-mode="${m.id}">
+        <span class="tmc-preview tmc-${m.id}">
+          <span class="tmc-side"></span>
+          <span class="tmc-main"><i></i><i></i><i></i></span>
+        </span>
+        <span class="tmc-head">
+          <svg class="ico" aria-hidden="true"><use href="#i-${m.icon}"/></svg>
+          <span class="tmc-name">${esc(m.name)}</span>
+        </span>
+        <span class="tmc-desc">${esc(m.desc)}</span>
+      </button>`).join('');
+    box.querySelectorAll('.theme-mode-card').forEach((c) => {
+      c.addEventListener('click', () => { setFollowSystem(false); applyThemeMode(c.dataset.mode, true); });
+    });
+  }
+
+  function setFollowSystem(on) {
+    try { localStorage.setItem(FOLLOW_KEY, on ? '1' : '0'); } catch { /* ignore */ }
+    const cb = $('themeFollowSystem');
+    if (cb) cb.checked = on;
+    if (on) applyThemeMode(systemMode(), false);
+  }
+
+  function initTheme() {
+    renderThemeModes();
+    // 迁移：settings.themeMode 优先；老版本只有 themeColor，回落到浅色
+    const saved = String(settings.themeMode || localStorage.getItem(MODE_KEY) || 'light');
+    let follow = localStorage.getItem(FOLLOW_KEY) === '1';
+    // 首次使用（无任何偏好）时跟随系统
+    if (!settings.themeMode && !localStorage.getItem(MODE_KEY)) follow = true;
+    const cb = $('themeFollowSystem');
+    if (cb) cb.checked = follow;
+    applyThemeMode(follow ? systemMode() : saved, false);
+    if (window.matchMedia) {
+      const mq = window.matchMedia('(prefers-color-scheme: dark)');
+      const onChange = () => { if (localStorage.getItem(FOLLOW_KEY) === '1') applyThemeMode(systemMode(), false); };
+      mq.addEventListener ? mq.addEventListener('change', onChange) : mq.addListener(onChange);
+    }
   }
 
   // ============ 全局字体（英文统一 Times New Roman，中文可选宋体/黑体/楷体/行楷等） ============
@@ -2383,7 +2430,26 @@
       if (!el.fieldsPop.classList.contains('hidden') && !el.fieldsPop.contains(e.target) && e.target !== $('btnFields')) el.fieldsPop.classList.add('hidden');
     });
 
-    el.searchInput.addEventListener('input', render);
+    // 搜索框已从顶栏迁到侧边栏（见 index.html 的 .side-search）：
+    // 侧边栏那个 #sideSearchInput 才是用户能看到的输入框，这里让它驱动
+    // 同一份过滤状态（filterText），两处口径完全一致。
+    const sideSearch = $('sideSearchInput');
+    const sideSearchClear = $('sideSearchClear');
+    const syncSearchClear = () => sideSearchClear?.classList.toggle('hidden', !sideSearch?.value);
+    const applySearch = (value) => {
+      if (el.searchInput) el.searchInput.value = value;
+      if (sideSearch) sideSearch.value = value;
+      syncSearchClear();
+      render();
+    };
+    if (sideSearch) {
+      sideSearch.addEventListener('input', () => applySearch(sideSearch.value));
+      sideSearch.addEventListener('keydown', (e) => { if (e.key === 'Escape') applySearch(''); });
+      sideSearchClear?.addEventListener('click', () => { applySearch(''); sideSearch.focus(); });
+      syncSearchClear();
+    }
+    // #searchInput 已从页面移除（顶栏改显示当前页面标题）。保留兜底，避免老 DOM 下报错。
+    if (el.searchInput) el.searchInput.addEventListener('input', render);
     el.statusFilter.addEventListener('change', render);
     el.sortField.addEventListener('change', render);
     $('btnSortOrder').addEventListener('click', () => {
@@ -2541,14 +2607,10 @@
     $('btnWlDownloadAll').addEventListener('click', () => wlDownloadImport(false));
     $('btnWlImport').addEventListener('click', wlImport);
 
-    // 主题配色
-    $('themeColorPicker').addEventListener('input', () => {
-      $('themeColorInput').value = $('themeColorPicker').value;
-    });
-    const applyThemeFromInput = () => applyTheme($('themeColorInput').value.trim(), true);
-    $('btnThemeApply').addEventListener('click', applyThemeFromInput);
-    $('themeColorInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') applyThemeFromInput(); });
-    $('btnThemeReset').addEventListener('click', () => applyTheme(DEFAULT_THEME, true));
+    // ---- 主题 ----
+    // 旧的「主题色选择器」（#themeColorPicker / #themeColorInput / #btnThemeApply /
+    // #btnThemeReset，基于 HSL 单色相派生）已在 v1.25.0 整体移除，改为三套完整的
+    // data-theme 主题（浅色 / 深色 / 护眼），渲染与切换逻辑都在上面的 initTheme() 里。
     // ---- 多模型配置 ----
     $('btnMlAdd').addEventListener('click', () => openMlEditor(null));
     $('btnMlAddPreset').addEventListener('click', addCommonPresets);
@@ -9392,6 +9454,13 @@
     document.querySelectorAll('.nav-item[data-view]').forEach((n) => n.classList.toggle('active', n.dataset.view === v));
     const map = { home: 'viewHome', library: 'viewLibrary', thesis: 'viewThesis', achievements: 'viewAchievements', topjournals: 'viewTopJournals', projects: 'viewProjects', tasks: 'viewTasks', papers: 'viewPapers', notes: 'viewNotes', markdown: 'viewMarkdown', ideas: 'viewIdeas', reviewer: 'viewReviewer', ai: 'viewAI', worldlib: 'viewWorldlib', mail: 'viewMail' };
     for (const [key, id] of Object.entries(map)) $(id).classList.toggle('hidden', key !== v);
+    // 顶栏「当前页面」指示：15 个模块靠它定位，避免在导航之间迷路
+    const page = VIEW_META[v];
+    if (page) {
+      const t = $('topbarPageTitle');
+      if (t) { t.querySelector('b').textContent = page.name; $('topbarPageSub').textContent = page.sub; }
+      document.title = `${page.name} · 一站式科研终端（经管版）`;
+    }
     const isLib = v === 'library';
     // 文献中心：主区固定不滚动，表格容器内滚动（横向滚动条贴可视区底部）
     document.querySelector('.main-area').classList.toggle('lib-mode', isLib);
@@ -9407,7 +9476,9 @@
     // 否则它们挂在 body 上会一直盖着别的视图
     if (v !== 'thesis') window.ThesisView?.close?.();
     if (v !== 'achievements') window.AchievementView?.close?.();
-    $('searchInput').classList.toggle('hidden', !isLib);
+    // 顶栏搜索已移入侧边栏（只对文献中心生效），这里改用 CSS 控制整块搜索区的显隐
+    const searchBox = document.querySelector('.side-search');
+    if (searchBox) searchBox.classList.toggle('hidden', !isLib);
     $('btnParseAll').classList.toggle('hidden', !isLib);
     $('btnRefreshRanks').classList.toggle('hidden', !isLib);
     $('btnExport').classList.toggle('hidden', !isLib);
@@ -9482,9 +9553,11 @@
     // 问候横幅（个人资料同步）
     const sub = [profile.school, profile.field, profile.grade].filter(Boolean).join(' · ');
     $('homeAvatar').textContent = profile.avatar || '🎓';
-    $('profileAvatar').textContent = profile.avatar || '🎓';
-    $('homeGreet').textContent = `${greetWord()}，${profile.name || '研究生'}`;
+    // 侧边栏头像：用姓名首字替代 emoji（🎓 属于"AI 模板式图标"，且三套主题下颜色不可控）。
+    // 用户自定义头像（profile.avatar）仍优先。
+    $('profileAvatar').textContent = profile.avatar || String(profile.name || '研').trim().slice(0, 1) || '研';
     $('profileName').textContent = profile.name || '研究生';
+    $('homeGreet').textContent = `${greetWord()}，${profile.name || '研究生'}`;
     $('homeSub').textContent = sub || '完善个人资料后显示学校 / 专业 / 年级';
     $('profileSub').textContent = sub || '完善个人资料';
     const encouragements = [

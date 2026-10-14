@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-demo="light">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>一站式科研终端 · UI 重构设计说明</title>
+<style>
+  :root, [data-demo="light"] {
+    --bg:#f2f2f7; --surface:#fff; --surface-2:#f9f9fb; --border:#d8d8de; --border-soft:#ebebef;
+    --text:#1c1c1e; --text-2:#545458; --text-3:#8a8a8e;
+    --primary:#5856d6; --primary-soft:#eeeefc; --accent:#007aff;
+    --green:#248a3d; --orange:#b25000; --red:#d70015;
+    color-scheme: light;
+  }
+  [data-demo="dark"] {
+    --bg:#000; --surface:#1c1c1e; --surface-2:#2c2c2e; --border:#38383a; --border-soft:#2c2c2e;
+    --text:#f2f2f7; --text-2:#aeaeb2; --text-3:#8e8e93;
+    --primary:#7d7aff; --primary-soft:#23234a; --accent:#0a84ff;
+    --green:#30d158; --orange:#ff9f0a; --red:#ff453a;
+    color-scheme: dark;
+  }
+  [data-demo="sepia"] {
+    --bg:#f4ede0; --surface:#fdf8ee; --surface-2:#f6efe1; --border:#ddd2b8; --border-soft:#e8dfc9;
+    --text:#3a3327; --text-2:#6b6252; --text-3:#918876;
+    --primary:#8a6b3f; --primary-soft:#efe6d3; --accent:#a8762c;
+    --green:#3d7a3d; --orange:#9c6212; --red:#b03a2e;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; padding:28px 32px 64px; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    font-size:14px; line-height:1.65; transition:background .2s, color .2s;
+  }
+  h1 { font-size:23px; margin:0 0 4px; letter-spacing:-.01em; }
+  h2 { font-size:16px; margin:36px 0 12px; padding-bottom:7px; border-bottom:1px solid var(--border-soft); }
+  h3 { font-size:13.5px; margin:0 0 9px; color:var(--text-2); font-weight:600; }
+  p { margin:0 0 10px; color:var(--text-2); }
+  .sub { color:var(--text-3); font-size:12.5px; margin:0 0 22px; }
+  code { background:var(--surface-2); border:1px solid var(--border-soft); border-radius:4px;
+         padding:1px 5px; font-family:ui-monospace,Consolas,monospace; font-size:12px; color:var(--text); }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px 18px; margin-bottom:14px; }
+
+  /* 主题切换条 */
+  .bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:22px; }
+  .bar b { font-size:12.5px; color:var(--text-2); font-weight:600; margin-right:2px; }
+  .tbtn { padding:7px 15px; border-radius:9px; border:1.5px solid var(--border); background:var(--surface);
+          color:var(--text); cursor:pointer; font-family:inherit; font-size:12.5px; font-weight:600;
+          transition:border-color .15s, background .15s; }
+  .tbtn:hover { border-color:var(--text-3); }
+  .tbtn.on { border-color:var(--primary); background:var(--primary-soft); color:var(--primary); }
+
+  /* 三主题色卡 */
+  .swatches { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:14px; }
+  .theme-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:14px; }
+  .theme-card .ttl { font-weight:700; font-size:14px; margin-bottom:3px; }
+  .theme-card .note { font-size:11.5px; color:var(--text-3); margin-bottom:11px; }
+  .row { display:flex; align-items:center; gap:8px; margin-bottom:6px; font-size:11.5px; color:var(--text-3); }
+  .row .k { width:74px; flex-shrink:0; }
+  .row .hex { font-family:ui-monospace,Consolas,monospace; font-size:11px; color:var(--text-2); }
+  .chip { width:34px; height:22px; border-radius:6px; border:1px solid rgba(128,128,128,.28); flex-shrink:0; }
+  .mini { display:flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; height:44px; margin-bottom:10px; }
+  .mini .s { width:30%; } .mini .m { flex:1; padding:6px; display:flex; flex-direction:column; gap:4px; }
+  .mini .m i { display:block; height:4px; border-radius:2px; }
+  .m-light .s { background:#f7f7fa; } .m-light .m { background:#fff; }
+  .m-light .m i:nth-child(1) { background:#5856d6; width:58%; } .m-light .m i:nth-child(2) { background:#ebebef; }
+  .m-light .m i:nth-child(3) { background:#ebebef; width:70%; }
+  .m-dark .s { background:#161618; } .m-dark .m { background:#1c1c1e; }
+  .m-dark .m i:nth-child(1) { background:#7d7aff; width:58%; } .m-dark .m i:nth-child(2) { background:#38383a; }
+  .m-dark .m i:nth-child(3) { background:#38383a; width:70%; }
+  .m-sepia .s { background:#f6efe1; } .m-sepia .m { background:#fdf8ee; }
+  .m-sepia .m i:nth-child(1) { background:#8a6b3f; width:58%; } .m-sepia .m i:nth-child(2) { background:#e8dfc9; }
+  .m-sepia .m i:nth-child(3) { background:#e8dfc9; width:70%; }
+
+  /* 侧边栏 IA 示意 */
+  .ia { display:grid; grid-template-columns:repeat(auto-fit,minmax(158px,1fr)); gap:12px; }
+  .ia-col { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:11px 12px; }
+  .ia-col > .g { font-size:10.5px; font-weight:700; letter-spacing:.06em; color:var(--text-3);
+                 margin-bottom:7px; text-transform:none; }
+  .ia-item { display:flex; align-items:center; gap:8px; padding:5px 7px; border-radius:7px;
+             font-size:12.5px; color:var(--text); margin-bottom:1px; }
+  .ia-item.hi { background:var(--primary-soft); color:var(--primary); font-weight:700; }
+  .ia-item svg { width:15px; height:15px; flex-shrink:0; fill:none; stroke:currentColor;
+                 stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; opacity:.75; }
+  .ia-item.hi svg { opacity:1; }
+
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--border-soft); vertical-align:top; }
+  th { color:var(--text-3); font-weight:600; font-size:11.5px; }
+  td code { font-size:11.5px; }
+  .ok { color:var(--green); font-weight:700; }
+  ul { margin:0 0 10px; padding-left:20px; color:var(--text-2); }
+  li { margin-bottom:4px; }
+  .warn { background:var(--surface-2); border-left:3px solid var(--orange); padding:9px 13px;
+          border-radius:0 8px 8px 0; font-size:12.5px; color:var(--text-2); margin-bottom:10px; }
+  .stat { display:flex; gap:22px; flex-wrap:wrap; }
+  .stat > div b { display:block; font-size:20px; color:var(--primary); line-height:1.25; }
+  .stat > div span { font-size:11.5px; color:var(--text-3); }
+</style>
+</head>
+<body>
+
+<h1>一站式科研终端 · 界面重构说明</h1>
+<p class="sub">基于 ui-ux-pro-max 设计系统（Minimalism &amp; Swiss Style）· 目标版本 v1.25.0 · 7 个文件 · +969 / −458 行</p>
+
+<div class="bar">
+  <b>预览主题</b>
+  <button class="tbtn on" data-t="light">浅色</button>
+  <button class="tbtn" data-t="dark">深色</button>
+  <button class="tbtn" data-t="sepia">护眼</button>
+  <span style="font-size:11.5px;color:var(--text-3);margin-left:6px">← 切换即可看到整页三套配色</span>
+</div>
+
+<h2>一、三套主题的完整配色</h2>
+<p>配色参考 iOS Human Interface Guidelines。三套是<strong>各自独立的完整变量集</strong>，不是「把明暗反过来」——
+护眼模式换了整套色相（暖褐系），刻意压掉蓝光。</p>
+
+<div class="swatches">
+  <div class="theme-card">
+    <div class="mini m-light"><div class="s"></div><div class="m"><i></i><i></i><i></i></div></div>
+    <div class="ttl">浅色 Light</div>
+    <div class="note">明亮清爽，白天首选</div>
+    <div class="row"><span class="k">背景 / 卡片</span><span class="chip" style="background:#f2f2f7"></span><span class="chip" style="background:#fff"></span><span class="hex">#f2f2f7 · #ffffff</span></div>
+    <div class="row"><span class="k">正文 / 次要</span><span class="chip" style="background:#1c1c1e"></span><span class="chip" style="background:#8a8a8e"></span><span class="hex">#1c1c1e · #8a8a8e</span></div>
+    <div class="row"><span class="k">主色 / 强调</span><span class="chip" style="background:#5856d6"></span><span class="chip" style="background:#007aff"></span><span class="hex">#5856d6 · #007aff</span></div>
+    <div class="row"><span class="k">语义色</span><span class="chip" style="background:#248a3d"></span><span class="chip" style="background:#b25000"></span><span class="chip" style="background:#d70015"></span><span class="hex">成功 · 警告 · 危险</span></div>
+  </div>
+
+  <div class="theme-card">
+    <div class="mini m-dark"><div class="s"></div><div class="m"><i></i><i></i><i></i></div></div>
+    <div class="ttl">深色 Dark</div>
+    <div class="note">低亮度，夜间护眼</div>
+    <div class="row"><span class="k">背景 / 卡片</span><span class="chip" style="background:#000"></span><span class="chip" style="background:#1c1c1e"></span><span class="chip" style="background:#2c2c2e"></span><span class="hex">#000 · #1c1c1e · #2c2c2e</span></div>
+    <div class="row"><span class="k">正文 / 次要</span><span class="chip" style="background:#f2f2f7"></span><span class="chip" style="background:#aeaeb2"></span><span class="hex">#f2f2f7 · #aeaeb2</span></div>
+    <div class="row"><span class="k">主色 / 强调</span><span class="chip" style="background:#7d7aff"></span><span class="chip" style="background:#0a84ff"></span><span class="hex">#7d7aff · #0a84ff</span></div>
+    <div class="row"><span class="k">语义色</span><span class="chip" style="background:#30d158"></span><span class="chip" style="background:#ff9f0a"></span><span class="chip" style="background:#ff453a"></span><span class="hex">成功 · 警告 · 危险</span></div>
+  </div>
+
+  <div class="theme-card">
+    <div class="mini m-sepia"><div class="s"></div><div class="m"><i></i><i></i><i></i></div></div>
+    <div class="ttl">护眼 Sepia</div>
+    <div class="note">暖米色，长时间阅读</div>
+    <div class="row"><span class="k">背景 / 卡片</span><span class="chip" style="background:#f4ede0"></span><span class="chip" style="background:#fdf8ee"></span><span class="hex">#f4ede0 · #fdf8ee</span></div>
+    <div class="row"><span class="k">正文 / 次要</span><span class="chip" style="background:#3a3327"></span><span class="chip" style="background:#918876"></span><span class="hex">#3a3327 · #918876</span></div>
+    <div class="row"><span class="k">主色 / 强调</span><span class="chip" style="background:#8a6b3f"></span><span class="chip" style="background:#a8762c"></span><span class="hex">#8a6b3f · #a8762c</span></div>
+    <div class="row"><span class="k">语义色</span><span class="chip" style="background:#3d7a3d"></span><span class="chip" style="background:#9c6212"></span><span class="chip" style="background:#b03a2e"></span><span class="hex">成功 · 警告 · 危险</span></div>
+  </div>
+</div>
+
+<div class="warn" style="margin-top:14px">
+  <strong>实现方式</strong>：<code>&lt;html data-theme="light|dark|sepia"&gt;</code> 切换
+  <code>style.css</code> 里三块完整的 CSS 变量。JS 只负责切属性 + 记忆偏好 + 监听系统外观，不再做任何色值计算。
+</div>
+
+<h2>二、信息架构：15 个模块从 3 组重排为 5 组</h2>
+<p>按真实工作流重排，让「<strong>文献 → 读 → 投稿</strong>」这条主路径在侧边栏上是连续的。</p>
+
+<div class="ia">
+  <div class="ia-col">
+    <div class="g">概览</div>
+    <div class="ia-item hi"><svg viewBox="0 0 24 24"><path d="M3 10.2 12 3l9 7.2"/><path d="M5.5 9.3V20a1 1 0 0 0 1 1H10v-5.4h4V21h3.5a1 1 0 0 0 1-1V9.3"/></svg>首页</div>
+  </div>
+  <div class="ia-col">
+    <div class="g">文献</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><path d="M4 4.5h5.2a2.6 2.6 0 0 1 2.6 2.6v12.4a2 2 0 0 0-2-2H4z"/><path d="M20 4.5h-5.2a2.6 2.6 0 0 0-2.6 2.6v12.4a2 2 0 0 1 2-2H20z"/></svg>文献中心</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><path d="M12 4.5 2.5 9 12 13.5 21.5 9z"/><path d="M5.6 11v4.4c0 1.5 2.9 2.8 6.4 2.8s6.4-1.3 6.4-2.8V11"/></svg>学位论文</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><path d="M12 3.2 14.7 8.7l6 .9-4.35 4.25 1.03 6-5.38-2.83L8.62 19.9l1.03-6L5.3 9.6l6-.9z"/></svg>顶刊追踪</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5z"/><path d="m4 14.8 4.2-4.2 3.1 3.1 2.6-2.6L20 17"/></svg>论文进度 <span style="font-size:10.5px;color:var(--primary)">← 新移入</span></div>
+  </div>
+  <div class="ia-col">
+    <div class="g">研究</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><path d="M3 7.2a1.7 1.7 0 0 1 1.7-1.7h4.1l2 2.3h8.5A1.7 1.7 0 0 1 21 9.5v8.8a1.7 1.7 0 0 1-1.7 1.7H4.7A1.7 1.7 0 0 1 3 18.3z"/></svg>项目管理</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><rect x="3.4" y="4.4" width="17.2" height="15.2" rx="3"/><path d="m8 12.2 2.6 2.6L16 9.4"/></svg>任务安排</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><rect x="3" y="5.2" width="18" height="13.6" rx="2.4"/><path d="m4.2 7.4 7.1 5.2a1.2 1.2 0 0 0 1.4 0l7.1-5.2"/></svg>邮箱</div>
+  </div>
+  <div class="ia-col">
+    <div class="g">写作</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><path d="M10 3.5v6.2L4.9 18a2 2 0 0 0 1.7 3h10.8a2 2 0 0 0 1.7-3L14 9.7V3.5"/></svg>研究记录</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><path d="m4 20 .9-4L16.4 4.5a2 2 0 0 1 2.8 0l.3.3a2 2 0 0 1 0 2.8L8 19.1z"/></svg>Markdown 笔记</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><path d="M9.2 17.4a6.4 6.4 0 1 1 5.6 0"/><path d="M9.6 17.4h4.8M10.6 20.4h2.8"/></svg>灵感孵化</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="11.4" r="8"/><path d="M14 6.6h.01M10 6.6h.01M14 11.9h2M10 16.4h4"/></svg>模拟审稿</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><path d="M7.5 4h9v4.4a4.5 4.5 0 0 1-9 0z"/><path d="M12 12.9V16M9 20h6"/></svg>成果管理</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><path d="M12 3.6 13.4 8 17.8 9.4 13.4 10.8 12 15.2 10.6 10.8 6.2 9.4 10.6 8z"/><path d="M18.4 14.6l.7 2.1 2.1.7-2.1.7-.7 2.1-.7-2.1-2.1-.7 2.1-.7z"/></svg>AI 助手</div>
+  </div>
+  <div class="ia-col">
+    <div class="g">工具</div>
+    <div class="ia-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M3.6 12h16.8"/><path d="M12 3.6c2.1 2.3 3.3 5.2 3.3 8.4S14.1 18.1 12 20.4c-2.1-2.3-3.3-5.2-3.3-8.4S9.9 5.9 12 3.6z"/></svg>世图下载助手</div>
+  </div>
+</div>
+
+<h2>三、布局改动</h2>
+<div class="card">
+<table>
+  <tr><th style="width:110px">区域</th><th>改动</th></tr>
+  <tr><td><strong>顶栏</strong></td><td>移除搜索框 → 换成「当前页面」指示（页面名 + 一句话副标题，随导航实时更新，同时同步浏览器标签标题）。原搜索移入侧边栏。所有按钮改为线性图标。</td></tr>
+  <tr><td><strong>侧边栏</strong></td><td>宽度 224 → 232px；emoji 图标全部换成统一线条图标；搜索框入驻（<em>只在「文献中心」显示</em>，因为搜的是文献）；底部两个按钮改为一排图标按钮；头像从 🎓 改为姓名首字。</td></tr>
+  <tr><td><strong>图标</strong></td><td>建立 54 个 SVG 图标精灵（24 网格 / 1.5px 描边 / <code>currentColor</code>），替代全部 emoji。图标颜色自动跟随文字色，三套主题无需单独适配。</td></tr>
+</table>
+</div>
+
+<h2>四、验收结果</h2>
+<div class="card">
+  <div class="stat" style="margin-bottom:14px">
+    <div><b>471</b><span>单元测试全通过</span></div>
+    <div><b>0</b><span>页面运行时报错</span></div>
+    <div><b>15</b><span>导航项全部可切换</span></div>
+    <div><b>3</b><span>主题实渲色校验通过</span></div>
+    <div><b>134</b><span>index.html emoji 行数下降</span></div>
+  </div>
+  <table>
+    <tr><th style="width:180px">检查项</th><th>结果</th></tr>
+    <tr><td>三套主题实际渲染色</td><td class="ok">✓ 与设计值逐字节一致</td></tr>
+    <tr><td>15 个模块逐一导航</td><td class="ok">✓ 视图显隐 + 顶栏标题联动正确</td></tr>
+    <tr><td>54 个 SVG 图标渲染</td><td class="ok">✓ 全部有实际尺寸，无失效引用</td></tr>
+    <tr><td>新增主题卡片</td><td class="ok">✓ 3 张卡片 + 选中态 + 迷你预览正常</td></tr>
+    <tr><td>全局回归</td><td class="ok">✓ 471/471 通过，0 失败</td></tr>
+    <tr><td>项目 <code>data/</code> 目录</td><td class="ok">✓ 未被触碰（用独立测试目录验证）</td></tr>
+  </table>
+</div>
+
+<h2>五、尚未完成的收尾</h2>
+<ul>
+  <li><code>app.js</code> / <code>thesis.js</code> / <code>achievements.js</code> 里以 <strong>JS 字符串动态拼接</strong>的 emoji 图标（约 250 处）尚未替换——这些需要成对改 HTML 片段与对应 CSS，比静态替换风险高，留作下一轮。</li>
+  <li>版本号尚未升到 v1.25.0（需同步 5 处：<code>package.json</code>、<code>package-lock.json</code> 的 2 处、README、<code>MODIFICATION_NOTES.md</code>、<code>.github/release-body.md</code>）。</li>
+</ul>
+
+<script>
+  const btns = document.querySelectorAll('.tbtn');
+  btns.forEach((b) => b.addEventListener('click', () => {
+    document.documentElement.setAttribute('data-demo', b.dataset.t);
+    btns.forEach((x) => x.classList.toggle('on', x === b));
+  }));
+</script>
+</body>
+</html>

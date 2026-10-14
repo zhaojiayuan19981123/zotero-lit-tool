@@ -347,6 +347,9 @@ export function getSettings() {
       reflowKeepFigures: true, // 公式/表格/插图裁下来贴回重排文档
       reflowIndent: true,      // 正文段落首行缩进两字
     },
+    // 界面主题模式：light(浅色) | dark(深色) | sepia(护眼)。三套主题的完整色值在
+    // public/style.css 的 [data-theme] 块里，这里只存用户选择，供跨设备/跨启动恢复。
+    themeMode: 'light',
     // 数据保存目录（空 = 使用默认用户数据目录）
     dataDir: '',
     // 新手引导是否已看过（持久化到数据目录，跨启动/跨版本稳定保留）

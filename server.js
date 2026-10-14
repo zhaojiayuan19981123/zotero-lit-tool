@@ -3948,7 +3948,13 @@ export function createApp({
   app.post('/api/settings', (req, res) => {
     const cur = store.getSettings();
     const body = req.body || {};
+    // 先把主题这类纯前端偏好合并进来再走迁移链，避免下面若干 normalize 步骤把字段吃掉
     const next = { ...cur, ...body };
+    if (Object.prototype.hasOwnProperty.call(body, 'themeMode')) {
+      // 只认三套主题的白名单值，避免手改 settings.json 写入非法值让前端一片空白
+      const mode = String(body.themeMode || '');
+      next.themeMode = ['light', 'dark', 'sepia'].includes(mode) ? mode : 'light';
+    }
     // ★ 只有请求里「显式带了 dataDir 字段」才允许迁移数据目录。
     //   否则保存主题/字体/密钥这类普通设置时，会因为前端表单里 dataDir 为空而把
     //   数据目录整个搬回默认位置 —— 迁移途中任何异常都会让这次设置保存直接失败
