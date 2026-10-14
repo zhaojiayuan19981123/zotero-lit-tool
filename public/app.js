@@ -40,8 +40,8 @@
       'model', 'method', 'paramDiscussion', 'results', 'thoughts', 'summary', 'innovation'],
   };
   const LIB_META = {
-    empirical: { label: '实证类文库', icon: '🧪' },
-    model: { label: '模型类文库', icon: '🧮' },
+    empirical: { label: '实证类文库', icon: 'flask' },
+    model: { label: '模型类文库', icon: 'chart' },
   };
 
   const STATUS_LABEL = { done: '已完成', parsing: '解析中', pending: '待解析', error: '解析失败' };
@@ -247,6 +247,22 @@
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
+  // SVG 图标辅助：JS 里拼 HTML 时统一用它引用 index.html 里的 <symbol> 精灵，
+  // 取代原先散落各处的 emoji（★ …）。图标颜色随 currentColor 走，三套主题零适配。
+  // 用法：`${ico('download')}` 或 `${ico('star', 'ico-sm')}`
+  // 挂到 window 上：thesis.js / achievements.js 是各自独立的 IIFE，拿不到这里的局部作用域。
+  const ico = (name, cls = '') => `<svg class="ico${cls ? ` ${cls}` : ''}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+  window.ico = ico;
+
+  // 头像渲染：用户填了自定义头像就用它，否则退回姓名的第一个字。
+  // 两边都空时给个中性图标，绝不回退到 emoji（emoji 头像在不同系统/主题下字形差异太大）。
+  function avatarHtml(profile) {
+    const custom = String(profile?.avatar || '').trim();
+    if (custom) return esc(custom);
+    const ch = String(profile?.name || '').trim().slice(0, 1);
+    return ch ? esc(ch) : ico('user');
+  }
+
   // 全部用户可见 AI 内容与笔记预览共用同一个 Markdown 渲染器。
   // 原始 HTML 经过 DOMPurify 白名单过滤；公式由 KaTeX 渲染，表格使用 GFM 语法。
   if (window.marked?.use) {
@@ -355,10 +371,10 @@
     </div>` + cols.map((c) => {
       const n = sameType.filter((i) => i.collectionId === c.id).length;
       return `<div class="col-chip${lib.collectionId === c.id ? ' active' : ''}" data-collection="${c.id}" data-colname="${esc(c.name)}">
-        📁 ${esc(c.name)} <span class="side-count">${n || ''}</span>
+        ${ico('folder')}${esc(c.name)} <span class="side-count">${n || ''}</span>
         <span class="chip-ops">
-          <button data-rename="${c.id}" title="重命名">✎</button>
-          <button data-delcol="${c.id}" title="删除">🗑</button>
+          <button data-rename="${c.id}" title="重命名">${ico('edit')}</button>
+          <button data-delcol="${c.id}" title="删除">${ico('trash')}</button>
         </span>
       </div>`;
     }).join('');
@@ -587,13 +603,18 @@
       cols.map((c) => `
         <th data-col="${c.key}" title="${esc(c.label)}（拖动右缘调宽，双击手柄复位）"><div class="th-inner">
           <span class="th-ico">${typeIcon(c.type)}</span><span class="th-name">${esc(c.label)}</span>
-          ${c.ai ? '<span class="col-ai">AI 生成</span>' : ''}
         </div><span class="col-resize" data-resize="${c.key}"></span></th>`).join('');
     // innerHTML 重建后 indeterminate 会丢失，必须重新赋一次
     const chkAll = el.theadRow.querySelector('#chkAll');
     if (chkAll) chkAll.indeterminate = indeterminate;
   }
-  function typeIcon(t) { return { title: 'ⓐ', attach: '📎', progress: '◔', rating: '☆', text: '⃝', md: '≡', status: '◉', actions: '⚙', rank: '🏅' }[t] || '⃝'; }
+  // 列类型图标。返回值直接进 innerHTML，所以必须是 SVG（原来的 emoji 📎 ⚙ 🏅 已统一换成图标精灵）。
+  function typeIcon(t) {
+    return {
+      title: 'ⓐ', attach: ico('clip'), progress: '◔', rating: '☆', text: '⃝',
+      md: '≡', status: '◉', actions: ico('settings'), rank: ico('award'),
+    }[t] || '⃝';
+  }
 
   function renderBody() {
     const list = filteredItems();
@@ -647,9 +668,9 @@
         return `<div class="row-actions">
           <button class="icon-btn" data-act="parse" title="重新解析">↻</button>
           <button class="icon-btn" data-act="open" title="查看解析">⤢</button>
-          <button class="icon-btn" data-act="read" title="阅读 PDF">📖</button>
+          <button class="icon-btn" data-act="read" title="阅读 PDF">${ico('book-open')}</button>
           <button class="icon-btn" data-act="collection" title="移动到分类">▣</button>
-          <button class="icon-btn danger" data-act="del" title="删除">🗑</button></div>`;
+          <button class="icon-btn danger" data-act="del" title="删除">${ico('trash')}</button></div>`;
       case 'rank': {
         const v = it.journalRank || '';
         const btn = it.journal
@@ -1070,7 +1091,7 @@
     try {
       const updated = await api(`/api/literature/${id}/refresh-rank`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       const idx = items.findIndex((x) => x.id === id); if (idx >= 0) items[idx] = updated;
-      if (!silent) toast(updated.journalRank ? `✅ 等级已更新：${updated.journalRank}` : '未查询到该期刊等级', updated.journalRank ? 'success' : 'error');
+      if (!silent) toast(updated.journalRank ? `${ico('check-circle')}等级已更新：${updated.journalRank}` : '未查询到该期刊等级', updated.journalRank ? 'success' : 'error');
       return !!updated.journalRank;
     } catch (e) {
       const cur = items.find((x) => x.id === id);
@@ -1124,8 +1145,8 @@
         <span class="stars" data-drating>${[1, 2, 3, 4, 5].map((n) => `<button class="star ${n <= Math.round(it.rating || 0) ? 'on' : ''}" data-dstar="${n}">★</button>`).join('')}</span>
         ${it.status !== 'done' ? `<span class="badge badge-${it.status}" title="${esc(it.error || '')}">${STATUS_LABEL[it.status]}</span>` : ''}
       </div>
-      ${it.error ? `<div class="modal-desc">⚠ 解析失败：${esc(it.error)}</div>` : ''}
-      <section style="margin-bottom:18px"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>💭 我的思考<span class="col-ai">手写</span></h4>
+      ${it.error ? `<div class="modal-desc">${ico('alert')}解析失败：${esc(it.error)}</div>` : ''}
+      <section style="margin-bottom:18px"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>${ico('message')}我的思考<span class="col-ai">手写</span></h4>
         <textarea id="drawerThoughts" class="drawer-thoughts" rows="4" placeholder="写下你自己的小想法：疑问、灵感、与课题的联系…">${esc(it.thoughts || '')}</textarea>
         <button id="btnSaveDrawerThoughts" class="btn btn-primary" style="margin-top:8px">保存思考</button>
       </section>
@@ -1203,12 +1224,12 @@
       // 这样用户误删后，条目会自动回到「可下载并导入」状态，能重新导入。
       const imported = wlInLibrary(it);
       let state = '';
-      if (it.state === 'downloading') state = '<span class="wl-done">⏳ 下载中…</span>';
+      if (it.state === 'downloading') state = `<span class="wl-done">${ico('download')}下载中…</span>`;
       else if (it.state === 'error') state = `<span class="wl-err" title="${esc(it.error || '')}">✗ 失败</span>`;
       else if (imported) {
-        state = '<span class="wl-imported">📥 已在文献中心</span>'
+        state = '<span class="wl-imported">已在文献中心</span>'
           + `<button class="tb-btn" data-wlredl="${i}" title="重新下载 PDF 并覆盖导入（文献中心里已删除时可恢复）">↻ 重新导入</button>`;
-      } else state = `<button class="tb-btn" data-wldl="${i}">⬇ 下载并导入</button>`;
+      } else state = `<button class="tb-btn" data-wldl="${i}">${ico('download')}下载并导入</button>`;
       return `<div class="wl-item${it.state === 'error' ? ' wl-item-error' : ''}">
         <input type="checkbox" data-wlchk="${i}" ${it.checked ? 'checked' : ''} />
         <span class="wl-item-title" title="${esc(it.title)}">${esc(it.title)}</span>
@@ -1356,7 +1377,16 @@
 
   function applyThemeMode(mode, persist) {
     const valid = THEME_MODES.some((m) => m.id === mode) ? mode : 'light';
-    document.documentElement.setAttribute('data-theme', valid);
+    const html = document.documentElement;
+    // 只有在「真的换主题」时才播过渡；首次装载时也播一次，让界面从默认色淡入到用户主题。
+    const changed = html.getAttribute('data-theme') !== valid;
+    if (changed) {
+      html.classList.add('theme-anim');
+      clearTimeout(applyThemeMode._t);
+      // 过渡结束后摘掉，避免常驻 transition 拖慢后续一切颜色变化
+      applyThemeMode._t = setTimeout(() => html.classList.remove('theme-anim'), 280);
+    }
+    html.setAttribute('data-theme', valid);
     document.querySelectorAll('.theme-mode-card').forEach((c) => {
       c.classList.toggle('active', c.dataset.mode === valid);
     });
@@ -1563,7 +1593,7 @@
     const saved = localStorage.getItem('aiModel:' + key) || '';
     const opts = (modelChoices || []).map((c) => {
       const mark = c.isActive ? '（全局默认）' : '';
-      const vision = c.vision ? ' 👁' : '';
+      const vision = c.vision ? ' ' : '';
       return `<option value="${esc(c.id)}"${c.id === saved ? ' selected' : ''}>${esc(c.label)}${vision} ${mark}</option>`;
     }).join('');
     const follow = `<option value=""${saved ? '' : ' selected'}>跟随全局默认模型</option>`;
@@ -1711,7 +1741,7 @@
   function visionBadge(p) {
     const mode = normalizeVisionOverride(p?.visionOverride);
     const state = profileVisionState(p);
-    if (state === true) return `<span class="mp-tag vision">👁 看图${mode === 'yes' ? ' · 手动' : ''}</span>`;
+    if (state === true) return `<span class="mp-tag vision">${ico('eye')}看图${mode === 'yes' ? ' · 手动' : ''}</span>`;
     if (state === false) return '<span class="mp-tag text">文字模型</span>';
     return '<span class="mp-tag auto">待判断</span>';
   }
@@ -2021,8 +2051,8 @@
     const st = $('gwStatus');
     if (st) {
       if (!s.enabled) st.textContent = '已关闭';
-      else if (s.running) st.textContent = '✅ 运行中';
-      else st.textContent = '⚠ ' + (s.error || '未启动');
+      else if (s.running) st.textContent = '运行中';
+      else st.textContent = '' + (s.error || '未启动');
       st.className = 'ml-hint' + (s.enabled && !s.running ? ' gw-bad' : '');
     }
     const url = s.running ? (s.baseURL || `http://127.0.0.1:${s.actualPort || s.port}/v1`) : '（未启动）';
@@ -2075,16 +2105,16 @@
     const st = $('pxStatus');
     if (st) {
       if (s.mode === 'off') st.textContent = '已关闭代理';
-      else if (s.activeUrl) st.textContent = `✅ 当前出口：${s.activeUrl}`;
-      else if (s.mode === 'always') st.textContent = '⚠ 已设为始终走代理，但还没探到可用的本地端口';
-      else if (s.detectedUrl) st.textContent = `✅ 已探到本地代理 ${s.detectedUrl}（直连失败时自动使用）`;
+      else if (s.activeUrl) st.textContent = `${ico('check-circle')}当前出口：${s.activeUrl}`;
+      else if (s.mode === 'always') st.textContent = '已设为始终走代理，但还没探到可用的本地端口';
+      else if (s.detectedUrl) st.textContent = `${ico('check-circle')}已探到本地代理 ${s.detectedUrl}（直连失败时自动使用）`;
       else st.textContent = '未检测到本地代理（直连失败时会自动重试探测）';
     }
     const box = $('pxTried');
     if (box) {
       const tried = s.tried || [];
       box.innerHTML = tried.length
-        ? tried.map((t) => `${t.ok ? '✅' : '·'} <code>${esc(t.url)}</code>${t.ok ? '' : ` <span class="px-err">${esc(t.error || '连不上')}</span>`}`).join('<br />')
+        ? tried.map((t) => `${t.ok ? '' : '·'} <code>${esc(t.url)}</code>${t.ok ? '' : ` <span class="px-err">${esc(t.error || '连不上')}</span>`}`).join('<br />')
         : '';
     }
   }
@@ -2142,7 +2172,7 @@
     // 先把所有模型列成「测试中」，用户能立刻看到在干什么（而不是一个静止的按钮）
     if (box) {
       box.className = 'ml-test-result';
-      box.innerHTML = (profiles || []).map((p) => `⏳ ${esc(p.label || p.model || p.id)} · 测试中…`).join('<br />');
+      box.innerHTML = (profiles || []).map((p) => `${ico('loader')}${esc(p.label || p.model || p.id)} · 测试中…`).join('<br />');
     }
     try {
       const d = await api('/api/router/probe', {
@@ -2154,8 +2184,8 @@
       if (box) {
         box.className = 'ml-test-result ' + (list.length && okCount === list.length ? 'ok' : 'err');
         box.innerHTML = list.map((x) => (x.ok
-          ? `✅ ${esc(x.label)} · ${x.latencyMs}ms`
-          : `❌ ${esc(x.label)} · ${esc(x.error || '失败')}`)).join('<br />')
+          ? `${ico('check-circle')}${esc(x.label)} · ${x.latencyMs}ms`
+          : `${ico('x-square')}${esc(x.label)} · ${esc(x.error || '失败')}`)).join('<br />')
           + `<br /><b>${okCount}/${list.length} 条可用</b>（每条最长等 ${budget} 秒；体检不计入熔断与用量统计）`;
       }
       await loadRouterStatus();
@@ -2163,7 +2193,7 @@
     } catch (e) {
       if (box) { box.className = 'ml-test-result err'; box.textContent = '体检失败：' + e.message; }
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = original || '🔌 一键体检'; }
+      if (btn) { btn.disabled = false; btn.textContent = original || '一键体检'; }
     }
   }
 
@@ -2198,7 +2228,7 @@
     if (!box) return;
     $('mlCount').textContent = String(profiles.length);
     if (!profiles.length) {
-      box.innerHTML = '<div class="ml-empty">还没有模型。点「＋ 添加模型」手动配置，或点「⚡ 一键添加常用模型」快速开始。</div>';
+      box.innerHTML = '<div class="ml-empty">还没有模型。点「＋ 添加模型」手动配置，或点「一键添加常用模型」快速开始。</div>';
       return;
     }
     box.innerHTML = profiles.map((p) => {
@@ -2397,11 +2427,11 @@
         if (r.mode === 'stream' || r.mode === 'nonstream') $('mlStreamMode').value = r.mode;
       }
       box.textContent = r.ok
-        ? `✅ 已验证（${r.cost} ms，${r.mode === 'stream' ? '流式可用' : '非流式兼容'}）：${r.message || '模型回复：' + r.reply}`
-        : `❌ 测试失败（${r.cost} ms）：${r.error}`;
+        ? `${ico('check-circle')}已验证（${r.cost} ms，${r.mode === 'stream' ? '流式可用' : '非流式兼容'}）：${r.message || '模型回复：' + r.reply}`
+        : `${ico('x-square')}测试失败（${r.cost} ms）：${r.error}`;
     } catch (e) {
       box.className = 'ml-test-result err';
-      box.textContent = '❌ ' + e.message;
+      box.textContent = '' + e.message;
     } finally {
       btn.disabled = false;
     }
@@ -2732,7 +2762,7 @@
     meta: null,          // 打开阅读器时缓存的文献记录快照（列表过期时兜底）
     dirOpen: false,      // 左侧「论文目录」抽屉是否展开（只在文献来源下可用）
     fileKind: 'pdf',     // 当前文档格式：'pdf'（PDF.js 内核）| 'epub'（epub.js 内核）
-    citePool: [],        // AI 引用池：[{id, text, label}]。划词时点「📌 引用」累积多段原文，提问时一起交给 AI
+    citePool: [],        // AI 引用池：[{id, text, label}]。划词时点「引用」累积多段原文，提问时一起交给 AI
     notesFilter: { type: 'all', color: 'all', tag: 'all', q: '' }, // 笔记与高亮的筛选条件
     notesHit: -1,        // 「上一处 / 下一处」跳到的批注下标（用于高亮当前条目）
     // 当前阅读来源。两种：
@@ -2825,14 +2855,14 @@
     if (!pr.md) return;
     pr.md.visible = true;
     $('prMdViewer').classList.remove('hidden');
-    $('prToggleMd').textContent = '📑 对照原文';
+    $('prToggleMd').textContent = '对照原文';
   }
 
   function hideMdViewer() {
     if (!pr.md) return;
     pr.md.visible = false;
     $('prMdViewer').classList.add('hidden');
-    $('prToggleMd').textContent = '📄 查看译文';
+    $('prToggleMd').textContent = '查看译文';
   }
 
   function toggleMdViewer() {
@@ -2950,7 +2980,7 @@
     ].filter(([, v]) => String(v || '').trim());
     if (basics.length) {
       sections.push({
-        label: '基本信息', icon: '📌',
+        label: '基本信息', icon: '',
         html: basics.map(([k, v]) => `<div style="margin-bottom:3px"><b style="color:var(--text-3);font-weight:600">${esc(k)}：</b>${esc(v)}</div>`).join(''),
       });
     }
@@ -2969,9 +2999,9 @@
     const statusHtml = it.status === 'done'
       ? ''
       : `<div class="pr-an-empty" style="padding:14px;text-align:left">
-           ${it.status === 'parsing' ? '⏳ 该文献正在解析中，稍后刷新可看到结果。'
-             : it.status === 'error' ? `⚠️ 解析失败：${esc(it.error || '未知错误')}`
-             : '📭 这篇文献还没有解析结果。点下方「开始解析」，AI 会自动读全文并填写字段。'}
+           ${it.status === 'parsing' ? `${ico('loader')}该文献正在解析中，稍后刷新可看到结果。`
+             : it.status === 'error' ? `${ico('alert')}解析失败：${esc(it.error || '未知错误')}`
+             : '这篇文献还没有解析结果。点下方「开始解析」，AI 会自动读全文并填写字段。'}
          </div>`;
 
     // 有解析结果但内容字段全为空时，给一句明确提示，而不是一片空白
@@ -2982,12 +3012,12 @@
 
     box.innerHTML = statusHtml + emptyTip + sections.map((s) => `
       <div class="pr-an-sec">
-        <div class="pr-an-label">${s.icon || '⃝'} ${esc(s.label)}${s.ai ? '<span class="col-ai">AI 生成</span>' : ''}</div>
+        <div class="pr-an-label">${s.icon || '⃝'} ${esc(s.label)}</div>
         <div class="pr-an-value">${s.html}</div>
       </div>`).join('')
       + `<div class="pr-an-actions">
-           <button class="btn btn-primary btn-sm" id="prAnParse">${it.status === 'done' ? '↻ 重新解析这篇' : '▶ 开始解析这篇'}</button>
-           <button class="btn btn-ghost btn-sm" id="prAnEdit">✎ 编辑字段</button>
+           <button class="btn btn-primary btn-sm" id="prAnParse">${it.status === 'done' ? `${ico('refresh')}重新解析这篇` : `${ico('play')}开始解析这篇`}</button>
+           <button class="btn btn-ghost btn-sm" id="prAnEdit">${ico('edit')}编辑字段</button>
            <button class="btn btn-ghost btn-sm" id="prAnOpenLib">⤢ 在文献中心查看</button>
          </div>`;
 
@@ -3215,7 +3245,7 @@
       setPnTrans(`<div class="md">${renderMarkdown(data.translation || '')}</div>`);
     } catch (e) {
       if (isAbortError(e)) return;
-      setPnTrans(`<div class="pn-trans-error">⚠ ${esc(e.message)}</div>`);
+      setPnTrans(`<div class="pn-trans-error">${ico('alert')}${esc(e.message)}</div>`);
     }
   }
   let pnTranslateAbort = null;
@@ -4208,11 +4238,11 @@
       : (m.role === 'assistant' ? renderMarkdown(m.content || '') : esc(m.content || '').replace(/\n/g, '<br />'));
     // 「两段式看图」完成后，折叠展示视觉模型的原始转述，方便用户核对 AI 是否看错图
     const vnote = (m.visions || []).length
-      ? `<div class="pr-vision-note">👁 <b>图片已由 ${esc(m.visions[0].label || '视觉模型')} 转述</b>`
+      ? `<div class="pr-vision-note">${ico('eye')}<b>图片已由 ${esc(m.visions[0].label || '视觉模型')} 转述</b>`
         + `<details><summary>查看转述内容</summary><pre>${esc(m.visions.map((v) => v.text).join('\n\n'))}</pre></details></div>`
       : '';
     return `<div class="pr-msg ${m.role === 'user' ? 'user' : 'ai'}">
-      <div class="pr-msg-avatar">${m.role === 'user' ? '👤' : '🤖'}</div>
+      <div class="pr-msg-avatar">${m.role === 'user' ? ico('user') : ico('ai')}</div>
       <div class="pr-msg-body">
         <div class="pr-msg-role">${m.role === 'user' ? '我' : 'AI 助手'}</div>
         ${imgs}
@@ -4220,7 +4250,7 @@
         <div class="pr-msg-bubble">${body}</div>
         <div class="pr-msg-actions">
           ${m.role === 'assistant' && !m.pending && String(m.content || '').trim()
-            ? `<button class="pr-msg-act" data-pr-to-note="${index}" title="把这段回答追加到这篇论文的 Markdown 笔记">📥 导入笔记</button>` : ''}
+            ? `<button class="pr-msg-act" data-pr-to-note="${index}" title="把这段回答追加到这篇论文的 Markdown 笔记">${ico('download')}导入笔记</button>` : ''}
           ${m.error ? `<button class="btn btn-sm md-retry" data-pr-retry="${index}">重试回答</button>` : ''}
         </div>
       </div>
@@ -4508,7 +4538,7 @@
     return '正文';
   }
 
-  /** 把选中文字放进引用池（划词工具条的「📌 引用」） */
+  /** 把选中文字放进引用池（划词工具条的「引用」） */
   function doCite() {
     const sel = pr.currentSelection;
     if (!sel) return;
@@ -4852,14 +4882,14 @@
         : (r.aborted ? '（已停止生成）' : '（AI 没有返回内容，请重试）');
       if (!r.aborted && !holder.error) holder.error = 'AI 没有返回内容，请重试';
     } else if (r.error) {
-      holder.content += '\n\n⚠️ ' + r.error;
+      holder.content += '\n\n' + r.error;
     } else if (r.aborted) {
       holder.content += '\n\n_（已停止生成）_';
     }
     // 只有在「当前模型看不了图、而且后端也没找到视觉模型」时才是真问题；
     // 后端能自动转述时不应再吓唬用户（v1 的写法会把正常流程误报成不支持）。
     if (imgs.length && holder.modelVision === false && !holder.visions?.length && !holder.error) {
-      holder.content += `\n\n💡 当前模型「${holder.modelLabel || ''}」不支持图片输入，且没有可用的视觉模型。`
+      holder.content += `\n\n${ico('lightbulb')}当前模型「${holder.modelLabel || ''}」不支持图片输入，且没有可用的视觉模型。`
         + '可到「AI 设置 → 两段式看图」指定一个视觉模型（如 GLM-4.5V 或 Qwen3.8-27B），或在顶栏直接切换。';
     }
     if (holder.visions?.length) holder.visionNote = true;
@@ -5297,7 +5327,7 @@
     const toggle = $('prDirToggle');
     if (toggle) {
       toggle.classList.toggle('active', pr.dirOpen);
-      toggle.textContent = isEpub ? '📑 目录' : '📚 目录';
+      toggle.textContent = isEpub ? '目录' : '目录';
       toggle.title = isEpub
         ? '展开 / 收起章节目录'
         : '展开 / 收起论文目录 —— 不必先返回列表，直接跳到另一篇';
@@ -5518,7 +5548,7 @@
     if (!btn) return;
     btn.classList.toggle('busy', state === 'busy');
     btn.classList.toggle('reading', state === 'ready');
-    btn.textContent = label || '🧩 版面';
+    btn.textContent = label || '版面';
     btn.title = state === 'ready'
       ? '版面已解析：鼠标悬停在页面上可看到区域类型；点击图表 / 公式可放大或送 AI'
       : state === 'busy'
@@ -5568,12 +5598,12 @@
       pr.layoutFor = recordId;
       window.PrBlocks.setManifest(recordId, data.manifest);
       const n = data.manifest.blocks?.length || 0;
-      setLayoutBtn('ready', `🧩 版面 ${n}`);
+      setLayoutBtn('ready', `${ico('puzzle')}版面 ${n}`);
       return;
     }
     if (state === 'running' || state === 'queued') {
       pr.layoutBusy = true;
-      setLayoutBtn('busy', `🧩 解析中 ${data.page || 0}/${data.pages || '?'}`);
+      setLayoutBtn('busy', `${ico('puzzle')}解析中 ${data.page || 0}/${data.pages || '?'}`);
       watchLayoutProgress(recordId);
       return;
     }
@@ -5621,7 +5651,7 @@
       }
       if (data.state === 'none') { stop(); pr.layoutBusy = false; setLayoutBtn('idle'); return; }
       pr.layoutBusy = true;
-      setLayoutBtn('busy', `🧩 解析中 ${data.page || 0}/${data.pages || '?'}`);
+      setLayoutBtn('busy', `${ico('puzzle')}解析中 ${data.page || 0}/${data.pages || '?'}`);
     };
     es.onerror = () => { stop(); };
   }
@@ -5631,7 +5661,7 @@
     if (!id || pr.fileKind === 'epub') { toast('当前文档不支持版面解析', 'error'); return; }
     if (pr.layoutBusy) return;
     pr.layoutBusy = true;
-    setLayoutBtn('busy', '🧩 解析中…');
+    setLayoutBtn('busy', '解析中…');
     try {
       const r = await api(`/api/literature/${encodeURIComponent(id)}/layout`, {
         method: 'POST',
@@ -6404,7 +6434,7 @@
         return true;
       }
     } catch (_) { /* 连版面都没有，下面统一提示 */ }
-    if (!silent) toast('这篇还没有版面识别结果 —— 先点「🌐 全文翻译」里的「先识别版面」', 'error');
+    if (!silent) toast('这篇还没有版面识别结果 —— 先点「全文翻译」里的「先识别版面」', 'error');
     return false;
   }
 
@@ -6427,7 +6457,7 @@
     cmpSyncPdfBlocks();
     renderCmp();
     // 结构版刻意**不**收起启动面板：用户刚进来，正要选翻译引擎整篇翻一遍。
-    // 已翻译版才收起来（框住四区没意义），用户随时能点「✕」或工具条上的「🌐 全文翻译」再叫出来。
+    // 已翻译版才收起来（框住四区没意义），用户随时能点「✕」或工具条上的「全文翻译」再叫出来。
     const hasData = blocks.length > 0;
     if (translated) cmpEl('cmpStart')?.classList.add('hidden');
     cmpEl('cmpStartClose')?.classList.toggle('hidden', !hasData);
@@ -6449,7 +6479,7 @@
    *
    * 原文由中间的 PDF 直接呈现，所以这里**只**渲染译文侧。译文缺失时分两种文案：
    *   - translatable === false（图表 / 表格 / 公式 / 参考文献）：本来就按原样保留；
-   *   - 还没翻：给一个「🌐 译」按钮，点一下单独翻这一段。
+   *   - 还没翻：给一个「译」按钮，点一下单独翻这一段。
    * 一律写「未翻译」会让人以为图表也能翻，所以这两种情况必须分开说。
    */
   function cmpBlockHtml(b) {
@@ -6463,12 +6493,12 @@
     if (tr) {
       acts.push(cmpRetransActs(id));
     } else if (b.translatable) {
-      acts.push(`<button class="cmp-act" data-cmp-act="tr" data-cmp-id="${esc(id)}" title="只翻译这一段">🌐 译</button>`);
+      acts.push(`<button class="cmp-act" data-cmp-act="tr" data-cmp-id="${esc(id)}" title="只翻译这一段">${ico('globe')}译</button>`);
     }
     if (b.image && pr.recordId) {
-      acts.push(`<button class="cmp-act" data-cmp-act="img" data-cmp-id="${esc(id)}" title="放大看原图 / 送 AI 解释">🔍 原图</button>`);
+      acts.push(`<button class="cmp-act" data-cmp-act="img" data-cmp-id="${esc(id)}" title="放大看原图 / 送 AI 解释">${ico('search')}原图</button>`);
     }
-    acts.push(`<button class="cmp-act" data-cmp-act="ai" data-cmp-id="${esc(id)}" title="把这一段的原文放进右侧 AI 助读的引用池">📌 送 AI</button>`);
+    acts.push(`<button class="cmp-act" data-cmp-act="ai" data-cmp-id="${esc(id)}" title="把这一段的原文放进右侧 AI 助读的引用池">${ico('send')}送 AI</button>`);
 
     parts.push('<div class="cmp-block-meta">'
       + `<span class="cmp-block-tag" data-kind="${esc(kind)}">${esc(label)}</span>`
@@ -6484,7 +6514,7 @@
     if (tr) {
       parts.push(`<div class="cmp-block-text">${esc(tr)}</div>`);
     } else if (b.translatable) {
-      parts.push('<div class="cmp-block-text cmp-block-missing">—（未翻译）点「🌐 译」只翻这一段</div>');
+      parts.push('<div class="cmp-block-text cmp-block-missing">—（未翻译）点「译」只翻这一段</div>');
     } else {
       parts.push(`<div class="cmp-block-text cmp-block-missing">—（${esc(label)}，按原样保留）</div>`);
     }
@@ -6506,7 +6536,7 @@
     if (!transFlow) return;
     const blocks = Array.isArray(cmp.data?.blocks) ? cmp.data.blocks : [];
     if (!blocks.length) {
-      transFlow.innerHTML = '<div class="cmp-flow-empty">还没有对照数据。<br />先点工具条上的「🌐 整篇翻译」，在弹出的面板里跑一次<b>版面识别</b>。</div>';
+      transFlow.innerHTML = '<div class="cmp-flow-empty">还没有对照数据。<br />先点工具条上的「整篇翻译」，在弹出的面板里跑一次<b>版面识别</b>。</div>';
       refreshCmpCounts();
       return;
     }
@@ -6534,7 +6564,7 @@
     state.textContent = `共 ${blocks.length} 块 · ${translated} 段已译`;
     state.classList.toggle('ready', translated > 0);
     state.title = cmp.structureOnly
-      ? '当前只铺了版面结构。点原文任意段落即可单独翻译，或用「🌐 整篇翻译」整篇翻一遍。'
+      ? '当前只铺了版面结构。点原文任意段落即可单独翻译，或用「整篇翻译」整篇翻一遍。'
       : '这是「整篇翻译」产出的对照数据，与版面块逐段对齐。';
   }
 
@@ -6830,7 +6860,7 @@
       cmp.transCache.set(id, tr);
       // 写回块对象：切视图 / 重渲染时译文不会丢（也是「已译段数」的计数依据）
       b.translation = tr;
-      // 译完之后「🌐 译」按钮就没有意义了，换成「复制 + 重译」
+      // 译完之后「译」按钮就没有意义了，换成「复制 + 重译」
       const blk = transBlockEl(id);
       const trBtn = blk?.querySelector('.cmp-act[data-cmp-act="tr"]');
       if (trBtn) trBtn.outerHTML = cmpRetransActs(id);
@@ -6840,14 +6870,14 @@
       refreshCmpCounts();
       if (!auto) toast('已翻译这一段', 'success');
     } catch (e) {
-      setCmpTransText(id, `<span class="cmp-trans-error">⚠ ${esc(e.message)}</span>`, { pending: true });
+      setCmpTransText(id, `<span class="cmp-trans-error">${ico('alert')}${esc(e.message)}</span>`, { pending: true });
     }
   }
 
   /** 有译文时的动作按钮：复制 + 重新翻译（用顶部工具条统一的引擎重译）。 */
   function cmpRetransActs(id) {
     return `<button class="cmp-act" data-cmp-act="copy" data-cmp-id="${esc(id)}" title="复制这段译文">⧉ 复制</button>`
-      + `<button class="cmp-act" data-cmp-act="retrans" data-cmp-id="${esc(id)}" title="用顶部工具条选择的引擎重新翻译这一段">🔄 重译</button>`;
+      + `<button class="cmp-act" data-cmp-act="retrans" data-cmp-id="${esc(id)}" title="用顶部工具条选择的引擎重新翻译这一段">${ico('refresh')}重译</button>`;
   }
 
   /**
@@ -6958,15 +6988,15 @@
         cmp.autoEnter = false;
         // 用户在自动管线跑完之前已经自己进了「笔记模式」→ 不抢界面。
         // 长文档整篇翻译要几分钟，用户早就开始记笔记了，这时被强行切到对照精读很唐突；
-        // 译文已就绪，徽标提示一句，想看时点「📖 对照精读」即可（v1.24.6）。
+        // 译文已就绪，徽标提示一句，想看时点「对照精读」即可（v1.24.6）。
         if (pn.on) {
-          if (cmp.autoId === pr.recordId) setCmpAutoChip(ok ? 'done' : null, ok ? '翻译完成，可点「📖 对照精读」进入' : '');
+          if (cmp.autoId === pr.recordId) setCmpAutoChip(ok ? 'done' : null, ok ? '翻译完成，可点「对照精读」进入' : '');
         } else if (ok && !cmp.on && pr.recordId && cmp.autoId === pr.recordId) {
           setCmpAutoChip('busy', '正在打开对照精读…');
           await openCmpMode();
         } else if (cmp.autoId === pr.recordId) {
           // 已经切到别的篇目了就别再打扰，徽标是当前这篇的状态
-          setCmpAutoChip(ok ? 'done' : 'fail', ok ? '翻译完成' : '翻译失败，可点「📖 对照精读」手动进入');
+          setCmpAutoChip(ok ? 'done' : 'fail', ok ? '翻译完成' : '翻译失败，可点「对照精读」手动进入');
         }
       }
     };
@@ -7114,7 +7144,7 @@
         refreshCmpStart();
       });
     });
-    // 工具条上的「🌐 整篇翻译」：把启动面板叫出来 / 收起来（四区已就绪时它是一个浮层）
+    // 工具条上的「整篇翻译」：把启动面板叫出来 / 收起来（四区已就绪时它是一个浮层）
     cmpEl('cmpStartToggle')?.addEventListener('click', () => {
       const box = cmpEl('cmpStart');
       if (!box) return;
@@ -7219,7 +7249,7 @@
     if (found) {
       // 用户已经在笔记模式里（或刚切过去）→ 不抢界面，只提示译文已就绪（v1.24.6）
       if (pn.on) {
-        setCmpAutoChip('done', '翻译已完成，可点「📖 对照精读」进入');
+        setCmpAutoChip('done', '翻译已完成，可点「对照精读」进入');
         return;
       }
       setCmpAutoChip('busy', '正在打开对照精读…');
@@ -7238,7 +7268,7 @@
       subscribeCmpJob(running.job.id);
       return;
     }
-    // ③ 缺版面 → 自动解析（解析中工具条的「🧩 版面」按钮本来就会显示进度）
+    // ③ 缺版面 → 自动解析（解析中工具条的「版面」按钮本来就会显示进度）
     if (pr.layoutFor !== recordId && !pr.layoutBusy) {
       setCmpAutoChip('busy', '正在解析版面…');
       try {
@@ -7675,7 +7705,7 @@
         ${badge}
         <div class="pr-note-quote">${esc((a.text || '').slice(0, 300))}</div>
         ${a.note ? `<div class="pr-note-text">${esc(a.note)}</div>` : ''}
-        <div class="pr-note-tags">${tags}<button class="pr-note-tag-add" data-tag-edit="${idx}" title="添加 / 编辑标签">🏷 +标签</button></div>
+        <div class="pr-note-tags">${tags}<button class="pr-note-tag-add" data-tag-edit="${idx}" title="添加 / 编辑标签">${ico('tag')}+标签</button></div>
         <div class="pr-note-meta">${meta}${a.color && HIGHLIGHT_COLORS[a.color] ? ` · <span class="pr-note-dot" style="background:${HIGHLIGHT_COLORS[a.color]}"></span>` : ''}</div>
       </div>`;
     }).join('');
@@ -7884,7 +7914,7 @@
   function hideSelectionToolbar() { $('prSelectionToolbar').classList.add('hidden'); }
 
   // ---------- 划词翻译：译文就地显示在选区下方 ----------
-  // 「🌐 划词翻译」页签已删除。原来划词后译文要跑到右栏面板里看，视线来回跳；
+  // 「划词翻译」页签已删除。原来划词后译文要跑到右栏面板里看，视线来回跳；
   // 现在直接在选区下面弹一个小浮层，读完点「关闭」或按 Esc 就收起来。
 
   let selTransAbort = null;
@@ -7948,7 +7978,7 @@
     } catch (e) {
       if (isAbortError(e)) return;
       body.dataset.text = '';
-      body.innerHTML = `<div class="pr-trans-error">⚠ ${esc(e.message)}</div>`;
+      body.innerHTML = `<div class="pr-trans-error">${ico('alert')}${esc(e.message)}</div>`;
     }
   }
 
@@ -8049,7 +8079,7 @@
       box.innerHTML = `<div class="pr-trans-text">${esc(data.translation)}</div>`;
     } catch (e) {
       if (isAbortError(e)) return;
-      box.innerHTML = `<div class="pr-trans-error">⚠ ${esc(e.message)}</div>`;
+      box.innerHTML = `<div class="pr-trans-error">${ico('alert')}${esc(e.message)}</div>`;
     }
   }
 
@@ -8705,8 +8735,8 @@
         <div class="idea-card-head">
           <span class="idea-status status-${busy ? 'incubating' : idea.status}">${statusText}</span>
           <div class="idea-card-actions">
-            <button class="icon-btn" data-idea-edit="${idea.id}" title="编辑灵感">✎</button>
-            <button class="icon-btn danger" data-idea-delete="${idea.id}" title="删除灵感">🗑</button>
+            <button class="icon-btn" data-idea-edit="${idea.id}" title="编辑灵感">${ico('edit')}</button>
+            <button class="icon-btn danger" data-idea-delete="${idea.id}" title="删除灵感">${ico('trash')}</button>
           </div>
         </div>
         <h3>${esc(idea.title || '未命名灵感')}</h3>
@@ -9022,10 +9052,10 @@
       ${translated.abstract ? `<div class="tj-abstract tj-translation"><b>中文翻译</b><p>${esc(translated.abstract)}</p></div>` : ''}
       <div class="tj-card-actions">
         <button class="tb-btn" data-tj-favorite="${esc(article.id)}" data-tj-favorite-value="${favorite ? 'false' : 'true'}">${favorite ? '★ 已收藏' : '☆ 收藏'}</button>
-        <button class="tb-btn" data-tj-translate="${esc(article.id)}">🈯 ${translated.title || translated.abstract ? '查看中文翻译' : '翻译题目与摘要'}</button>
-        ${article.doi ? `<button class="tb-btn" data-tj-copy-doi="${esc(article.id)}" title="复制 DOI 号到剪贴板">📋 复制 DOI</button>` : ''}
-        ${originalUrl ? `<a class="tb-btn tj-link" href="${esc(originalUrl)}" target="_blank" rel="noopener noreferrer" data-tj-opened="${esc(article.id)}">↗ 原文链接</a>` : ''}
-        ${!originalUrl && publisherUrl ? `<a class="tb-btn tj-link" href="${esc(publisherUrl)}" target="_blank" rel="noopener noreferrer">↗ 期刊主页</a>` : ''}
+        <button class="tb-btn" data-tj-translate="${esc(article.id)}">${ico('languages')}${translated.title || translated.abstract ? '查看中文翻译' : '翻译题目与摘要'}</button>
+        ${article.doi ? `<button class="tb-btn" data-tj-copy-doi="${esc(article.id)}" title="复制 DOI 号到剪贴板">${ico('copy')}复制 DOI</button>` : ''}
+        ${originalUrl ? `<a class="tb-btn tj-link" href="${esc(originalUrl)}" target="_blank" rel="noopener noreferrer" data-tj-opened="${esc(article.id)}">${ico('external')}原文链接</a>` : ''}
+        ${!originalUrl && publisherUrl ? `<a class="tb-btn tj-link" href="${esc(publisherUrl)}" target="_blank" rel="noopener noreferrer">${ico('external')}期刊主页</a>` : ''}
         ${delivered ? '<span class="tj-delivered-mark">今日已投递</span>' : ''}
       </div>
     </article>`;
@@ -9065,14 +9095,14 @@
   }
   function renderTopJournalToday() {
     if (!topJournalData.selectedJournalIds.length) {
-      return tjEmpty('🏛️', '先选择要追踪的 UTD 期刊', '进入“期刊管理”勾选期刊或一键应用研究方向预设。');
+      return tjEmpty('', '先选择要追踪的 UTD 期刊', '进入“期刊管理”勾选期刊或一键应用研究方向预设。');
     }
     if (!topJournalDelivery?.delivery) {
       return `<div class="tj-checkin-card"><div><span class="tj-checkin-icon">✓</span><h3>今日文章尚未领取</h3><p>点击右上角“签到并领取今日文章”。系统将先刷新已订阅期刊，再为每本期刊分配最多 5 篇你从未收到过的文章。</p></div><button class="tb-btn accent" data-tj-checkin>签到并领取</button></div>`;
     }
     const { delivery, articles } = topJournalDelivery;
     const shortage = (delivery.shortages || []).map((item) => `${esc(tjJournal(item.journalId)?.shortTitle || item.journalId)}：${item.available}/${item.requested}`).join('，');
-    return `<div class="tj-delivery-note"><b>✓ ${esc(delivery.date)} 已领取 ${articles.length} 篇文章</b>${shortage ? `<span>部分期刊可投递新文章不足 5 篇：${shortage}。系统不会重复凑数。</span>` : '<span>已按“最新一期 / Online First 优先、个人历史不重复”生成。</span>'}</div><div class="tj-article-list">${articles.length ? articles.map((article) => tjArticleCard(article, { delivered: true })).join('') : tjEmpty('📭', '当前没有可投递的未重复文章', '请稍后同步，或在“最新文章”中查看已采集内容。')}</div>`;
+    return `<div class="tj-delivery-note"><b>✓ ${esc(delivery.date)} 已领取 ${articles.length} 篇文章</b>${shortage ? `<span>部分期刊可投递新文章不足 5 篇：${shortage}。系统不会重复凑数。</span>` : '<span>已按“最新一期 / Online First 优先、个人历史不重复”生成。</span>'}</div><div class="tj-article-list">${articles.length ? articles.map((article) => tjArticleCard(article, { delivered: true })).join('') : tjEmpty('', '当前没有可投递的未重复文章', '请稍后同步，或在“最新文章”中查看已采集内容。')}</div>`;
   }
   function renderTopJournalLatest() {
     const articles = topJournalData.articles || [];
@@ -9096,16 +9126,16 @@
       ? `<button class="tb-btn accent" data-tj-export-doi title="把 DOI 号导出为文件；也可选择 RIS / BibTeX 供 Zotero 或 LaTeX 使用">⤓ ${doiLabel}</button>`
       : '';
     const copyBtn = stats.withDoi
-      ? `<button class="tb-btn" data-tj-copy-doi-list title="把 DOI 号按行复制到剪贴板">📋 复制 DOI</button>`
+      ? `<button class="tb-btn" data-tj-copy-doi-list title="把 DOI 号按行复制到剪贴板">${ico('copy')}复制 DOI</button>`
       : '';
-    return `<div class="tj-bulk-toolbar"><label><input type="checkbox" data-tj-select-visible ${articles.length && articles.every((article) => topJournalSelection.has(article.id)) ? 'checked' : ''}> 全选当前列表</label><span>已选 <b>${count}</b> 篇</span><button class="tb-btn accent" data-tj-analyze ${count ? '' : 'disabled'}>✨ AI 分析已选</button>${doiBtn}${copyBtn}${action}</div>`;
+    return `<div class="tj-bulk-toolbar"><label><input type="checkbox" data-tj-select-visible ${articles.length && articles.every((article) => topJournalSelection.has(article.id)) ? 'checked' : ''}> 全选当前列表</label><span>已选 <b>${count}</b> 篇</span><button class="tb-btn accent" data-tj-analyze ${count ? '' : 'disabled'}>AI 分析已选</button>${doiBtn}${copyBtn}${action}</div>`;
   }
   function renderTopJournalFavorites() {
     if (!topJournalFavorites.length) return tjEmpty('☆', '还没有收藏文章', '在今日推送、最新文章或历史记录中点击“收藏”，它将进入 AI 助手的本地知识库。');
     return `${tjBulkToolbar('favorites', topJournalFavorites)}<div class="tj-section-note">收藏文章会作为摘要级证据纳入 AI 助手回答；它不等同于已读取全文。</div><div class="tj-article-list">${topJournalFavorites.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
   }
   function renderTopJournalLibrary() {
-    if (!topJournalLibrary.length) return tjEmpty('🕘', '历史记录尚为空', '完成一次签到后，已领取的文章会保存在这里；删除只会从该视图隐藏，仍会保留去重记录。');
+    if (!topJournalLibrary.length) return tjEmpty('', '历史记录尚为空', '完成一次签到后，已领取的文章会保存在这里；删除只会从该视图隐藏，仍会保留去重记录。');
     return `${tjBulkToolbar('history', topJournalLibrary)}<div class="tj-section-note">共 ${topJournalLibrary.length} 篇历史记录。批量删除不会让文章再次被推送；若已收藏，仍可在“收藏”中保留和供 AI 助手引用。</div><div class="tj-article-list">${topJournalLibrary.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
   }
   function renderTopJournalCalendar() {
@@ -9128,7 +9158,7 @@
     const presets = Object.entries(topJournalData.presets || {}).map(([id, preset]) => `<button class="tj-preset" data-tj-preset="${esc(id)}">${esc(preset.label)}</button>`).join('');
     return `<div class="tj-manage-card"><div class="tj-manage-head"><div><h3>选择追踪期刊</h3><p>已选择 ${selected.size} / 24 本。预设会替换当前选择；之后可继续手动多选。</p></div><div class="tj-preset-row"><span>研究方向预设</span>${presets}<button class="tj-preset secondary" data-tj-select-all>全选 24 本</button><button class="tj-preset secondary" data-tj-clear>清空</button></div></div>${groups.map((group) => {
       const journals = topJournalData.catalog.filter((journal) => journal.category === group);
-      return `<section class="tj-journal-group"><div class="tj-group-head"><b>${esc(group)}</b><button class="as-link" data-tj-category="${esc(group)}">全选此类</button></div><div class="tj-journal-options">${journals.map((journal) => `<label><input type="checkbox" data-tj-journal="${esc(journal.id)}" ${selected.has(journal.id) ? 'checked' : ''}><span><b>${esc(journal.shortTitle)}</b><small>${esc(journal.title)}</small></span><a href="${esc(tjExternalUrl(journal.publisherUrl))}" target="_blank" rel="noopener noreferrer" title="打开期刊主页">↗</a></label>`).join('')}</div></section>`;
+      return `<section class="tj-journal-group"><div class="tj-group-head"><b>${esc(group)}</b><button class="as-link" data-tj-category="${esc(group)}">全选此类</button></div><div class="tj-journal-options">${journals.map((journal) => `<label><input type="checkbox" data-tj-journal="${esc(journal.id)}" ${selected.has(journal.id) ? 'checked' : ''}><span><b>${esc(journal.shortTitle)}</b><small>${esc(journal.title)}</small></span><a href="${esc(tjExternalUrl(journal.publisherUrl))}" target="_blank" rel="noopener noreferrer" title="打开期刊主页">${ico('external')}</a></label>`).join('')}</div></section>`;
     }).join('')}</div>`;
   }
   async function renderTopJournals() {
@@ -9385,7 +9415,7 @@
       tjReplaceArticle({ ...article, translations: { ...(article.translations || {}), zh: result.translation } });
       await renderTopJournals();
       toast(result.cached ? '已显示已缓存翻译' : '题目与摘要已翻译', 'success');
-    } catch (error) { toast(error.message, 'error'); if (button) { button.disabled = false; button.textContent = '🈯 翻译题目与摘要'; } }
+    } catch (error) { toast(error.message, 'error'); if (button) { button.disabled = false; button.textContent = '翻译题目与摘要'; } }
   }
   function bindTopJournals() {
     $('btnTopJournalSync').addEventListener('click', topJournalSync);
@@ -9458,7 +9488,8 @@
     const page = VIEW_META[v];
     if (page) {
       const t = $('topbarPageTitle');
-      if (t) { t.querySelector('b').textContent = page.name; $('topbarPageSub').textContent = page.sub; }
+      // 顶栏只保留页面主标题：副标题属冗余小字，已随「减少无谓标签」一并移除。
+      if (t) t.querySelector('b').textContent = page.name;
       document.title = `${page.name} · 一站式科研终端（经管版）`;
     }
     const isLib = v === 'library';
@@ -9552,10 +9583,9 @@
   function renderHome() {
     // 问候横幅（个人资料同步）
     const sub = [profile.school, profile.field, profile.grade].filter(Boolean).join(' · ');
-    $('homeAvatar').textContent = profile.avatar || '🎓';
-    // 侧边栏头像：用姓名首字替代 emoji（🎓 属于"AI 模板式图标"，且三套主题下颜色不可控）。
-    // 用户自定义头像（profile.avatar）仍优先。
-    $('profileAvatar').textContent = profile.avatar || String(profile.name || '研').trim().slice(0, 1) || '研';
+    $('homeAvatar').innerHTML = avatarHtml(profile);
+    // 侧边栏头像：用户填了就用自己的，没填就用姓名首字（不再是默认 emoji）。
+    $('profileAvatar').innerHTML = avatarHtml(profile);
     $('profileName').textContent = profile.name || '研究生';
     $('homeGreet').textContent = `${greetWord()}，${profile.name || '研究生'}`;
     $('homeSub').textContent = sub || '完善个人资料后显示学校 / 专业 / 年级';
@@ -9595,23 +9625,23 @@
         ${t.due ? `<span class="check-due${t.due < t0 ? ' over' : ''}">${t.due < t0 ? '逾期 ' : ''}${t.due.slice(5)}</span>` : ''}
         <button class="check-del" data-todaydel="${t.id}" title="删除">✕</button>
       </div>`).join('')
-      : '<div class="pr-loading">今天没有安排，去「任务安排」添加一个吧 ☕</div>';
+      : '<div class="pr-loading">今天没有安排，去「任务安排」添加一个吧 </div>';
 
     // 科研动态（自动时间线）
     const feed = [];
     for (const it of items) {
-      if (it.createdAt) feed.push({ ts: it.createdAt, ico: '📄', text: `上传文献「${clipTitle(it.title || it.originalName || '未命名', 22)}」` });
-      if (it.parsedAt) feed.push({ ts: it.parsedAt, ico: '🤖', text: `AI 解析完成「${clipTitle(it.title || it.originalName || '未命名', 22)}」` });
+      if (it.createdAt) feed.push({ ts: it.createdAt, ico: '', text: `上传文献「${clipTitle(it.title || it.originalName || '未命名', 22)}」` });
+      if (it.parsedAt) feed.push({ ts: it.parsedAt, ico: '', text: `AI 解析完成「${clipTitle(it.title || it.originalName || '未命名', 22)}」` });
     }
-    for (const p of projects) if (p.createdAt) feed.push({ ts: p.createdAt, ico: '📂', text: `创建项目「${clipTitle(p.name, 22)}」` });
+    for (const p of projects) if (p.createdAt) feed.push({ ts: p.createdAt, ico: '', text: `创建项目「${clipTitle(p.name, 22)}」` });
     for (const p of journalPapers) {
-      if (p.createdAt) feed.push({ ts: p.createdAt, ico: '📮', text: `添加小论文「${clipTitle(p.title, 22)}」→ ${p.status}` });
+      if (p.createdAt) feed.push({ ts: p.createdAt, ico: '', text: `添加小论文「${clipTitle(p.title, 22)}」→ ${p.status}` });
       for (const h of (p.history || []).slice(1)) {
-        if (h.date) feed.push({ ts: `${h.date}T09:00:00`, ico: '📮', text: `《${clipTitle(p.title, 18)}》状态更新：${h.status}` });
+        if (h.date) feed.push({ ts: `${h.date}T09:00:00`, ico: '', text: `《${clipTitle(p.title, 18)}》状态更新：${h.status}` });
       }
     }
-    for (const t of tasks) if (t.completedAt) feed.push({ ts: t.completedAt, ico: '✅', text: `完成任务「${clipTitle(t.title, 22)}」` });
-    for (const n of notes) if (n.createdAt) feed.push({ ts: n.createdAt, ico: '🧪', text: `新建研究记录「${clipTitle(n.title, 22)}」${n.studyNo ? '（' + n.studyNo + '）' : ''}` });
+    for (const t of tasks) if (t.completedAt) feed.push({ ts: t.completedAt, ico: '', text: `完成任务「${clipTitle(t.title, 22)}」` });
+    for (const n of notes) if (n.createdAt) feed.push({ ts: n.createdAt, ico: '', text: `新建研究记录「${clipTitle(n.title, 22)}」${n.studyNo ? '（' + n.studyNo + '）' : ''}` });
     feed.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
     $('feedList').innerHTML = feed.length
       ? feed.slice(0, 12).map((f) => `<div class="feed-item"><span class="feed-ico">${f.ico}</span><span class="feed-text" title="${esc(f.text)}">${esc(f.text)}</span><span class="feed-time">${fmtTime(f.ts)}</span></div>`).join('')
@@ -9765,17 +9795,17 @@
     const key = calSelected || todayStr();
     const events = [...(calEventsByDate()[key] || []), ...calendarDateInfo(key).events];
     const box = $('calDayEvents');
-    const head = `<div class="cal-day-head">${calSelected ? '📆 ' + key : '📆 今天 · ' + key}<span class="side-count">${events.length} 项</span></div>`;
+    const head = `<div class="cal-day-head">${calSelected ? '' + key : '今天 · ' + key}<span class="side-count">${events.length} 项</span></div>`;
     box.innerHTML = head + (events.length
       ? events.map((e) => `<div class="cal-event"><i class="cal-dot" style="background:${CAL_TYPES[e.type]?.color || '#999'}"></i><span class="cal-event-label" title="${esc(e.label)}">${esc(e.label)}</span><span class="cal-tag" style="color:${CAL_TYPES[e.type]?.color}">${CAL_TYPES[e.type]?.label || ''}</span>${e.type === 'imported' && e.id ? `<button class="cal-event-del" data-cal-event-del="${e.id}" title="删除导入事件">✕</button>` : ''}</div>`).join('')
-      : '<div class="pr-loading">这一天没有安排 🎉</div>');
+      : '<div class="pr-loading">这一天没有安排 </div>');
   }
 
   // ---------- 项目管理 ----------
   function renderProjects() {
     const wrap = $('projCards');
     if (!projects.length) {
-      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">📂</div><p>还没有项目</p><p class="empty-hint">点击「＋ 新建项目」，把文献、任务、实验记录围绕课题组织起来</p></div>`;
+      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">${ico('folder')}</div><p>还没有项目</p><p class="empty-hint">点击「＋ 新建项目」，把文献、任务、实验记录围绕课题组织起来</p></div>`;
       return;
     }
     wrap.innerHTML = projects.map((p) => {
@@ -9788,13 +9818,13 @@
           <span class="proj-status status-${esc(p.status)}">${esc(p.status)}</span>
         </div>
         <div class="proj-meta">
-          ${p.advisor ? `<span class="meta-chip">👨‍🏫 ${esc(p.advisor)}</span>` : ''}
-          ${p.field ? `<span class="meta-chip">🔬 ${esc(p.field)}</span>` : ''}
-          ${p.startDate ? `<span class="meta-chip">📅 ${esc(p.startDate)}${p.endDate ? ' ~ ' + esc(p.endDate) : ''}</span>` : ''}
+          ${p.advisor ? `<span class="meta-chip">‍${ico('library')}${esc(p.advisor)}</span>` : ''}
+          ${p.field ? `<span class="meta-chip">${ico('flask')}${esc(p.field)}</span>` : ''}
+          ${p.startDate ? `<span class="meta-chip">${ico('calendar')}${esc(p.startDate)}${p.endDate ? ' ~ ' + esc(p.endDate) : ''}</span>` : ''}
         </div>
         ${p.description ? `<div style="font-size:12.5px;color:var(--text-2);margin-bottom:12px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2">${esc(p.description)}</div>` : ''}
         <div class="proj-progress-row"><div class="proj-progress-bar"><span style="width:${p.progress || 0}%"></span></div><span class="proj-progress-num">${p.progress || 0}%</span></div>
-        <div class="proj-links"><span>📚 文献 <b>${litN}</b></span><span>✅ 待办任务 <b>${taskN}</b></span><button class="proj-notes-link" data-project-notes="${p.id}" title="查看该项目的研究记录">📝 记录 <b>${noteN}</b></button></div>
+        <div class="proj-links"><span>${ico('library')}文献 <b>${litN}</b></span><span>${ico('check-circle')}待办任务 <b>${taskN}</b></span><button class="proj-notes-link" data-project-notes="${p.id}" title="查看该项目的研究记录">${ico('pen')}记录 <b>${noteN}</b></button></div>
       </div>`;
     }).join('');
   }
@@ -9865,10 +9895,10 @@
     return `<div class="task-item${t.status === 'done' ? ' done' : ''}" data-task="${t.id}">
       <input type="checkbox" data-tasktoggle="${t.id}" ${t.status === 'done' ? 'checked' : ''} />
       <span class="task-title" title="${esc(t.title)}">${esc(t.title)}</span>
-      ${proj ? `<span class="task-chip" style="background:var(--primary-soft);color:var(--primary)">📂 ${esc(clipTitle(proj.name, 12))}</span>` : ''}
+      ${proj ? `<span class="task-chip" style="background:var(--primary-soft);color:var(--primary)">${ico('folder')}${esc(clipTitle(proj.name, 12))}</span>` : ''}
       <span class="task-chip tp-${esc(t.priority)}">${esc(t.priority)}优先</span>
       ${t.due ? `<span class="task-due${over ? ' over' : ''}">${over ? '逾期 ' : ''}${t.due}</span>` : ''}
-      <button class="task-del" data-taskdel="${t.id}" title="删除">🗑</button>
+      <button class="task-del" data-taskdel="${t.id}" title="删除">${ico('trash')}</button>
     </div>`;
   }
 
@@ -9878,11 +9908,11 @@
     const t0 = todayStr();
     const open = tasks.filter((t) => t.status !== 'done');
     const groups = [
-      { title: '⚠ 已逾期', cls: 'overdue', list: open.filter((t) => t.due && t.due < t0) },
-      { title: '☀ 今天', cls: '', list: open.filter((t) => t.due === t0) },
-      { title: '📅 未来 7 天', cls: '', list: open.filter((t) => t.due && t.due > t0 && daysUntil(t.due) <= 7) },
-      { title: '🗓 以后 / 无截止', cls: '', list: open.filter((t) => !t.due || (t.due > t0 && daysUntil(t.due) > 7)) },
-      { title: '✅ 已完成（最近 10 条）', cls: '', list: tasks.filter((t) => t.status === 'done').slice(0, 10) },
+      { title: '已逾期', cls: 'overdue', list: open.filter((t) => t.due && t.due < t0) },
+      { title: '今天', cls: '', list: open.filter((t) => t.due === t0) },
+      { title: '未来 7 天', cls: '', list: open.filter((t) => t.due && t.due > t0 && daysUntil(t.due) <= 7) },
+      { title: '以后 / 无截止', cls: '', list: open.filter((t) => !t.due || (t.due > t0 && daysUntil(t.due) > 7)) },
+      { title: '已完成（最近 10 条）', cls: '', list: tasks.filter((t) => t.status === 'done').slice(0, 10) },
     ];
     $('taskGroups').innerHTML = groups.map((g) => `
       <div class="task-group">
@@ -9961,10 +9991,10 @@
     wlRankRunning = false;
   }
 
-  // 手动更新单篇期刊等级：点卡片上的 🔄 按钮。不受自动补查的失败缓存限制，
+  // 手动更新单篇期刊等级：点卡片上的 按钮。不受自动补查的失败缓存限制，
   // 且失败原因会明确提示（如未配置 easyScholar SecretKey）。
   function rankRefreshBtn(id) {
-    return `<button class="rank-refresh" data-rankrefresh="${id}" title="手动更新期刊等级（easyScholar）">🔄</button>`;
+    return `<button class="rank-refresh" data-rankrefresh="${id}" title="手动更新期刊等级（easyScholar）">${ico('refresh')}</button>`;
   }
   async function manualRankRefresh(id) {
     const p = papers.find((x) => x.id === id);
@@ -9981,7 +10011,7 @@
       if (box) box.innerHTML = (rank.items?.length ? rankChips(rank.items) : `<span class="cell-empty">${esc(rank.summary)}</span>`) + rankRefreshBtn(id);
       toast(`期刊等级已更新：${rank.summary}`, 'success');
     } catch (e) {
-      if (box) box.innerHTML = `<span class="rank-err">⚠ ${esc(e.message)}</span>` + rankRefreshBtn(id);
+      if (box) box.innerHTML = `<span class="rank-err">${ico('alert')}${esc(e.message)}</span>` + rankRefreshBtn(id);
       toast('期刊等级更新失败：' + e.message, 'error');
     }
   }
@@ -10006,7 +10036,7 @@
     const list = papers.filter((p) => p.kind === 'journal');
     const wrap = $('paperCards');
     if (!list.length) {
-      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">📮</div><p>还没有小论文记录</p><p class="empty-hint">点击「＋ 添加小论文」，跟踪从撰写、投稿、外审、返修到录用的完整流水线；期刊等级由 easyScholar 自动查询</p></div>`;
+      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">${ico('send-mail')}</div><p>还没有小论文记录</p><p class="empty-hint">点击「＋ 添加小论文」，跟踪从撰写、投稿、外审、返修到录用的完整流水线；期刊等级由 easyScholar 自动查询</p></div>`;
       return;
     }
     const t0 = todayStr();
@@ -10022,7 +10052,7 @@
         let startDate = last.date;
         if (hist.length <= 1 && p.submitDate && p.submitDate < last.date) startDate = p.submitDate;
         const d = Math.max(0, Math.floor((Date.now() - new Date(startDate + 'T00:00:00')) / 86400000));
-        stay = `<span class="meta-chip" title="当前状态起始日：${esc(startDate)}（可在编辑弹窗中修正）">⏱ 当前状态已停留 ${d} 天</span>`;
+        stay = `<span class="meta-chip" title="当前状态起始日：${esc(startDate)}（可在编辑弹窗中修正）">${ico('clock')}当前状态已停留 ${d} 天</span>`;
       }
       // 返修截止提醒
       let ddl = '';
@@ -10030,8 +10060,8 @@
         const d = daysUntil(p.revisionDeadline);
         if (d != null) {
           ddl = d < 0
-            ? `<span class="ddl-chip over">⚠ 返修已逾期 ${-d} 天</span>`
-            : `<span class="ddl-chip${d <= 7 ? ' urgent' : ''}">⏳ 返修截止 ${p.revisionDeadline}（剩 ${d} 天）</span>`;
+            ? `<span class="ddl-chip over">${ico('alert')}返修已逾期 ${-d} 天</span>`
+            : `<span class="ddl-chip${d <= 7 ? ' urgent' : ''}">${ico('clock')}返修截止 ${p.revisionDeadline}（剩 ${d} 天）</span>`;
         }
       }
       const rank = p.journal ? `
@@ -10039,7 +10069,7 @@
           ${p.rank?.summary
             ? (p.rank.items?.length ? rankChips(p.rank.items) : `<span class="cell-empty">${esc(p.rank.summary)}</span>`)
             : '<span class="cell-empty">期刊等级未查询</span>'}
-          <button class="rank-refresh" data-rankrefresh="${p.id}" title="手动更新期刊等级（easyScholar）">🔄</button>
+          <button class="rank-refresh" data-rankrefresh="${p.id}" title="手动更新期刊等级（easyScholar）">${ico('refresh')}</button>
         </div>` : '';
       return `<div class="card paper-card" data-paper="${p.id}" title="点击编辑">
         <div class="paper-card-top">
@@ -10047,16 +10077,16 @@
           ${statusBadge(p.status)}
         </div>
         <div class="paper-journal-row">
-          <span class="meta-chip journal-chip">🎯 ${p.journal ? esc(p.journal) : '未定期刊'}</span>
-          ${proj ? `<span class="meta-chip">📂 ${esc(clipTitle(proj.name, 14))}</span>` : ''}
-          ${p.submitDate ? `<span class="meta-chip">📅 投稿 ${esc(p.submitDate)}</span>` : ''}
+          <span class="meta-chip journal-chip">${ico('target')}${p.journal ? esc(p.journal) : '未定期刊'}</span>
+          ${proj ? `<span class="meta-chip">${ico('folder')}${esc(clipTitle(proj.name, 14))}</span>` : ''}
+          ${p.submitDate ? `<span class="meta-chip">${ico('calendar')}投稿 ${esc(p.submitDate)}</span>` : ''}
           ${stay}
         </div>
         ${rank}
         ${paperStepper(p)}
         <div class="paper-card-foot">
           ${ddl}
-          <span class="paper-hist-summary" title="${esc(hist.map((h) => `${h.date} ${h.status}${h.note ? '：' + h.note : ''}`).join('\n'))}">🧾 ${hist.length} 条动态${hist.length ? ' · 最近：' + esc(clipTitle(last?.note || last?.status || '', 18)) : ''}</span>
+          <span class="paper-hist-summary" title="${esc(hist.map((h) => `${h.date} ${h.status}${h.note ? '：' + h.note : ''}`).join('\n'))}">${ico('file')}${hist.length} 条动态${hist.length ? ' · 最近：' + esc(clipTitle(last?.note || last?.status || '', 18)) : ''}</span>
         </div>
       </div>`;
     }).join('');
@@ -10066,7 +10096,7 @@
     const list = papers.filter((p) => p.kind === 'thesis');
     const wrap = $('thesisCards');
     if (!list.length) {
-      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">🎓</div><p>还没有大论文记录</p><p class="empty-hint">点击「＋ 添加大论文」，按「搭框架 → 读文献 → 找数据 → 实证分析 → 撰写 → 答辩」跟踪学位论文进度</p></div>`;
+      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">${ico('graduation')}</div><p>还没有大论文记录</p><p class="empty-hint">点击「＋ 添加大论文」，按「搭框架 → 读文献 → 找数据 → 实证分析 → 撰写 → 答辩」跟踪学位论文进度</p></div>`;
       return;
     }
     wrap.innerHTML = list.map((p) => {
@@ -10080,7 +10110,7 @@
       if (nextMs) {
         const d = daysUntil(nextMs.date);
         const urgent = d != null && d <= 7 ? ' urgent' : '';
-        nextTxt = `<span class="ddl-chip${urgent}">🏁 下一节点：${esc(nextMs.label)} ${esc(nextMs.date)}${d != null ? `（剩 ${d} 天）` : ''}</span>`;
+        nextTxt = `<span class="ddl-chip${urgent}">${ico('flag')}下一节点：${esc(nextMs.label)} ${esc(nextMs.date)}${d != null ? `（剩 ${d} 天）` : ''}</span>`;
       }
       return `<div class="card paper-card thesis-card" data-thesis="${p.id}" title="点击编辑">
         <div class="paper-card-top">
@@ -10089,14 +10119,14 @@
         </div>
         <div class="tsteps">${THESIS_STAGES.map((s, i) => `<span class="tstep${i < stageIdx ? ' done' : ''}${i === stageIdx ? ' cur' : ''}">${esc(s)}</span>`).join('')}</div>
         <div class="chap-progress-row">
-          <span class="chap-progress-label">📑 章节 ${doneN}/${chapters.length || 0}</span>
+          <span class="chap-progress-label">${ico('list')}章节 ${doneN}/${chapters.length || 0}</span>
           <div class="chap-progress-bar"><span style="width:${chapPct}%"></span></div>
           <b class="chap-progress-num">${chapPct}%</b>
         </div>
         <div class="paper-card-foot">
           ${nextTxt}
-          ${p.targetDate ? `<span class="meta-chip">🎯 计划完成 ${esc(p.targetDate)}</span>` : ''}
-          <span class="paper-hist-summary">🏁 节点 ${(p.milestones || []).filter((m) => m.done).length}/${(p.milestones || []).length} 已完成</span>
+          ${p.targetDate ? `<span class="meta-chip">${ico('target')}计划完成 ${esc(p.targetDate)}</span>` : ''}
+          <span class="paper-hist-summary">${ico('flag')}节点 ${(p.milestones || []).filter((m) => m.done).length}/${(p.milestones || []).length} 已完成</span>
         </div>
       </div>`;
     }).join('');
@@ -10179,9 +10209,9 @@
       toast('期刊等级查询成功', 'success');
     } catch (e) {
       paperDraft.rank = null;
-      $('paperRankChips').innerHTML = `<span class="rank-err">⚠ ${esc(e.message)}</span>`;
+      $('paperRankChips').innerHTML = `<span class="rank-err">${ico('alert')}${esc(e.message)}</span>`;
     } finally {
-      btn.disabled = false; btn.textContent = '🏅 查等级';
+      btn.disabled = false; btn.textContent = '查等级';
     }
   }
 
@@ -10222,7 +10252,7 @@
     } catch (e) {
       toast(e.message, 'error');
     } finally {
-      btn.disabled = false; btn.textContent = '🈯 一键翻译';
+      btn.disabled = false; btn.textContent = '一键翻译';
     }
   }
 
@@ -10393,10 +10423,10 @@
       const paper = papers.find((p) => p.id === n.paperId && p.kind === 'journal');
       return `<div class="card note-card" data-note="${n.id}" title="点击编辑">
         <div class="note-card-title"><span>${esc(n.title)}</span>${n.studyNo ? `<span class="study-chip">${esc(n.studyNo)}</span>` : ''}</div>
-        <div class="note-card-meta"><span>🗓 ${fmtTime(n.createdAt)}</span>${proj ? `<span>📂 ${esc(clipTitle(proj.name, 14))}</span>` : ''}${paper ? `<span>📮 《${esc(clipTitle(paper.title, 14))}》</span>` : ''}</div>
+        <div class="note-card-meta"><span>${ico('calendar')}${fmtTime(n.createdAt)}</span>${proj ? `<span>${ico('folder')}${esc(clipTitle(proj.name, 14))}</span>` : ''}${paper ? `<span>${ico('send-mail')}《${esc(clipTitle(paper.title, 14))}》</span>` : ''}</div>
         <div class="note-card-preview">${esc(n.content || '（空）')}</div>
       </div>`;
-    }).join('') : `<div class="empty-state"><div class="empty-icon">🧪</div><p>暂无研究记录</p><p class="empty-hint">按 Study 划分记录实证过程（假设 / 变量 / 数据 / 回归 / 稳健性），AI 助手生成周报与诊断时会参考</p></div>`;
+    }).join('') : `<div class="empty-state"><div class="empty-icon">${ico('flask')}</div><p>暂无研究记录</p><p class="empty-hint">按 Study 划分记录实证过程（假设 / 变量 / 数据 / 回归 / 稳健性），AI 助手生成周报与诊断时会参考</p></div>`;
   }
 
   let noteModalId = null;
@@ -10557,7 +10587,7 @@
     $('profSchool').value = profile.school || '';
     $('profField').value = profile.field || '';
     $('profGrade').value = profile.grade || '';
-    $('profAvatar').value = profile.avatar || '🎓';
+    $('profAvatar').value = profile.avatar || '';
     $('profProgress').value = profile.progress || 0;
     $('profProgressVal').textContent = profile.progress || 0;
     $('profileModal').classList.remove('hidden');
@@ -10567,7 +10597,7 @@
     try {
       profile = await api('/api/profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
         name: $('profName').value, school: $('profSchool').value.trim(), field: $('profField').value.trim(),
-        grade: $('profGrade').value.trim(), avatar: $('profAvatar').value.trim() || '🎓', progress: Number($('profProgress').value) || 0,
+        grade: $('profGrade').value.trim(), avatar: $('profAvatar').value.trim() || '', progress: Number($('profProgress').value) || 0,
       }) });
       $('profileModal').classList.add('hidden');
       renderHome();
@@ -10605,11 +10635,11 @@
     }
     box.innerHTML = conversations.map((c) => `
       <div class="conv-item${c.id === activeConvId ? ' active' : ''}" data-conv="${c.id}" title="${esc(c.title)}">
-        <span class="conv-item-title">${esc(c.title)}${c.compressed ? ' 🗜' : ''}</span>
+        <span class="conv-item-title">${esc(c.title)}${c.compressed ? ' ' : ''}</span>
         <span class="conv-item-time">${relTime(c.updatedAt)}</span>
         <span class="conv-item-ops">
-          <button data-convren="${c.id}" title="重命名">✎</button>
-          <button data-convdel="${c.id}" title="删除会话">🗑</button>
+          <button data-convren="${c.id}" title="重命名">${ico('edit')}</button>
+          <button data-convdel="${c.id}" title="删除会话">${ico('trash')}</button>
         </span>
       </div>`).join('');
   }
@@ -10668,8 +10698,8 @@
     const box = $('chatContextPills');
     if (!box) return;
     const pills = [
-      ...chatAttachments.map((item) => `<span class="chat-context-pill" title="${esc(item.name || 'PDF')}" data-chat-attachment="${esc(item.id || '')}">📄 ${esc(item.name || 'PDF')} <button type="button" class="chat-context-remove" data-remove-chat-attachment="${esc(item.id || '')}" aria-label="移除附件">×</button></span>`),
-      ...chatKnowledge.map((item) => `<span class="chat-context-pill" title="${esc(item.title || '')}">🧠 ${esc(item.title || '本地资料')} <button type="button" class="chat-context-remove" data-remove-chat-knowledge="${esc(item.id || '')}" aria-label="移除资料">×</button></span>`),
+      ...chatAttachments.map((item) => `<span class="chat-context-pill" title="${esc(item.name || 'PDF')}" data-chat-attachment="${esc(item.id || '')}">${ico('file')}${esc(item.name || 'PDF')} <button type="button" class="chat-context-remove" data-remove-chat-attachment="${esc(item.id || '')}" aria-label="移除附件">×</button></span>`),
+      ...chatKnowledge.map((item) => `<span class="chat-context-pill" title="${esc(item.title || '')}">${ico('brain')}${esc(item.title || '本地资料')} <button type="button" class="chat-context-remove" data-remove-chat-knowledge="${esc(item.id || '')}" aria-label="移除资料">×</button></span>`),
     ];
     box.innerHTML = pills.length ? pills.join('') : '<span class="chat-context-empty">可附加 PDF 或选择本地知识库内容</span>';
   }
@@ -10687,7 +10717,7 @@
     const form = new FormData();
     form.append('file', file, file.name);
     const button = $('btnChatAttach');
-    const original = button?.textContent || '📎';
+    const original = button?.textContent || '';
     if (button) { button.disabled = true; button.textContent = '解析中…'; }
     try {
       const res = await fetch('/api/chat/attachments', { method: 'POST', body: form });
@@ -10745,14 +10775,14 @@
   function renderChatMsgs() {
     const box = $('chatMsgs');
     if (!chatMsgs.length) {
-      box.innerHTML = `<div class="chat-welcome"><div class="chat-welcome-ico">🤖</div><b>AI 科研助手已就绪</b><p>基于你的文献知识库、项目与任务进行定制化对话。<br />支持多会话与上下文记忆，试试右侧快捷指令，或直接输入问题。</p></div>`;
+      box.innerHTML = `<div class="chat-welcome"><div class="chat-welcome-ico">${ico('robot')}</div><b>AI 科研助手已就绪</b><p>基于你的文献知识库、项目与任务进行定制化对话。<br />支持多会话与上下文记忆，试试右侧快捷指令，或直接输入问题。</p></div>`;
       return;
     }
-    const summaryHint = activeSummary ? '<div class="chat-summary-hint">🗜 早期对话已压缩为摘要，AI 仍保留其要点记忆</div>' : '';
+    const summaryHint = activeSummary ? '<div class="chat-summary-hint">早期对话已压缩为摘要，AI 仍保留其要点记忆</div>' : '';
     box.innerHTML = summaryHint + chatMsgs.map((m, index) =>
       `<div class="chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}${m.error ? ' error' : ''}">${m.role === 'user'
         ? esc(m.content).replace(/\n/g, '<br />')
-        : `<div class="md md-render">${m.content ? chatMd(m.content) : ''}${m.pending ? '<span class="chat-cursor"></span>' : ''}</div>${(m.content && !m.pending) ? `<div class="chat-bubble-actions"><button class="pr-msg-act" data-chat-to-note="${index}" title="把这段回答导入 Markdown 笔记（可新建一篇，或追加到已有笔记）">📥 导入笔记</button></div>` : ''}${m.error ? `<button class="btn btn-sm md-retry" data-chat-retry="${index}">重试回答</button>` : ''}`}</div>`).join('');
+        : `<div class="md md-render">${m.content ? chatMd(m.content) : ''}${m.pending ? '<span class="chat-cursor"></span>' : ''}</div>${(m.content && !m.pending) ? `<div class="chat-bubble-actions"><button class="pr-msg-act" data-chat-to-note="${index}" title="把这段回答导入 Markdown 笔记（可新建一篇，或追加到已有笔记）">${ico('download')}导入笔记</button></div>` : ''}${m.error ? `<button class="btn btn-sm md-retry" data-chat-retry="${index}">重试回答</button>` : ''}`}</div>`).join('');
     box.scrollTop = box.scrollHeight;
   }
   async function sendChat(text, { retry = false } = {}) {
@@ -10820,13 +10850,13 @@
   let mailMaEditId = null;
   let mailInited = false;
 
-  const FOLDER_ICONS = { '\\Inbox': '📥', '\\Sent': '📤', '\\Drafts': '📝', '\\Trash': '🗑', '\\Junk': '🚫', '\\Archive': '📦' };
+  const FOLDER_ICONS = { '\\Inbox': '', '\\Sent': '', '\\Drafts': '', '\\Trash': '', '\\Junk': '', '\\Archive': '' };
 
-  // 邮箱徽标：优先用域名首字母，数字域名（如 163.com）用 📧
+  // 邮箱徽标：优先用域名首字母，数字域名（如 163.com）用 
   function mailBadge(email) {
     const d = String(email || '').split('@')[1] || '';
     const c = (d[0] || '').toUpperCase();
-    return /[A-Z]/.test(c) ? c : '📧';
+    return /[A-Z]/.test(c) ? c : '';
   }
 
   async function ensureMailProviders() {
@@ -10876,7 +10906,7 @@
     const el2 = document.createElement('div');
     el2.className = 'mail-notif';
     el2.innerHTML = `
-      <div class="mail-notif-ico">📬</div>
+      <div class="mail-notif-ico">${ico('inbox')}</div>
       <div class="mail-notif-body">
         <div class="mail-notif-title">新邮件 · ${esc(acc.label || acc.email)}</div>
         <div class="mail-notif-subject">${esc(String(msg.subject || '(无主题)').slice(0, 80))}</div>
@@ -10905,7 +10935,7 @@
     try {
       if (typeof Notification === 'undefined') return;
       if (Notification.permission !== 'granted') return;
-      const n = new Notification('📬 新邮件 · ' + (acc.label || acc.email), {
+      const n = new Notification('新邮件 · ' + (acc.label || acc.email), {
         body: `${msg.fromName || msg.fromAddress || '未知发件人'}\n${msg.subject || '(无主题)'}`,
         tag: `mail-${acc.id}-${msg.uid}`,
       });
@@ -11057,7 +11087,7 @@
   }
   function mailGuideHtml() {
     return `<div class="mail-guide">
-      <div class="mail-guide-ico">📧</div>
+      <div class="mail-guide-ico">${ico('send-mail')}</div>
       <b>还没有登录邮箱</b>
       <p>登录邮箱后可以在这里直接收发与阅读邮件，多个邮箱可以同时管理（例如个人 163 邮箱 + 学校邮箱）。</p>
       <p class="mail-guide-dim">暂时不登录也没关系，其他功能不受影响，随时可以在左侧「＋ 账户管理」里添加。</p>
@@ -11083,7 +11113,7 @@
     fBox.innerHTML = mailFolders.length
       ? mailFolders.map((f) => `
         <div class="mail-folder${f.path === mailCur.folder ? ' active' : ''}" data-folder="${esc(f.path)}" data-foldername="${esc(f.name)}">
-          <span class="mail-folder-ico">${FOLDER_ICONS[f.specialUse] || '📁'}</span><span class="mail-folder-name">${esc(f.name)}</span>
+          <span class="mail-folder-ico">${FOLDER_ICONS[f.specialUse] || ''}</span><span class="mail-folder-name">${esc(f.name)}</span>
         </div>`).join('')
       : '<div class="mail-empty-side">暂无文件夹</div>';
   }
@@ -11112,7 +11142,7 @@
             </div>
             <div class="mail-item-row2">
               <span class="mail-subject" title="${esc(m.subject)}">${esc(m.subject)}</span>
-              ${m.hasAttachments ? '<span class="mail-attach-ico" title="含附件">📎</span>' : ''}
+              ${m.hasAttachments ? '<span class="mail-attach-ico" title="含附件"></span>' : ''}
             </div>
           </div>
         </div>`).join('');
@@ -11158,7 +11188,7 @@ a { color: #176b87; }
   function renderMailDetail() {
     const box = $('mailDetail');
     if (!mailDetail) {
-      box.innerHTML = '<div class="mail-placeholder">📬 选中一封邮件后在此阅读</div>';
+      box.innerHTML = '<div class="mail-placeholder">选中一封邮件后在此阅读</div>';
       return;
     }
     const d = mailDetail;
@@ -11170,13 +11200,13 @@ a { color: #176b87; }
     const transBlock = trans ? `
       <div class="mail-trans" id="mailTrans">
         <div class="mail-trans-head">
-          <b>🈯 中文翻译</b>
-          <button class="tb-btn" data-mail-trans-copy="1" title="复制译文">📋 复制</button>
+          <b>${ico('languages')}中文翻译</b>
+          <button class="tb-btn" data-mail-trans-copy="1" title="复制译文">${ico('copy')}复制</button>
           <button class="tb-btn" data-mail-trans-close="1" title="关闭译文">✕</button>
         </div>
         <div class="mail-trans-body">${trans.pending
           ? '<div class="mail-loading">翻译中…请稍候</div>'
-          : (trans.error ? `<div class="mail-trans-err">⚠ ${esc(trans.error)}</div>` : renderMarkdown(trans.text || ''))}</div>
+          : (trans.error ? `<div class="mail-trans-err">${ico('alert')}${esc(trans.error)}</div>` : renderMarkdown(trans.text || ''))}</div>
         ${trans.truncated ? '<div class="mail-trans-note">正文较长，本次只翻译了前一部分内容。</div>' : ''}
       </div>` : '';
     box.innerHTML = `
@@ -11190,14 +11220,14 @@ a { color: #176b87; }
         </div>
         <div class="mail-detail-to">收件人：${esc(d.to || '')}${d.cc ? `　抄送：${esc(d.cc)}` : ''}</div>
         <div class="mail-detail-ops">
-          <button class="tb-btn" data-mail-reply="1">↩ 回复</button>
-          <button class="tb-btn accent" data-mail-translate="1" ${trans && trans.pending ? 'disabled' : ''}>🈯 ${trans ? '重新翻译' : '一键翻译'}</button>
+          <button class="tb-btn" data-mail-reply="1">${ico('reply')}回复</button>
+          <button class="tb-btn accent" data-mail-translate="1" ${trans && trans.pending ? 'disabled' : ''}>${ico('languages')}${trans ? '重新翻译' : '一键翻译'}</button>
           <button class="tb-btn" data-mail-unread="1">标记未读</button>
-          <button class="tb-btn" data-mail-del="1">🗑 删除</button>
+          <button class="tb-btn" data-mail-del="1">${ico('trash')}删除</button>
         </div>
         ${atts.length ? `<div class="mail-atts">${atts.map((a) => `
           <a class="mail-att" href="/api/mail/accounts/${accId}/messages/${d.uid}/attachments/${a.index}?folder=${folderQ}" title="${esc(a.filename)}">
-            <span class="mail-att-ico">📎</span>
+            <span class="mail-att-ico">${ico('clip')}</span>
             <span class="mail-att-name">${esc(a.filename)}</span>
             <span class="mail-att-size">${fmtSize(a.size)}</span>
           </a>`).join('')}</div>` : ''}
@@ -11506,10 +11536,10 @@ a { color: #176b87; }
         body: JSON.stringify(mailAccFormData()),
       });
       box.classList.add('ok');
-      box.textContent = `✅ 连接成功：收件箱 ${r.inboxMessages} 封邮件，共 ${r.folderCount} 个文件夹`;
+      box.textContent = `${ico('check-circle')}连接成功：收件箱 ${r.inboxMessages} 封邮件，共 ${r.folderCount} 个文件夹`;
     } catch (e) {
       box.classList.add('err');
-      box.textContent = '❌ ' + e.message;
+      box.textContent = '' + e.message;
     } finally {
       btn.disabled = false;
     }
@@ -11683,10 +11713,10 @@ a { color: #176b87; }
         try {
           const r = await api(`/api/mail/accounts/${ts.dataset.maTest}/test`, { method: 'POST' });
           box.classList.add('ok');
-          box.textContent = `✅ 连接成功：收件箱 ${r.inboxMessages} 封邮件，共 ${r.folderCount} 个文件夹`;
+          box.textContent = `${ico('check-circle')}连接成功：收件箱 ${r.inboxMessages} 封邮件，共 ${r.folderCount} 个文件夹`;
         } catch (err) {
           box.classList.add('err');
-          box.textContent = '❌ ' + err.message;
+          box.textContent = '' + err.message;
         }
         return;
       }
@@ -12300,7 +12330,7 @@ a { color: #176b87; }
     try {
       const d = await api('/api/backup/list');
       const list = d.backups || [];
-      const dirLine = `<div class="bk-dir" title="${esc(d.dataDir || '')}">📁 ${esc(d.dataDir || '')}</div>`;
+      const dirLine = `<div class="bk-dir" title="${esc(d.dataDir || '')}">${ico('folder')}${esc(d.dataDir || '')}</div>`;
       if (!list.length) {
         wrap.innerHTML = dirLine + '<div class="bk-empty">还没有备份。点「立即备份」创建第一份，或重启应用后自动生成。</div>';
         return;
@@ -12368,116 +12398,116 @@ a { color: #176b87; }
   const OB_VERSION = 2;
   const OB_STEPS = [
     {
-      emoji: '👋', title: '欢迎使用一站式科研终端',
+      emoji: 'sparkles', title: '欢迎使用一站式科研终端',
       desc: '这是为经管类硕博同学打造的<b>一站式科研助手</b>：文献管理、AI 解析、论文进度、科研日历一应俱全。接下来花 2 分钟，手把手带你完成初始设置、认识每个功能。',
       points: [
-        { ico: '⚙️', html: '先带你<b>完善个人资料</b>、<b>配置 AI 密钥</b>（这是使用 AI 功能的前提）' },
-        { ico: '🧭', html: '再逐个认识 <b>7 大功能模块</b>，知道每块能做什么' },
-        { ico: '⏭️', html: '随时可点「跳过引导」，之后也能在 <b>设置</b> 里重新查看' },
+        { ico: '', html: '先带你<b>完善个人资料</b>、<b>配置 AI 密钥</b>（这是使用 AI 功能的前提）' },
+        { ico: '', html: '再逐个认识 <b>7 大功能模块</b>，知道每块能做什么' },
+        { ico: 'skip', html: '随时可点「跳过引导」，之后也能在 <b>设置</b> 里重新查看' },
       ],
       target: null, center: true,
     },
     {
-      emoji: '🎓', title: '第 1 步 · 完善个人资料',
+      emoji: 'user', title: '第 1 步 · 完善个人资料',
       desc: '点击左下角的<b>个人资料卡片</b>，填写你的姓名、学校、专业和年级。这些信息会显示在首页横幅，学业进度条也会跟着更新。',
       points: [
-        { ico: '👤', html: '<b>用户名</b>：你希望在软件里显示的名字' },
-        { ico: '🏫', html: '<b>学校 / 院系</b> 和 <b>专业方向</b>：如「XX大学 经济学院 · 应用经济学」' },
-        { ico: '📈', html: '<b>学业进度</b>：拖动滑块设定当前毕业进度（0-100%）' },
-        { ico: '😊', html: '<b>头像</b>：填一个 emoji 即可，如 🎓 📊 ✨' },
+        { ico: '', html: '<b>用户名</b>：你希望在软件里显示的名字' },
+        { ico: '', html: '<b>学校 / 院系</b> 和 <b>专业方向</b>：如「XX大学 经济学院 · 应用经济学」' },
+        { ico: '', html: '<b>学业进度</b>：拖动滑块设定当前毕业进度（0-100%）' },
+        { ico: '', html: '<b>头像</b>：填一个 emoji 即可，如 ' },
       ],
       target: '#profileCard', view: 'home',
     },
     {
-      emoji: '🔑', title: '第 2 步 · 配置 AI（关键！）',
-      desc: '点击侧边栏底部的<b>「⚙ 设置」</b>按钮打开 AI 设置。AI 解析、AI 助手、划词翻译都依赖这里的密钥，<b>建议优先配置</b>。',
+      emoji: 'key', title: '第 2 步 · 配置 AI（关键！）',
+      desc: '点击侧边栏底部的<b>「设置」</b>按钮打开 AI 设置。AI 解析、AI 助手、划词翻译都依赖这里的密钥，<b>建议优先配置</b>。',
       points: [
-        { ico: '🌐', html: '<b>AI 提供方</b>：默认选「硅基流动 SiliconFlow（DeepSeek）」，免费注册即可用' },
-        { ico: '🔐', html: '<b>API 密钥</b>：到 <code>siliconflow.cn</code> 注册后，在「API 密钥」页复制 <code>sk-xxxx</code> 填到这里' },
-        { ico: '🤖', html: '<b>模型名称</b>：保持默认 <code>deepseek-ai/DeepSeek-V4-Flash</code> 即可' },
-        { ico: '💡', html: '不配置也能用，但只能<b>离线规则提取</b>，AI 解析和 AI 助手不可用' },
+        { ico: '', html: '<b>AI 提供方</b>：默认选「硅基流动 SiliconFlow（DeepSeek）」，免费注册即可用' },
+        { ico: '', html: '<b>API 密钥</b>：到 <code>siliconflow.cn</code> 注册后，在「API 密钥」页复制 <code>sk-xxxx</code> 填到这里' },
+        { ico: '', html: '<b>模型名称</b>：保持默认 <code>deepseek-ai/DeepSeek-V4-Flash</code> 即可' },
+        { ico: '', html: '不配置也能用，但只能<b>离线规则提取</b>，AI 解析和 AI 助手不可用' },
       ],
       target: '#btnNavSettings', view: 'home',
     },
     {
-      emoji: '📊', title: '第 3 步 · 期刊等级 & 翻译',
-      desc: '仍在「⚙ 设置」里，往下还有两项可选配置，让文献管理更强大。',
+      emoji: 'award', title: '第 3 步 · 期刊等级 & 翻译',
+      desc: '仍在「设置」里，往下还有两项可选配置，让文献管理更强大。',
       points: [
-        { ico: '🏅', html: '<b>easyScholar SecretKey</b>：在 easyScholar 官网免费申请，填后点「期刊等级」按钮可自动查询中科院 / 新锐 / ABS / UTD24 / SSCI / FMS / CSSCI 等分区' },
-        { ico: '🈶', html: '<b>翻译提供方</b>：默认用上方 API Key（DeepSeek）；不想配密钥可改选「免费接口」' },
-        { ico: '💾', html: '<b>数据保存目录</b>：默认存在<b>系统用户数据目录</b>（升级不丢失），想换位置再填，如 <code>D:\\文献库</code>，留空用默认' },
-        { ico: '💡', html: '填完点弹窗底部<b>「保存设置」</b>生效' },
+        { ico: '', html: '<b>easyScholar SecretKey</b>：在 easyScholar 官网免费申请，填后点「期刊等级」按钮可自动查询中科院 / 新锐 / ABS / UTD24 / SSCI / FMS / CSSCI 等分区' },
+        { ico: 'globe', html: '<b>翻译提供方</b>：默认用上方 API Key（DeepSeek）；不想配密钥可改选「免费接口」' },
+        { ico: '', html: '<b>数据保存目录</b>：默认存在<b>系统用户数据目录</b>（升级不丢失），想换位置再填，如 <code>D:\\文献库</code>，留空用默认' },
+        { ico: '', html: '填完点弹窗底部<b>「保存设置」</b>生效' },
       ],
       target: '#btnNavSettings', view: 'home',
     },
     {
-      emoji: '📚', title: '文献中心 · 你的核心工作区',
+      emoji: 'library', title: '文献中心 · 你的核心工作区',
       desc: '这是最常用的模块，管理你读过的所有文献。',
       points: [
-        { ico: '⬆️', html: '<b>批量上传 PDF</b>（或拖入窗口）：AI 自动提取标题、作者、摘要、<b>研究背景 / 方法 / 创新点</b>等字段' },
-        { ico: '🧪', html: '<b>实证类 / 模型类文库</b>：按研究范式分区，字段自动适配' },
-        { ico: '📑', html: '<b>期刊等级</b>：填了 easyScholar 密钥后一键查分区' },
-        { ico: '📖', html: '点文献行右侧<b>「阅读」</b>进入 PDF 阅读器：<b>左划词、右翻译</b>，支持高亮和笔记' },
+        { ico: '', html: '<b>批量上传 PDF</b>（或拖入窗口）：AI 自动提取标题、作者、摘要、<b>研究背景 / 方法 / 创新点</b>等字段' },
+        { ico: '', html: '<b>实证类 / 模型类文库</b>：按研究范式分区，字段自动适配' },
+        { ico: '', html: '<b>期刊等级</b>：填了 easyScholar 密钥后一键查分区' },
+        { ico: '', html: '点文献行右侧<b>「阅读」</b>进入 PDF 阅读器：<b>左划词、右翻译</b>，支持高亮和笔记' },
       ],
       target: '.nav-item[data-view="library"]', view: 'library',
     },
     {
-      emoji: '📂', title: '项目管理 · 拆解大课题',
+      emoji: 'folder', title: '项目管理 · 拆解大课题',
       desc: '把研究方向拆成一个个项目，让文献、任务、记录互相联动。',
       points: [
-        { ico: '➕', html: '点<b>「＋ 新建项目」</b>，填写项目名称、阶段与说明' },
-        { ico: '🔗', html: '为项目<b>关联文献</b>、拆解子任务，进度一目了然' },
-        { ico: '🧭', html: '研究记录也能挂到项目下，按项目归档' },
+        { ico: '', html: '点<b>「＋ 新建项目」</b>，填写项目名称、阶段与说明' },
+        { ico: '', html: '为项目<b>关联文献</b>、拆解子任务，进度一目了然' },
+        { ico: '', html: '研究记录也能挂到项目下，按项目归档' },
       ],
       target: '.nav-item[data-view="projects"]', view: 'projects',
     },
     {
-      emoji: '✅', title: '任务安排 · 待办与计划',
+      emoji: 'check-square', title: '任务安排 · 待办与计划',
       desc: '用任务清单管理科研节奏，配合首页日历不遗漏任何 Deadline。',
       points: [
-        { ico: '✍️', html: '顶部输入框<b>回车快速添加</b>任务，可设<b>优先级</b>和<b>截止日期</b>' },
-        { ico: '📅', html: '任务会同步到<b>首页科研日历</b>与「今日待办」' },
-        { ico: '☑️', html: '完成后勾选，按项目 / 日期分组查看' },
+        { ico: '', html: '顶部输入框<b>回车快速添加</b>任务，可设<b>优先级</b>和<b>截止日期</b>' },
+        { ico: '', html: '任务会同步到<b>首页科研日历</b>与「今日待办」' },
+        { ico: '', html: '完成后勾选，按项目 / 日期分组查看' },
       ],
       target: '.nav-item[data-view="tasks"]', view: 'tasks',
     },
     {
-      emoji: '📮', title: '论文进度 · 投稿 + 学位论文',
+      emoji: 'trending', title: '论文进度 · 投稿 + 学位论文',
       desc: '两个子页签分别管理<b>小论文投稿</b>和<b>大论文进度</b>。',
       points: [
-        { ico: '📨', html: '<b>小论文 · 投稿管理</b>：跟踪每篇论文的投稿状态（投稿中 → 外审 → 返修 → 录用），记录时间线' },
-        { ico: '🎓', html: '<b>大论文 · 学位论文</b>：划分章节、设置<b>重要节点</b>（如开题、中期、答辩）并倒计时' },
-        { ico: '⏳', html: '重要节点会自动显示在首页「倒计时」卡片' },
+        { ico: '', html: '<b>小论文 · 投稿管理</b>：跟踪每篇论文的投稿状态（投稿中 → 外审 → 返修 → 录用），记录时间线' },
+        { ico: '', html: '<b>大论文 · 学位论文</b>：划分章节、设置<b>重要节点</b>（如开题、中期、答辩）并倒计时' },
+        { ico: 'clock', html: '重要节点会自动显示在首页「倒计时」卡片' },
       ],
       target: '.nav-item[data-view="papers"]', view: 'papers',
     },
     {
-      emoji: '🧪', title: '研究记录 · 灵感与实验',
+      emoji: 'lightbulb', title: '研究记录 · 灵感与实验',
       desc: '随时记录研究想法、实验数据、读书笔记，按 Study 划分。',
       points: [
-        { ico: '📝', html: '点<b>「＋ 新建研究记录」</b>，选择记录类型（想法 / 实验 / 笔记等）' },
-        { ico: '🧬', html: '内置<b>经管实证研究模板</b>，按 Study 组织多条记录' },
-        { ico: '🔍', html: '支持按项目筛选，研究脉络清晰可追溯' },
+        { ico: '', html: '点<b>「＋ 新建研究记录」</b>，选择记录类型（想法 / 实验 / 笔记等）' },
+        { ico: '', html: '内置<b>经管实证研究模板</b>，按 Study 组织多条记录' },
+        { ico: '', html: '支持按项目筛选，研究脉络清晰可追溯' },
       ],
       target: '.nav-item[data-view="notes"]', view: 'notes',
     },
     {
-      emoji: '🤖', title: 'AI 助手 · 智能对话',
+      emoji: 'message', title: 'AI 助手 · 智能对话',
       desc: '像 GPT 一样的多会话对话，还能结合你的文献库提问。',
       points: [
-        { ico: '💬', html: '点<b>「＋ 新对话」</b>开启多个会话，左侧可随时切换、重命名、删除' },
-        { ico: '🧠', html: '同一对话<b>记住上下文</b>；对话过长会自动<b>压缩摘要</b>，不丢关键信息' },
-        { ico: '📚', html: '引用<b>知识库 / 文献库</b>提问，让 AI 帮你查资料、理思路、改表达' },
+        { ico: '', html: '点<b>「＋ 新对话」</b>开启多个会话，左侧可随时切换、重命名、删除' },
+        { ico: '', html: '同一对话<b>记住上下文</b>；对话过长会自动<b>压缩摘要</b>，不丢关键信息' },
+        { ico: '', html: '引用<b>知识库 / 文献库</b>提问，让 AI 帮你查资料、理思路、改表达' },
       ],
       target: '.nav-item[data-view="ai"]', view: 'ai',
     },
     {
-      emoji: '🎉', title: '准备就绪，开始科研之旅！',
+      emoji: 'party', title: '准备就绪，开始科研之旅！',
       desc: '你已经了解了所有功能。建议现在就去：① 配置 AI 密钥 ② 上传第一篇文献试试。',
       points: [
-        { ico: '🔑', html: '没配 AI 密钥？去 <b>⚙ 设置 → AI 提供方</b> 补上' },
-        { ico: '📄', html: '去 <b>文献中心</b> 上传第一篇 PDF，体验 AI 自动解析' },
-        { ico: '🔄', html: '想重看本引导？<b>⚙ 设置 → 重新查看新手引导</b>' },
+        { ico: '', html: '没配 AI 密钥？去 <b>设置 → AI 提供方</b> 补上' },
+        { ico: '', html: '去 <b>文献中心</b> 上传第一篇 PDF，体验 AI 自动解析' },
+        { ico: '', html: '想重看本引导？<b>设置 → 重新查看新手引导</b>' },
       ],
       target: null, center: true,
     },
@@ -12487,71 +12517,71 @@ a { color: #176b87; }
   // feature tour is intentionally replaced so existing users see the new setup path once.
   OB_STEPS.splice(0, OB_STEPS.length,
     {
-      emoji: '👋', title: '先完成 AI 配置',
+      emoji: 'key', title: '先完成 AI 配置',
       desc: 'AI 助手、灵感孵化和模拟审稿都会使用当前激活的模型。接下来按实际设置顺序完成一条可用模型配置，再选择性接入 easyScholar。',
       points: [
-        { ico: '🔒', html: 'API 密钥只保存在你的本机数据目录，不会显示在界面列表中。' },
-        { ico: '🧪', html: '配置后先<b>测试连接</b>，再保存并设为使用中。' },
-        { ico: '🏅', html: 'easyScholar 是可选项，仅用于提供期刊等级背景信息。' },
+        { ico: '', html: 'API 密钥只保存在你的本机数据目录，不会显示在界面列表中。' },
+        { ico: '', html: '配置后先<b>测试连接</b>，再保存并设为使用中。' },
+        { ico: '', html: 'easyScholar 是可选项，仅用于提供期刊等级背景信息。' },
       ], target: null, center: true,
     },
     {
-      emoji: '⚙️', title: '第 1 步 · 打开 AI 设置',
+      emoji: 'settings', title: '第 1 步 · 打开 AI 设置',
       desc: '点击侧边栏底部的<b>设置</b>，所有模型、视觉模型和 easyScholar 配置都在这里管理。',
       points: [
-        { ico: '🧩', html: '可以保存多条模型配置，并在顶栏快速切换当前模型。' },
-        { ico: '💡', html: '未配置模型时，涉及 AI 的功能会提示你先完成本步骤。' },
+        { ico: '', html: '可以保存多条模型配置，并在顶栏快速切换当前模型。' },
+        { ico: '', html: '未配置模型时，涉及 AI 的功能会提示你先完成本步骤。' },
       ], target: '#btnNavSettings', view: 'home',
     },
     {
-      emoji: '➕', title: '第 2 步 · 添加一条模型',
+      emoji: 'plus', title: '第 2 步 · 添加一条模型',
       desc: '已为你打开模型编辑表单。选择供应商后，继续填写接口地址、密钥和模型名称。',
       points: [
-        { ico: '📌', html: '供应商预设会填入常见接口地址；其他 OpenAI 兼容服务可选择自定义。' },
-        { ico: '📝', html: '备注名称可用于区分“日常阅读”“审稿”或“看图”等用途。' },
+        { ico: '', html: '供应商预设会填入常见接口地址；其他 OpenAI 兼容服务可选择自定义。' },
+        { ico: '', html: '备注名称可用于区分“日常阅读”“审稿”或“看图”等用途。' },
       ], target: '#mlEditor', view: 'home', settings: true, openModelEditor: true,
     },
     {
-      emoji: '🔑', title: '第 3 步 · 填写接口信息',
+      emoji: 'list', title: '第 3 步 · 填写接口信息',
       desc: '依次填写供应商、Base URL、API 密钥和模型名称。Base URL 填到版本根路径，例如以 <code>/v1</code> 结尾，程序会补全对话接口路径。',
       points: [
-        { ico: '🌐', html: '<b>Base URL</b>：使用模型供应商提供的 OpenAI 兼容地址。' },
-        { ico: '🔐', html: '<b>API 密钥</b>：只填写你自己的密钥，不要把密钥写入笔记、论文或截图。' },
-        { ico: '🤖', html: '<b>模型名称</b>：必须与该供应商账户可用的模型 ID 完全一致。' },
+        { ico: '', html: '<b>Base URL</b>：使用模型供应商提供的 OpenAI 兼容地址。' },
+        { ico: '', html: '<b>API 密钥</b>：只填写你自己的密钥，不要把密钥写入笔记、论文或截图。' },
+        { ico: '', html: '<b>模型名称</b>：必须与该供应商账户可用的模型 ID 完全一致。' },
       ], target: '#mlBaseURL', view: 'home', settings: true, openModelEditor: true,
     },
     {
-      emoji: '🔌', title: '第 4 步 · 测试并保存',
+      emoji: 'plug-cable', title: '第 4 步 · 测试并保存',
       desc: '点击<b>测试连接</b>确认地址、密钥和模型 ID 可以共同工作；成功后点击保存。若失败，请根据返回的 HTTP 状态或错误信息逐项核对。',
       points: [
-        { ico: '1️⃣', html: '先检查密钥是否有效、是否有余额或调用权限。' },
-        { ico: '2️⃣', html: '再检查 Base URL 不是完整的 <code>/chat/completions</code> 地址。' },
-        { ico: '3️⃣', html: '最后检查模型 ID 与供应商文档一致。' },
+        { ico: 'num-1', html: '先检查密钥是否有效、是否有余额或调用权限。' },
+        { ico: 'num-2', html: '再检查 Base URL 不是完整的 <code>/chat/completions</code> 地址。' },
+        { ico: 'num-3', html: '最后检查模型 ID 与供应商文档一致。' },
       ], target: '#btnMlTest', view: 'home', settings: true, openModelEditor: true,
     },
     {
-      emoji: '✅', title: '第 5 步 · 设为使用中',
+      emoji: 'check-circle', title: '第 5 步 · 设为使用中',
       desc: '保存后，在模型卡片上选择<b>使用中</b>的那条配置。顶栏的模型切换菜单也会显示它。模型未激活时，AI 工作流不会猜测该使用哪条密钥。',
       points: [
-        { ico: '👁', html: '需要分析图片或图表时，可在下方为“两段式看图”指定视觉模型。' },
-        { ico: '↔', html: '切换模型不会删除其他配置，适合按任务使用不同模型。' },
+        { ico: '', html: '需要分析图片或图表时，可在下方为“两段式看图”指定视觉模型。' },
+        { ico: 'swap', html: '切换模型不会删除其他配置，适合按任务使用不同模型。' },
       ], target: '#mlList', view: 'home', settings: true,
     },
     {
-      emoji: '🏅', title: '第 6 步 · 可选配置 easyScholar',
+      emoji: 'star-outline', title: '第 6 步 · 可选配置 easyScholar',
       desc: '如需显示期刊等级，在设置中填写你的 easyScholar SecretKey。模拟审稿会把查询结果作为严格度背景，不会把它当作真实期刊决定。',
       points: [
-        { ico: '🔎', html: '目标期刊名称必须由用户填写，查询不到时应核对中英文全称。' },
-        { ico: '⚠️', html: '等级数据可能更新或缺失，因此不能替代正式投稿指南和人工判断。' },
+        { ico: '', html: '目标期刊名称必须由用户填写，查询不到时应核对中英文全称。' },
+        { ico: '', html: '等级数据可能更新或缺失，因此不能替代正式投稿指南和人工判断。' },
       ], target: '#setEasyKey', view: 'home', settings: true,
     },
     {
-      emoji: '🧭', title: '配置完成后从这里开始',
+      emoji: 'compass', title: '配置完成后从这里开始',
       desc: '现在可以在灵感孵化中选择实证、模型或 CCF 算法模式；在模拟审稿中拖入 PDF 或 DOCX 获取 Markdown 格式的建设性意见。',
       points: [
-        { ico: '💡', html: '<b>灵感孵化</b>会明确证据缺口，并把新颖性判断标注为待文献验证。' },
-        { ico: '🔎', html: '<b>模拟审稿</b>会流式输出，可重试并导出 Markdown 或 PDF。' },
-        { ico: '✎', html: '<b>Markdown 笔记</b>支持拖入 <code>.md</code> 或 <code>.markdown</code> 文件。' },
+        { ico: '', html: '<b>灵感孵化</b>会明确证据缺口，并把新颖性判断标注为待文献验证。' },
+        { ico: '', html: '<b>模拟审稿</b>会流式输出，可重试并导出 Markdown 或 PDF。' },
+        { ico: '', html: '<b>Markdown 笔记</b>支持拖入 <code>.md</code> 或 <code>.markdown</code> 文件。' },
       ], target: null, center: true,
     },
   );
@@ -12642,12 +12672,15 @@ a { color: #176b87; }
     const step = OB_STEPS[obIndex];
     const total = OB_STEPS.length;
     o.badge.textContent = `${obIndex + 1} / ${total}`;
-    o.emoji.textContent = step.emoji;
+    o.emoji.innerHTML = ico(step.emoji || 'sparkles', 'ico-lg');
     o.title.textContent = step.title;
     o.desc.innerHTML = step.desc;
-    // 要点列表
+    // 要点列表：data-ico 存图标名，由 CSS ::before 通过 attr() 取不到 SVG，
+    // 所以这里直接内联一个 <svg>，避免再走伪元素。
     if (step.points && step.points.length) {
-      o.points.innerHTML = step.points.map((p) => `<li data-ico="${p.ico}">${p.html}</li>`).join('');
+      o.points.innerHTML = step.points
+        .map((p) => `<li>${p.ico ? `<span class="ob-li-ico">${ico(p.ico)}</span>` : ''}${p.html}</li>`)
+        .join('');
       o.points.classList.remove('hidden');
     } else {
       o.points.innerHTML = '';

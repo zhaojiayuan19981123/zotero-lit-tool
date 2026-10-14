@@ -380,7 +380,7 @@ export function getProfile() {
     field: '',        // 专业方向
     grade: '',        // 年级（如 硕士二年级）
     school: '',       // 学校/院系
-    avatar: '🎓',     // 头像 emoji
+    avatar: '',        // 头像：留空则前端显示姓名首字（不再默认 emoji）
     progress: 0,      // 学业进度 0-100（手动设定）
   });
 }

@@ -234,12 +234,12 @@
     view.innerHTML = `
       <div class="th-head">
         <div class="th-head-row">
-          <div class="th-title"><h2>🎓 学位论文阅读</h2><span id="thSummary"></span></div>
+          <div class="th-title"><h2>${ico('graduation')}学位论文阅读</h2><span id="thSummary"></span></div>
           <div class="tb-spacer"></div>
-          <button class="tb-btn accent" id="thBtnImport">⬆ 导入学位论文 PDF</button>
+          <button class="tb-btn accent" id="thBtnImport">${ico('upload')}导入学位论文 PDF</button>
           <button class="tb-btn" id="thBtnCols">▦ 字段配置</button>
-          <button class="tb-btn" id="thBtnQuotes">📌 素材库</button>
-          <button class="tb-btn" id="thBtnBig">🎯 我的大论文</button>
+          <button class="tb-btn" id="thBtnQuotes">${ico('send')}素材库</button>
+          <button class="tb-btn" id="thBtnBig">${ico('target')}我的大论文</button>
           <input type="file" id="thFileInput" accept="application/pdf" multiple class="hidden" />
         </div>
         <div class="th-chips" id="thChips"></div>
@@ -262,8 +262,8 @@
         <button class="tb-btn" id="thSortDir" title="切换升序 / 降序">↓ 降序</button>
         <div class="tb-spacer"></div>
         <button class="tb-btn" id="thBtnCompare">⇄ 对比阅读</button>
-        <button class="tb-btn" id="thBtnBatchParse">▶ 批量解析选中</button>
-        <button class="tb-btn" id="thBtnDelete">🗑 删除选中</button>
+        <button class="tb-btn" id="thBtnBatchParse">${ico('play')}批量解析选中</button>
+        <button class="tb-btn" id="thBtnDelete">${ico('trash')}删除选中</button>
       </div>
       <div class="th-bulk hidden" id="thBulk"></div>
       <div class="th-table-wrap" id="thWrap"></div>
@@ -444,9 +444,9 @@
       sm.textContent = `共 ${sum.total || 0} 篇 · 未阅读 ${bp['未阅读'] || 0} · 阅读中 ${bp['阅读中'] || 0} · 已阅读 ${bp['已阅读'] || 0} · 素材 ${sum.quotes || 0} 条`;
     }
     if (!list.length) {
-      wrap.innerHTML = `<div class="th-empty"><div class="th-empty-icon">🎓</div>
+      wrap.innerHTML = `<div class="th-empty"><div class="th-empty-icon">${ico('graduation')}</div>
         <p>${S.items.length ? '没有符合筛选条件的论文' : '还没有学位论文'}</p>
-        <p class="th-muted">点击「⬆ 导入学位论文 PDF」；导入后会自动读封面填好标题、作者、学校、学位类型、年份。点标题可看解析详情。</p></div>`;
+        <p class="th-muted">点击「${ico('upload')}导入学位论文 PDF」；导入后会自动读封面填好标题、作者、学校、学位类型、年份。点标题可看解析详情。</p></div>`;
       renderBulk();
       return;
     }
@@ -467,7 +467,7 @@
     const rows = list.map((it) => `<tr data-id="${esc(it.id)}" class="${S.selected.has(it.id) ? 'sel' : ''}">
       <td class="th-col-pick"><input type="checkbox" data-chk="${esc(it.id)}" ${S.selected.has(it.id) ? 'checked' : ''} /></td>
       ${cols.map((c) => `<td class="${c.cls || ''}">${cellHtml(it, c.key)}</td>`).join('')}
-      <td class="th-col-num"><button class="tb-btn ghost" data-read="${esc(it.id)}" title="打开阅读器">📖</button></td>
+      <td class="th-col-num"><button class="tb-btn ghost" data-read="${esc(it.id)}" title="打开阅读器">${ico('book-open')}</button></td>
     </tr>`).join('');
     wrap.innerHTML = `<table class="th-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
     renderBulk();
@@ -711,7 +711,7 @@
           <span class="th-drawer-file" id="thDetailFile"></span>
           <div class="sp"></div>
           <button class="tb-btn" id="thDetailReparse" title="重读封面（有视觉模型就看图）">↻ 重新解析</button>
-          <button class="tb-btn accent" id="thDetailRead">📖 阅读 PDF</button>
+          <button class="tb-btn accent" id="thDetailRead">${ico('book-open')}阅读 PDF</button>
         </div>
         <div class="th-drawer-body" id="thDetailBody"></div>
       </aside>`;
@@ -881,7 +881,7 @@
       <div class="th-drawer-sec">
         <div class="th-drawer-sec-title">阅读与写作</div>
         <div class="th-drawer-actions">
-          <button class="tb-btn" data-dfact="read">📖 打开阅读器（章节书签 + AI 对话 + 笔记）</button>
+          <button class="tb-btn" data-dfact="read">${ico('book-open')}打开阅读器（章节书签 + AI 对话 + 笔记）</button>
         </div>
         <p class="th-muted" style="font-size:12px;line-height:1.7;margin:6px 0 0">
           研究问题、方法、结论这类内容不在这里硬填 —— 学位论文信息密度高，靠 3 页摘要挤出来的摘要很容易失真。
@@ -891,7 +891,7 @@
 
       <div class="th-drawer-sec">
         <div class="th-drawer-foot">
-          <button class="tb-btn danger" data-dfdel="${esc(it.id)}">🗑 删除这篇论文</button>
+          <button class="tb-btn danger" data-dfdel="${esc(it.id)}">${ico('trash')}删除这篇论文</button>
         </div>
       </div>
     `;
@@ -899,7 +899,7 @@
 
   // ---------- 「字段配置」弹层 ----------
   //
-  // ⚠️ 上一版的坑：这个弹层复用了共用样式 `.pop`（`position:fixed` 但没给 top/left），
+  // 上一版的坑：这个弹层复用了共用样式 `.pop`（`position:fixed` 但没给 top/left），
   // 而且**没有任何关闭途径** —— 点开之后点空白、按 Esc、再点按钮都关不掉，只能刷新页面。
   // 现在：锚定在按钮下方，并支持「再点按钮 / 点外部 / Esc / ✕」四种关闭方式。
 
@@ -1170,23 +1170,23 @@
         <span class="thr-here" id="thrHere"></span>
         <div class="thr-spacer"></div>
         <span id="thrModelSlot"></span>
-        <button id="thrFit" title="适宽显示">↔ 适宽</button>
+        <button id="thrFit" title="适宽显示">${ico('swap')}适宽</button>
         <button id="thrZoomOut" title="缩小">－</button>
         <button id="thrZoomIn" title="放大">＋</button>
         <span style="font-size:12px;color:var(--side-muted)">第</span>
         <input id="thrPageInput" value="1" title="输入页码后回车跳转" />
         <span style="font-size:12px;color:var(--side-muted)">/ <b id="thrPageTotal">0</b> 页</span>
-        <button id="thrOcr" title="识别这一页（或框选的区域）上的文字 —— 扫描件也能摘录">🈯 识别文字</button>
-        <button id="thrNoteMode" title="笔记模式：原文 ｜ 笔记">📝 笔记模式</button>
-        <button id="thrQuotesBtn" title="摘录素材库">📌 素材</button>
+        <button id="thrOcr" title="识别这一页（或框选的区域）上的文字 —— 扫描件也能摘录">${ico('languages')}识别文字</button>
+        <button id="thrNoteMode" title="笔记模式：原文 ｜ 笔记">${ico('pen')}笔记模式</button>
+        <button id="thrQuotesBtn" title="摘录素材库">${ico('send')}素材</button>
         <button id="thrOutlineToggle" title="折叠 / 展开书签栏">☰</button>
       </div>
       <div class="thr-body">
         <aside class="thr-outline" id="thrOutline">
           <div class="thr-out-head">
             <div class="thr-out-seg" id="thrOutSeg">
-              <button class="thr-out-seg-btn active" data-thrpanel="outline" title="本篇的章节与书签">📑 章节</button>
-              <button class="thr-out-seg-btn" data-thrpanel="papers" title="全部学位论文 —— 点一下直接切过去，不必先返回列表">📚 论文</button>
+              <button class="thr-out-seg-btn active" data-thrpanel="outline" title="本篇的章节与书签">${ico('list')}章节</button>
+              <button class="thr-out-seg-btn" data-thrpanel="papers" title="全部学位论文 —— 点一下直接切过去，不必先返回列表">${ico('library')}论文</button>
             </div>
             <div class="thr-out-pane" id="thrOutlinePane">
               <input class="tb-input thr-out-search" id="thrOutSearch" type="search" placeholder="搜索章节 / 书签" />
@@ -1211,9 +1211,9 @@
           </div>
           <div class="thr-pane" data-pane="analysis">
             <div class="thr-note-cmds">
-              <button class="tb-btn" id="thrDigest">⚡ 本章速读</button>
-              <button class="tb-btn" id="thrReview">📝 综述条目</button>
-              <button class="tb-btn" id="thrDefense">🎤 答辩演练</button>
+              <button class="tb-btn" id="thrDigest">${ico('zap')}本章速读</button>
+              <button class="tb-btn" id="thrReview">${ico('pen')}综述条目</button>
+              <button class="tb-btn" id="thrDefense">${ico('message')}答辩演练</button>
               <button class="tb-btn" id="thrRebuild" title="重新读取 PDF 并识别章节（换过附件或想重来时用）">↻ 重建索引</button>
             </div>
             <div class="thr-fields" id="thrFields"></div>
@@ -1241,7 +1241,7 @@
               <button class="thr-seg-btn active" data-noteview="edit">编辑</button>
               <button class="thr-seg-btn" data-noteview="preview">预览</button>
             </div>
-            <button class="tb-btn ghost" id="thrNoteImg" title="插入图片（也可以直接 Ctrl+V 粘贴截图）">🖼 插图</button>
+            <button class="tb-btn ghost" id="thrNoteImg" title="插入图片（也可以直接 Ctrl+V 粘贴截图）">${ico('image-file')}插图</button>
             <span class="sp"></span>
             <span class="thr-note-state" id="thrNoteState"></span>
             <button class="tb-btn ghost" id="thrNoteExport">导出 .md</button>
@@ -1575,7 +1575,7 @@
 
   function saveReadPos(immediate) {
     clearTimeout(R.saveTimer);
-    // ⚠️ 「哪一篇」必须在发起请求时就锁住，不能在响应回来时再读 R.id：
+    // 「哪一篇」必须在发起请求时就锁住，不能在响应回来时再读 R.id：
     // 在目录里切篇时，teardownReaderBody() 会为上一篇立刻发一次位置落盘，而 openReader()
     // 紧接着就把 R.id 改成新的一篇；等响应回来时再去 findIndex(R.id) 就会找到**新一篇**的下标，
     // 于是把上一篇的记录（含 id / 附件 / 页数）整条盖到新一篇头上，把库里的记录写坏。
@@ -2035,7 +2035,7 @@
   /**
    * 存笔记。
    *
-   * ⚠️ 必须等 ensureNote() 把后端内容读进来之后才允许写回。
+   * 必须等 ensureNote() 把后端内容读进来之后才允许写回。
    * 否则会出现两种数据事故（v1.19.0 就有）：
    *   · 打开一篇有笔记的论文、但没进笔记模式 → textarea 还是空的 → 关闭阅读器时把笔记清成空；
    *   · 更糟的是换论文时 textarea 里留着**上一篇**的笔记 → 会被写到当前这篇名下。
@@ -2402,7 +2402,7 @@
       R.noteTimer = setTimeout(saveNote, 1200);
     });
     $('#thrMd')?.addEventListener('blur', saveNote);
-    // 笔记里插图片：Ctrl+V 直接粘贴截图，或用「🖼 插图」选文件。
+    // 笔记里插图片：Ctrl+V 直接粘贴截图，或用「插图」选文件。
     // 学位论文常是扫描件，截图往往是唯一能进笔记的「原文」形态。
     $('#thrMd')?.addEventListener('paste', async (e) => {
       const cd = e.clipboardData;
@@ -2642,7 +2642,7 @@
     el.className = 'th-ocr hidden';
     el.innerHTML = `
       <div class="th-ocr-head">
-        <b>🈯 文字识别</b>
+        <b>${ico('languages')}文字识别</b>
         <span class="th-muted" id="thOcrMeta"></span>
         <span class="sp"></span>
         <button class="tb-btn ghost" id="thOcrCopy">复制</button>
@@ -2650,10 +2650,10 @@
       </div>
       <textarea class="th-ocr-text" id="thOcrText" placeholder="识别出的文字会出现在这里，可以直接改…"></textarea>
       <div class="th-ocr-acts">
-        <button class="tb-btn accent" id="thOcrQuote">📌 加入素材库</button>
-        <button class="tb-btn" id="thOcrNote">📝 追加到笔记</button>
-        <button class="tb-btn" id="thOcrAsk">💬 用这段提问</button>
-        <button class="tb-btn" id="thOcrAgain">🈯 重新框选</button>
+        <button class="tb-btn accent" id="thOcrQuote">${ico('send')}加入素材库</button>
+        <button class="tb-btn" id="thOcrNote">${ico('pen')}追加到笔记</button>
+        <button class="tb-btn" id="thOcrAsk">${ico('message')}用这段提问</button>
+        <button class="tb-btn" id="thOcrAgain">${ico('languages')}重新框选</button>
       </div>`;
     document.body.appendChild(el);
     $('#thOcrClose').addEventListener('click', hideOcrPanel);
@@ -2726,7 +2726,7 @@
       el.className = 'th-quotes hidden';
       el.innerHTML = `
         <div class="th-quotes-head">
-          <b>📌 摘录素材库</b><span class="sp"></span>
+          <b>${ico('send')}摘录素材库</b><span class="sp"></span>
           <button class="tb-btn" id="thqExport">导出 Markdown</button>
           <button class="tb-btn" id="thqClose">✕</button>
         </div>
@@ -2851,7 +2851,7 @@
       el.id = 'thBig';
       el.className = 'th-modal hidden';
       el.innerHTML = `<div class="th-modal-box" style="width:min(620px,92vw)">
-        <div class="th-modal-head"><h3>🎯 我的大论文</h3><span class="sp"></span><button class="tb-btn" id="thBigClose">✕</button></div>
+        <div class="th-modal-head"><h3>${ico('target')}我的大论文</h3><span class="sp"></span><button class="tb-btn" id="thBigClose">✕</button></div>
         <div class="th-modal-body">
           <p class="th-muted" style="margin-top:0">填好之后，AI 对话会自动带上这些信息，
           于是你可以直接问「这篇的方法能不能用在我的第四章」。</p>

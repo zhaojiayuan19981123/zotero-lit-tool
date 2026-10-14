@@ -1,3 +1,67 @@
+## 可读性修复与视觉收尾：对比度事故 + emoji 清零 + iOS 式过渡（2026-10-15，v1.26.0）
+
+> 用户反馈（附「顶刊追踪」页截图）：「这里各个文字都看不见了，对比度不够明显」+
+> 「减少所有界面 emoji 的使用 / 去除 AI READY，去除 AI 生成的标签 / 整体的配色你要再重新规划一下 /
+> 不同的界面切换时能不能使用渐入式效果，更贴近 IOS 效果 / 减少没用的标签与文字」。
+
+- **★ 根因：`--muted` 变量取值错误导致整页小字隐形**（`public/style.css`）：
+  - v1.25.0 重做配色时把 `--muted` 设成了**面板色** —— 浅色 `#f0f0f4`（近白，与白底对比度 1.05）、
+    深色 `#2c2c2e`、护眼 `#efe6d3`。而全站有 **22 处直接把它当 `color` 用**。
+    于是「顶刊追踪」页的 `.top-journal-head p`、`.tj-stat span`、`.tj-journal-options small`、
+    `.tj-bulk-toolbar` 等**全部变成白底白字**。
+  - 修法：三套分别改为 `#5f5f66` / `#a1a1a8` / `#665c48`，并在变量旁加注释警示
+    「**别再写回面板色**：它被 22 处直接当 color 用」。
+  - 定位手段：自建 `audit-css-color-vars.mjs` —— 解析 style.css 三套主题块，对每个**被当 color 用**
+    的变量算它与 `--bg` / `--surface` 的对比度并排序。这个脚本是本轮最有价值的产物。
+- **三套主题文字层级按 WCAG AA（≥4.5:1）整体重定**（`public/style.css`）：
+  - `--text-2` / `--text-3` / `--side-muted` / `--gray` / `--ink-2` / `--ink-3` 整族上调，最差 4.74。
+  - 强调色：浅色 `--accent` `#007aff`（4.02）→ `#0066d6`（5.42）；`--green` `#248a3d`（4.40）→
+    `#1f7a35`（5.39）；护眼 `--accent` / `--star` `#a8762c`（3.75）→ `#8e6220`（5.06）。
+  - 侧边栏活动项：深色 `--side-marker` `#7d7aff`（4.13）→ `#a5a2ff`（6.24）；
+    护眼 `#7a5c33`（4.45）→ `#6a4f2a`（5.48）。**注意活动项背景是 `--side-active` 半透明叠底，
+    不能拿纯面板底色估，必须用截图取真实像素。**
+  - ⚠️ **验证方法**：`getComputedStyle` 拿不到渐变背景，会把侧边栏/横幅误判成低对比度（假阳性）。
+    最终采用 `contrast-realpx.mjs` —— 截图取真实像素；且**背景采样必须取「与文字色差异最大」的像素**，
+    早期版本取"最亮像素"，在深色主题下正好命中浅色字形本身，把好端端的 8.18 误报成 1.00。
+- **移除 AI 痕迹与冗余标签**：
+  - 删 `index.html` 的 `AI READY` 徽标 + `Research Workspace` 副标题 + 顶栏页面副标题
+    （`#topbarPageSub`），并同步删 CSS 规则与响应式断点里的引用。
+  - ⚠️ `switchView` 里原本写 `$('topbarPageSub').textContent = page.sub` —— 元素删了之后这是
+    **同类 null 崩溃风险**（见 v1.25.0 的教训），已主动加 `if (t)` 兜底并改为只取 `<b>`。
+  - 删 `col-ai` 类（表格「AI 生成」标签）2 处渲染 + 2 处 CSS。
+- **emoji 从 357 处降到 13 处（降幅 96%），且残留全是注释/默认值**：
+  - 工具：`swap-js-emoji-ast.mjs`。**前 4 版判定逻辑都不可靠**（不考虑引号类型 / 跨行模板串误判 /
+    `${}` 内嵌引号误判 / 行内就近配对太保守只找到 10 处）。最终用 **acorn 解析 AST**，
+    精确区分 `TemplateElement`（可插 `${ico()}`）与 `Literal`（只能删），80 处替换 100% 可靠。
+  - 语法自检用 **acorn 重解析**，不用 `node --check` —— 本沙箱禁止 spawn 子进程
+    （`execFileSync` 会 `EBUSY`）。
+  - 图标精灵 `index.html` 从 54 扩到 **105 个** `<symbol>`。
+  - ⚠️ **`ico()` 原先是 `app.js` IIFE 内的局部常量**，而 `thesis.js` / `achievements.js` 是
+    **各自独立的 IIFE**，替换后直接调 `ico()` 会抛 `ReferenceError: ico is not defined`
+    → 整个模块渲染中断。已改为 `window.ico = ico`。
+    （脚本加载顺序是 thesis/achievements 先于 app.js，但它们的 `ico()` 调用都发生在
+    **渲染时**而非定义时，所以运行时能取到 `window.ico`。）
+  - ⚠️ **AST 脚本按设计只删不换字面量内的 emoji**，导致这些**类型图标被清空**：
+    `LIB_META.icon`、`typeIcon()` 的 `attach`/`actions`/`rank`、`achievements.js` 的
+    `catOf().icon` 与文件夹 `📁/🗂️` 三元。已逐个补回（`typeIcon` 返回值进 innerHTML，
+    所以必须返回 SVG；`CATEGORIES[].icon` 存的是**图标名**，由前端 `ico(c.icon)` 渲染）。
+  - 新手引导的 `OB_STEPS[].emoji` / `points[].ico` 也一并换成图标名；引导要点原来靠
+    CSS `content: attr(data-ico)` 渲染文本，**伪元素取不到 `<use>`**，改为内联 `<svg>` 节点。
+  - 头像默认值 `🎓` → 空（前端 `avatarHtml()` 回落到姓名首字）。
+- **iOS 式渐入过渡**（`public/style.css` + `public/app.js`）：
+  - 视图切换 `cubic-bezier(.32,.72,0,1)` 0.3s，淡入 + `translateY(8px) scale(.992)`。
+    ⚠️ **不加 `animation-fill-mode: forwards`** —— 视图是常驻 DOM 靠 `.hidden` 切换，
+    永久保留 `transform` 会创建层叠上下文，破坏 sticky 表头与 `position:fixed` 浮层定位。
+  - 侧边栏活动指示条 `cubic-bezier(.34,1.4,.64,1)` 弹性缩放。
+  - 主题切换由 `applyThemeMode` 临时挂 `html.theme-anim`（280ms 后移除）。
+    ⚠️ **不做常驻 `transition`**：会让滚动条颜色/阴影/焦点环等一切颜色属性都带 0.26s 延迟，
+    拖窗口、缩放字号时出现颜色拖尾。
+  - `prefers-reduced-motion` 降级为纯淡入 + 关闭过渡。
+- **验证**：单测 **471/471 通过**（Node 20.10.0 与 Node 22.22.2 各一次）；
+  三主题 × 6 视图截图核对，**控制台 0 报错**；真实像素对比度复核全部 ≥ 4.5；
+  图标完整性脚本（`check-icons.mjs` + `check-dynamic-icons.mjs`）校验 105 个定义与全部引用
+  （含 `c.icon` / `p.ico` / `step.emoji` 这些动态取值）一一对应。
+
 ## 界面整体重构：三套主题 + 导航重排 + SVG 图标系统（2026-10-15，v1.25.0）
 
 > 用户指令：「用这个 skill（ui-ux-pro-max）重新设计这个软件的 UI 界面，去除 AI 模板式的图标，

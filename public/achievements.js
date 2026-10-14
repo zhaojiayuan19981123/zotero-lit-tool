@@ -142,7 +142,7 @@
   }
 
   function catOf(key) {
-    return (S.meta?.categories || []).find((c) => c.key === key) || { key, label: key, icon: '📌' };
+    return (S.meta?.categories || []).find((c) => c.key === key) || { key, label: key, icon: 'tag' };
   }
 
   function folderName(id) {
@@ -197,11 +197,11 @@
     view.innerHTML = `
       <div class="ac-head">
         <div class="ac-head-row">
-          <div class="ac-title"><h2>🏆 成果管理</h2><span id="acSummary"></span></div>
+          <div class="ac-title"><h2>${ico('trophy')}成果管理</h2><span id="acSummary"></span></div>
           <div class="tb-spacer"></div>
           <button class="tb-btn accent" id="acBtnNew">＋ 新建成果</button>
-          <button class="tb-btn accent" id="acBtnUpload">⬆ 上传成果文件（自动建档）</button>
-          <button class="tb-btn" id="acBtnExport">⬇ 导出</button>
+          <button class="tb-btn accent" id="acBtnUpload">${ico('upload')}上传成果文件（自动建档）</button>
+          <button class="tb-btn" id="acBtnExport">${ico('download')}导出</button>
           <div class="ac-path" id="acPath"></div>
         </div>
       </div>
@@ -235,7 +235,7 @@
             <div class="tb-spacer"></div>
             <button class="tb-btn" id="acBatchParse">▶ 识别选中</button>
             <button class="tb-btn" id="acBatchMove">▣ 移动到文件夹</button>
-            <button class="tb-btn danger" id="acBatchDelete">🗑 删除选中</button>
+            <button class="tb-btn danger" id="acBatchDelete">${ico('trash')}删除选中</button>
           </div>
           <div class="ac-bulk hidden" id="acBulk"></div>
           <div class="ac-wrap" id="acWrap"></div>
@@ -261,11 +261,11 @@
     if (box) {
       box.innerHTML = [
         `<div class="ac-cat ${S.filter.category === '__all__' ? 'active' : ''}" data-cat="__all__" title="全部成果">`
-        + `<span class="ac-ico">🗂️</span><span class="ac-label">全部成果</span><span class="ac-count">${S.items.length}</span></div>`,
+        + `<span class="ac-ico">${ico('folder')}</span><span class="ac-label">全部成果</span><span class="ac-count">${S.items.length}</span></div>`,
         ...cats.map((c) => {
           const n = countByCat(c.key);
           return `<div class="ac-cat ${S.filter.category === c.key ? 'active' : ''}" data-cat="${c.key}" title="${esc(c.label)}">`
-            + `<span class="ac-ico">${c.icon}</span><span class="ac-label">${esc(c.label)}</span><span class="ac-count">${n}</span></div>`;
+            + `<span class="ac-ico">${ico(c.icon)}</span><span class="ac-label">${esc(c.label)}</span><span class="ac-count">${n}</span></div>`;
         }),
       ].join('');
     }
@@ -273,11 +273,11 @@
     if (fbox) {
       fbox.innerHTML = [
         `<div class="ac-folder ${S.filter.folderId === '__all__' ? 'active' : ''}" data-folder="__all__" title="全部文件夹">`
-        + `<span class="ac-ico">📚</span><span class="ac-label">全部文件夹</span></div>`,
+        + `<span class="ac-ico">${ico('library')}</span><span class="ac-label">全部文件夹</span></div>`,
         ...S.folders.map((f) => `<div class="ac-folder ${f.isDefault ? 'is-default' : ''} ${String(S.filter.folderId) === String(f.id) ? 'active' : ''}" data-folder="${esc(f.id)}" title="${esc(f.name)}">`
-          + `<span class="ac-ico">${f.isDefault ? '📁' : '🗂️'}</span><span class="ac-label">${esc(f.name)}</span>`
+          + `<span class="ac-ico">${ico(f.isDefault ? 'database' : 'folder')}</span><span class="ac-label">${esc(f.name)}</span>`
           + `<span class="ac-count">${countByFolder(f.id)}</span>`
-          + `<button class="ac-fbtn" data-frename="${esc(f.id)}" title="重命名">✎</button>`
+          + `<button class="ac-fbtn" data-frename="${esc(f.id)}" title="重命名">${ico('edit')}</button>`
           + `<button class="ac-fbtn" data-fdel="${esc(f.id)}" title="删除（里面的成果会回到数据文件夹）">✕</button></div>`),
       ].join('');
     }
@@ -335,7 +335,7 @@
     switch (col.kind) {
       case 'category': {
         const c = catOf(it.category);
-        return `<span class="ac-badge ok">${c.icon} ${esc(c.label)}</span>`;
+        return `<span class="ac-badge ok">${ico(c.icon)} ${esc(c.label)}</span>`;
       }
       case 'link':
         return `<div class="ac-name-cell" data-open="${esc(it.id)}" title="${esc(it.title || '未命名')}">${esc(it.title || '未命名成果')}</div>`
@@ -350,7 +350,7 @@
         const files = it.files || [];
         if (!files.length) return '<span class="ac-muted">无</span>';
         const shown = files.slice(0, 3);
-        return `<div class="ac-files-cell">${shown.map((f) => `<span class="ac-file-chip" data-file-open="${esc(it.id)}|${esc(f.id)}" title="点击用系统程序打开：${esc(f.originalName)}">📎 <span class="ac-file-kind">${esc(fkLabel(f.kind))}</span> ${esc(f.originalName)}</span>`).join('')}`
+        return `<div class="ac-files-cell">${shown.map((f) => `<span class="ac-file-chip" data-file-open="${esc(it.id)}|${esc(f.id)}" title="点击用系统程序打开：${esc(f.originalName)}">${ico('clip')}<span class="ac-file-kind">${esc(fkLabel(f.kind))}</span> ${esc(f.originalName)}</span>`).join('')}`
           + (files.length > shown.length ? `<span class="ac-muted" style="font-size:11.5px">等 ${files.length} 个附件</span>` : '')
           + '</div>';
       }
@@ -373,9 +373,9 @@
 
     if (!list.length) {
       wrap.innerHTML = `<table class="ac-table"><thead>${head}</thead></table>`
-        + `<div class="ac-empty"><div class="ac-empty-icon">🏆</div>`
+        + `<div class="ac-empty"><div class="ac-empty-icon">${ico('trophy')}</div>`
         + `<p>${S.items.length ? '当前筛选下没有成果' : '还没有录入自己的成果'}</p>`
-        + `<p class="ac-muted" style="font-size:12.5px">点「＋ 新建成果」逐条录入，或点「⬆ 上传成果文件」把你的论文 PDF 批量导入并自动识别字段</p>`
+        + `<p class="ac-muted" style="font-size:12.5px">点上方「新建成果」逐条录入，或用「${ico('upload')}上传成果文件」把你的论文 PDF 批量导入并自动识别字段</p>`
         + `<p class="ac-muted" style="font-size:12.5px">论文 / 专利 / 证书 / 教材 / 项目证明都可以放在这里；附件支持 PDF、Word、PPT、Excel、代码等任意格式，双击即可用系统程序打开</p></div>`;
     } else {
       wrap.innerHTML = `<table class="ac-table"><thead>${head}</thead><tbody>${list.map((it) => {
@@ -384,7 +384,7 @@
           + `<td class="ac-col-pick"><input type="checkbox" data-pick="${esc(it.id)}" ${S.selected.has(it.id) ? 'checked' : ''} /></td>`
           + cols.map((c) => `<td>${cellHtml(it, c)}</td>`).join('')
           + `<td><button class="ac-mini" data-open="${esc(it.id)}">详情</button> `
-          + `<button class="ac-mini danger" data-del="${esc(it.id)}" title="删除">🗑</button></td></tr>`;
+          + `<button class="ac-mini danger" data-del="${esc(it.id)}" title="删除">${ico('trash')}</button></td></tr>`;
       }).join('')}</tbody></table>`;
     }
     renderBulk();
@@ -397,7 +397,7 @@
     box.classList.toggle('hidden', n === 0);
     if (!n) return;
     box.innerHTML = `<span><b>${n}</b> 项已选中</span>`
-      + `<button class="tb-btn" id="acBulkExport">⬇ 导出选中（含附件 ZIP）</button>`
+      + `<button class="tb-btn" id="acBulkExport">${ico('download')}导出选中（含附件 ZIP）</button>`
       + `<button class="tb-btn ghost" id="acBulkClear">取消选择</button>`;
   }
 
@@ -426,7 +426,7 @@
     const pct = Math.max(0, Math.min(100, Number(item.progressPercent) || 0));
     const done = item.stage === 'done';
     return `<div class="ac-card">
-      <div class="ac-card-head">🚀 在投进度
+      <div class="ac-card-head">${ico('zap')}在投进度
         <span class="tb-spacer"></span>
         <span class="ac-badge ${done ? 'done' : 'working'}">${esc(stageLabelOf(item))}</span>
         ${item.isDraft ? '<span class="ac-badge draft">草稿</span>' : ''}
@@ -458,17 +458,17 @@
   function filesCard(item) {
     const files = item.files || [];
     return `<div class="ac-card">
-      <div class="ac-card-head">📎 附件（${files.length}）
+      <div class="ac-card-head">${ico('clip')}附件（${files.length}）
         <span class="tb-spacer"></span>
-        <button class="ac-mini" data-attach="main">⬆ 上传正文</button>
-        <button class="ac-mini" data-attach="searchReport">⬆ 上传检索报告</button>
-        <button class="ac-mini" data-attach="other">⬆ 上传其它文件</button>
+        <button class="ac-mini" data-attach="main">${ico('upload')}上传正文</button>
+        <button class="ac-mini" data-attach="searchReport">${ico('upload')}上传检索报告</button>
+        <button class="ac-mini" data-attach="other">${ico('upload')}上传其它文件</button>
       </div>
       ${files.length ? `<div class="ac-flist">${files.map((f) => `<div class="ac-frow">
         <span class="ac-fkind">${esc(fkLabel(f.kind))}</span>
         <span class="ac-fname">${esc(f.originalName)}<div class="ac-fmeta">${fmtSize(f.fileSize)}${f.ext ? ` · .${esc(f.ext)}` : ''}${f.appHint ? ` · 通常用 ${esc(f.appHint)} 打开` : ''}</div></span>
         <span class="ac-facts">
-          ${isPdfFile(f) ? `<button class="ac-mini accent" data-fread="${esc(f.id)}" title="在终端内阅读：连续翻页 + 划词翻译 + 全文翻译（英文论文可边读边译）">📖 阅读</button>` : ''}
+          ${isPdfFile(f) ? `<button class="ac-mini accent" data-fread="${esc(f.id)}" title="在终端内阅读：连续翻页 + 划词翻译 + 全文翻译（英文论文可边读边译）">${ico('book-open')}阅读</button>` : ''}
           <button class="ac-mini" data-fopen="${esc(f.id)}" data-mode="default" title="用系统默认程序打开">打开</button>
           <button class="ac-mini" data-fopen="${esc(f.id)}" data-mode="pick" title="自己选择打开程序">用其它程序…</button>
           <button class="ac-mini" data-fprev="${esc(f.id)}" title="在应用内预览">预览</button>
@@ -492,17 +492,17 @@
 
     box.innerHTML = `
       <div class="ac-detail-top">
-        <span>${cat.icon}</span>
+        <span>${ico(cat.icon)}</span>
         <span class="ac-dt-title" title="${esc(item.title || '未命名成果')}">${esc(item.title || '未命名成果')}</span>
-        <select id="acDtCat">${(S.meta?.categories || []).map((c) => `<option value="${c.key}" ${c.key === item.category ? 'selected' : ''}>${c.icon} ${esc(c.label)}</option>`).join('')}</select>
+        <select id="acDtCat">${(S.meta?.categories || []).map((c) => `<option value="${c.key}" ${c.key === item.category ? 'selected' : ''}>${c.label}</option>`).join('')}</select>
         <select id="acDtStage">${['done', 'working'].map((s) => `<option value="${s}" ${item.stage === s ? 'selected' : ''}>${esc((S.meta?.stageLabels?.[item.category] || {})[s] || s)}</option>`).join('')}</select>
-        <select id="acDtFolder">${S.folders.map((f) => `<option value="${esc(f.id)}" ${String(item.folderId || '') === String(f.id) ? 'selected' : ''}>📁 ${esc(f.name)}</option>`).join('')}</select>
+        <select id="acDtFolder">${S.folders.map((f) => `<option value="${esc(f.id)}" ${String(item.folderId || '') === String(f.id) ? 'selected' : ''}>${ico('folder')}${esc(f.name)}</option>`).join('')}</select>
         <span class="ac-dt-spacer"></span>
         <button id="acDtClose" title="关闭">✕ 关闭</button>
       </div>
       <div class="ac-detail-body">
         <div class="ac-card">
-          <div class="ac-card-head">🧠 字段识别
+          <div class="ac-card-head">${ico('brain')}字段识别
             <span class="tb-spacer"></span>
             <select id="acDtModel" class="tb-select" style="max-width:200px">${S.modelChoices.map((m) => `<option value="${esc(m.id)}" ${m.id === pickedModelId() ? 'selected' : ''}>${esc(m.label)}${m.active ? ' ★' : ''}</option>`).join('')}</select>
             <button class="ac-mini" data-parse="main">识别正文，自动填字段</button>
@@ -527,8 +527,8 @@
       <div class="ac-detail-foot">
         <span class="ac-muted" id="acDtHint">${item.isDraft ? '这条是草稿，随时补充后保存即可' : `更新时间 ${esc(fmtDate(item.updatedAt))}`}</span>
         <span class="tb-spacer"></span>
-        <button class="tb-btn" id="acDtExportOne">⬇ 导出这条（含附件）</button>
-        <button class="tb-btn" id="acDtDraft">💾 保存草稿</button>
+        <button class="tb-btn" id="acDtExportOne">${ico('download')}导出这条（含附件）</button>
+        <button class="tb-btn" id="acDtDraft">${ico('save')}保存草稿</button>
         <button class="tb-btn accent" id="acDtSave">保存</button>
       </div>
     `;
@@ -836,7 +836,7 @@
         <div class="ac-modal-head">＋ 新建成果<span class="tb-spacer"></span><button class="ac-mini" data-close="1">✕</button></div>
         <div class="ac-modal-body">
           <div class="ac-type-grid" id="acTypeGrid">
-            ${cats.map((c) => `<div class="ac-type-opt ${c.key === picked ? 'active' : ''}" data-type="${c.key}"><span>${c.icon}</span><span>${esc(c.label)}</span></div>`).join('')}
+            ${cats.map((c) => `<div class="ac-type-opt ${c.key === picked ? 'active' : ''}" data-type="${c.key}"><span>${ico(c.icon)}</span><span>${esc(c.label)}</span></div>`).join('')}
           </div>
           <div class="ac-form" style="margin-top:12px">
             <div class="ac-field wide"><label>名称</label><input type="text" id="acNewTitle" placeholder="例如：平台生态系统的价值共创机制研究" /></div>
@@ -895,12 +895,12 @@
   function importFilesModal() {
     const mask = openMask(`
       <div class="ac-modal" role="dialog" aria-modal="true">
-        <div class="ac-modal-head">⬆ 上传成果文件（自动建档）<span class="tb-spacer"></span><button class="ac-mini" data-close="1">✕</button></div>
+        <div class="ac-modal-head">${ico('upload')}上传成果文件（自动建档）<span class="tb-spacer"></span><button class="ac-mini" data-close="1">✕</button></div>
         <div class="ac-modal-body">
           <p style="margin:0 0 10px">选一批 PDF / Word 文件，系统会为每个文件建一条成果记录、挂上附件，并尝试自动识别字段（标题 / 作者 / 期刊 / 年份 / DOI / 摘要…）。</p>
           <div class="ac-form">
             <div class="ac-field"><label>成果类型</label>
-              <select id="acImpCat">${(S.meta?.categories || []).map((c) => `<option value="${c.key}" ${c.key === (S.filter.category === '__all__' ? 'paper' : S.filter.category) ? 'selected' : ''}>${c.icon} ${esc(c.label)}</option>`).join('')}</select></div>
+              <select id="acImpCat">${(S.meta?.categories || []).map((c) => `<option value="${c.key}" ${c.key === (S.filter.category === '__all__' ? 'paper' : S.filter.category) ? 'selected' : ''}>${c.label}</option>`).join('')}</select></div>
             <div class="ac-field"><label>阶段</label>
               <select id="acImpStage">
                 <option value="done">已完成（已出版发行）</option>

@@ -13,12 +13,14 @@ import { FIELDS as LITERATURE_FIELDS, FIELD_LABELS as LITERATURE_FIELD_LABELS } 
 
 // ---------------- 类型 ----------------
 
+// icon 存的是 public/index.html 里 <symbol id="i-xxx"> 的图标名（不再用 emoji），
+// 前端统一用 ico(c.icon) 渲染。改这里要同步确认精灵里有同名 symbol。
 export const CATEGORIES = [
-  { key: 'paper', label: '论文', icon: '📄' },
-  { key: 'patent', label: '专利', icon: '⚙️' },
-  { key: 'certificate', label: '证书', icon: '🏅' },
-  { key: 'textbook', label: '教材', icon: '📚' },
-  { key: 'project', label: '项目证明', icon: '📁' },
+  { key: 'paper', label: '论文', icon: 'file' },
+  { key: 'patent', label: '专利', icon: 'settings' },
+  { key: 'certificate', label: '证书', icon: 'award' },
+  { key: 'textbook', label: '教材', icon: 'book' },
+  { key: 'project', label: '项目证明', icon: 'folder' },
 ];
 
 export const CATEGORY_KEYS = CATEGORIES.map((c) => c.key);

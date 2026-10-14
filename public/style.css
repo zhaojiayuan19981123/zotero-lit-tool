@@ -35,11 +35,14 @@
   --border-soft: #ebebef;
   --hair: #ebebef;
 
-  /* 文字三级 */
-  --text: #1c1c1e;
+  /* 文字四级 —— 每级都按 WCAG AA（≥4.5:1）实测卡过对比度，
+     最浅的 --text-3 也保证在 --surface 上 ≥4.5，避免小字糊成一片。
+     口径：--text 正文 / --text-2 次级 / --text-3 辅助说明 / --muted 最弱，
+     但 --muted 绝不取面板色（历史上取成 #f0f0f4 导致整页小字隐形）。 */
+  --text: #1c1c1e;   /* vs surface 17.0 */
   --text-1: #1c1c1e;
-  --text-2: #545458;
-  --text-3: #8a8a8e;
+  --text-2: #48484d; /* vs surface  8.6 */
+  --text-3: #6b6b72; /* vs surface  5.1 */
 
   /* 品牌主色：iOS System Indigo */
   --primary: #5856d6;
@@ -48,22 +51,22 @@
   --primary-light: #7d7aff;
   --on-primary: #ffffff;
 
-  /* 强调 / 链接：iOS System Blue */
-  --accent: #007aff;
-  --accent-hover: #0066d6;
+  /* 强调 / 链接：iOS System Blue（略压深以保证白底 4.5+） */
+  --accent: #0066d6;
+  --accent-hover: #0055b8;
   --accent-2: #5856d6;
-  --accent-coral: #ff6b52;
-  --accent-gold: #c8942f;
+  --accent-coral: #d9482c;
+  --accent-gold: #96690f;
   --accent-soft: #e8f1ff;
 
   /* 侧边栏 */
   --side-1: #ffffff;
   --side-2: #f7f7fa;
   --side-text: #1c1c1e;
-  --side-muted: #8a8a8e;
+  --side-muted: #6b6b72;
   --side-hover: rgba(0, 0, 0, .045);
   --side-active: rgba(88, 86, 214, .10);
-  --side-border: #ebebef;
+  --side-border: #e6e6ec;
   --side-marker: #5856d6;
 
   /* 面板 / 行 */
@@ -73,18 +76,20 @@
   --panel-2-hover: #e6e6ec;
   --row-hover: #f5f5f8;
   --head-bg: #f9f9fb;
-  --muted: #f0f0f4;
+  /* 弱化文字色（次级说明、统计标签、行内提示）。
+     ⚠️ 别再写回面板色：它被 22 处直接当 color 用，一旦取近白值整页文字就会「消失」。 */
+  --muted: #5f5f66;
 
   /* 控件 */
   --scrollbar: #c9c9d0;
   --scrollbar-hover: #a8a8b2;
   --btn-border: #d1d1d8;
   --dash-border: #d1d1d8;
-  --gray: #8a8a8e;
+  --gray: #6b6b72;
   --gray-soft: #f0f0f4;
 
   /* 语义色 */
-  --green: #248a3d;
+  --green: #1f7a35;
   --green-soft: #e6f6ea;
   --orange: #b25000;
   --orange-soft: #fdf0e3;
@@ -97,8 +102,8 @@
   --pill-hover: #3a3a3c;
   --pill-text: #ffffff;
   --ink: #1c1c1e;
-  --ink-2: #545458;
-  --ink-3: #8a8a8e;
+  --ink-2: #48484d;
+  --ink-3: #6b6b72;
   --hl: #fdf0b8;
 
   /* 阴影 / 焦点环 */
@@ -122,8 +127,8 @@
 
   --text: #f2f2f7;
   --text-1: #f2f2f7;
-  --text-2: #aeaeb2;
-  --text-3: #8e8e93;
+  --text-2: #c7c7cc; /* vs surface 11.8 */
+  --text-3: #a1a1a8; /* vs surface  7.3 */
 
   --primary: #7d7aff;
   --primary-hover: #918fff;
@@ -141,11 +146,13 @@
   --side-1: #1c1c1e;
   --side-2: #161618;
   --side-text: #f2f2f7;
-  --side-muted: #8e8e93;
+  --side-muted: #a1a1a8;
   --side-hover: rgba(255, 255, 255, .07);
   --side-active: rgba(125, 122, 255, .18);
   --side-border: #2c2c2e;
-  --side-marker: #7d7aff;
+  /* 活动项文字色：受 --side-active 半透明叠底影响，实际背景约 rgb(41,40,66)。
+     原来的 #7d7aff 只有 4.13，压到 #a5a2ff 后 6.4+。 */
+  --side-marker: #a5a2ff;
 
   --panel: #1c1c1e;
   --panel-soft: #1c1c1e;
@@ -153,13 +160,14 @@
   --panel-2-hover: #3a3a3c;
   --row-hover: #252527;
   --head-bg: #1c1c1e;
-  --muted: #2c2c2e;
+  /* 弱化文字色（同浅色主题说明） */
+  --muted: #a1a1a8;
 
   --scrollbar: #48484a;
   --scrollbar-hover: #636366;
   --btn-border: #48484a;
   --dash-border: #48484a;
-  --gray: #8e8e93;
+  --gray: #a1a1a8;
   --gray-soft: #2c2c2e;
 
   --green: #30d158;
@@ -174,8 +182,8 @@
   --pill-hover: #ffffff;
   --pill-text: #1c1c1e;
   --ink: #f2f2f7;
-  --ink-2: #aeaeb2;
-  --ink-3: #8e8e93;
+  --ink-2: #c7c7cc;
+  --ink-3: #a1a1a8;
   --hl: #5c4a10;
 
   --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 4px 12px rgba(0, 0, 0, .4);
@@ -196,10 +204,10 @@
   --border-soft: #e8dfc9;
   --hair: #e8dfc9;
 
-  --text: #3a3327;
-  --text-1: #3a3327;
-  --text-2: #6b6252;
-  --text-3: #918876;
+  --text: #322b1f;
+  --text-1: #322b1f;
+  --text-2: #5a5140; /* vs surface 8.2 */
+  --text-3: #6f6552; /* vs surface 6.1 */
 
   --primary: #8a6b3f;
   --primary-hover: #73592f;
@@ -207,21 +215,22 @@
   --primary-light: #a88555;
   --on-primary: #fffaf0;
 
-  --accent: #a8762c;
-  --accent-hover: #8e6220;
+  --accent: #8e6220;
+  --accent-hover: #77511a;
   --accent-2: #8a6b3f;
-  --accent-coral: #b5603f;
-  --accent-gold: #a8762c;
+  --accent-coral: #a34f30;
+  --accent-gold: #8e6220;
   --accent-soft: #f3e8d2;
 
   --side-1: #fdf8ee;
   --side-2: #f6efe1;
-  --side-text: #3a3327;
-  --side-muted: #8a8272;
+  --side-text: #322b1f;
+  --side-muted: #6f6552;
   --side-hover: rgba(138, 107, 63, .08);
   --side-active: rgba(138, 107, 63, .16);
-  --side-border: #e8dfc9;
-  --side-marker: #8a6b3f;
+  --side-border: #e0d5bb;
+  /* 活动项文字色：叠底后约 rgb(228,218,199)，原来 #7a5c33 只有 4.45，压深后 5.4+ */
+  --side-marker: #6a4f2a;
 
   --panel: #f8f1e4;
   --panel-soft: #f8f1e4;
@@ -229,13 +238,13 @@
   --panel-2-hover: #e6dbc4;
   --row-hover: #f3ebdc;
   --head-bg: #f8f1e4;
-  --muted: #efe6d3;
+  --muted: #665c48;
 
   --scrollbar: #c4b899;
   --scrollbar-hover: #a89a78;
   --btn-border: #d5c9ac;
   --dash-border: #d5c9ac;
-  --gray: #8a8272;
+  --gray: #6f6552;
   --gray-soft: #efe6d3;
 
   --green: #3d7a3d;
@@ -244,20 +253,38 @@
   --orange-soft: #f7ead3;
   --red: #b03a2e;
   --red-soft: #f6e3df;
-  --star: #a8762c;
+  --star: #8e6220;
 
   --pill: #6b5533;
   --pill-hover: #57452a;
   --pill-text: #fffaf0;
-  --ink: #3a3327;
-  --ink-2: #6b6252;
-  --ink-3: #918876;
+  --ink: #322b1f;
+  --ink-2: #5a5140;
+  --ink-3: #6f6552;
   --hl: #f5e2a8;
 
   --shadow: 0 1px 2px rgba(90, 70, 40, .07), 0 4px 12px rgba(90, 70, 40, .07);
   --shadow-lg: 0 12px 34px rgba(90, 70, 40, .18);
   --ring: rgba(138, 107, 63, .45);
   --overlay: rgba(58, 51, 39, .38);
+}
+
+/* ---------- 主题切换过渡 ----------
+   切换瞬间由 JS 给 <html> 挂上 .theme-anim（约 260ms 后移除）。
+   这样做而不是常驻 transition：常驻会让「滚动条颜色 / 阴影 / 焦点环」等一切颜色属性
+   都带上 0.26s 延迟，拖动窗口、缩放字号时会出现颜色拖尾。
+   只过渡颜色类属性，不动 layout。 */
+html.theme-anim,
+html.theme-anim *,
+html.theme-anim *::before,
+html.theme-anim *::after {
+  transition: background-color .26s var(--ease), color .26s var(--ease),
+              border-color .26s var(--ease), fill .26s var(--ease), stroke .26s var(--ease) !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
+    transition: none !important;
+  }
 }
 
 
@@ -324,12 +351,6 @@ input, select, textarea { font-family: inherit; }
 .brand-logo-img { width: 30px; height: 30px; border-radius: 8px; box-shadow: 0 1px 4px rgba(19,55,47,.22); display: block; }
 .brand h1 { margin: 0; font-size: 17px; font-weight: 700; }
 .brand-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
-.brand-copy > span { margin-top: 3px; color: var(--text-3); font-size: 9.5px; font-weight: 600; text-transform: uppercase; }
-.ai-badge {
-  font-size: 11px; font-weight: 600; color: var(--on-primary);
-  background: var(--primary);
-  border-radius: 4px; padding: 1px 6px;
-}
 .topbar-actions {
   display: flex; gap: 8px; align-items: center; min-width: 0; flex: 1;
   /* The model menu is anchored here. An overflow container would clip the menu
@@ -341,17 +362,12 @@ input, select, textarea { font-family: inherit; }
    搜索框移入侧边栏（搜的是文献，只有文献相关的视图才用得上），
    顶栏腾出的位置用来显示"我现在在哪"，降低 15 个模块之间的迷路感。 */
 .topbar-page-title {
-  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  flex: 1; min-width: 0; display: flex; align-items: center;
   line-height: 1.2; padding-right: 8px;
 }
 .topbar-page-title b {
   font-size: 15px; font-weight: 700; color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.topbar-page-title span {
-  font-size: 11.5px; color: var(--text-3);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  margin-top: 1px;
 }
 .search {
   padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px;
@@ -797,10 +813,6 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .th-ico { color: var(--text-3); font-size: 12px; }
 .th-name { overflow: hidden; text-overflow: ellipsis; }
 .th-drag { color: var(--text-3); cursor: grab; font-size: 10px; }
-.col-ai {
-  font-size: 10px; color: var(--primary); background: var(--primary-soft);
-  border-radius: 3px; padding: 0 4px; font-weight: 600; flex-shrink: 0;
-}
 .th-info { color: var(--text-3); font-size: 11px; cursor: help; }
 
 .grid tbody td {
@@ -1167,8 +1179,6 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 
 @media (max-width: 720px) {
   .brand h1 { font-size: 14px; }
-  .brand-copy > span, .ai-badge { display: none; }
-  .topbar-page-title span { display: none; }
   .side-foot-label { display: none; }
   .update-body { grid-template-columns: 42px minmax(0, 1fr); }
   .update-state-icon { width: 40px; height: 40px; font-size: 20px; }
@@ -1521,7 +1531,6 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
   font-size: 11.5px; font-weight: 700; color: var(--primary);
   display: flex; align-items: center; gap: 5px;
 }
-.pr-an-label .col-ai { font-size: 9.5px; }
 .pr-an-value {
   font-size: 13px; line-height: 1.65; color: var(--text);
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
@@ -1888,7 +1897,8 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .nav-item {
   display: flex; align-items: center; gap: 10px;
   padding: 7px 10px; border-radius: 7px; font-size: 13px; color: var(--side-text);
-  cursor: pointer; user-select: none; transition: background .12s, color .12s;
+  cursor: pointer; user-select: none;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
   font-weight: 500; position: relative; line-height: 1.35;
 }
 .nav-item:hover { background: var(--side-hover); color: var(--side-text); }
@@ -1897,8 +1907,15 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .nav-item.active::before {
   content: ''; position: absolute; left: -10px; top: 7px; bottom: 7px;
   width: 3px; background: var(--side-marker); border-radius: 0 3px 3px 0;
+  /* iOS 标签栏那种「指示条落位」的弹性感：只播一次，随 active 类切换重放 */
+  animation: navMarker .28s cubic-bezier(.34, 1.4, .64, 1);
+  transform-origin: center;
 }
-.nav-item .ico { color: var(--side-muted); transition: color .12s; }
+@keyframes navMarker {
+  from { transform: scaleY(.2); opacity: .3; }
+  to   { transform: scaleY(1); opacity: 1; }
+}
+.nav-item .ico { color: var(--side-muted); transition: color var(--dur) var(--ease); }
 .nav-item:hover .ico { color: var(--side-text); }
 .nav-item.active .ico { color: var(--side-marker); }
 /* 旧版用 <span class="nav-ico"> 承载 emoji，保留兜底避免动态生成的节点没有图标 */
@@ -2001,8 +2018,28 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .mail-notif-close:hover { background: var(--gray-soft); color: var(--text); }
 
 /* 视图容器 */
-.main-area > .view { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 4px 20px 40px; animation: viewIn .18s ease; }
-@keyframes viewIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* 切页过渡：贴近 iOS 的「淡入 + 轻微上浮 + 极小缩放」。
+   iOS 的页面转场是「前一段快速起步、后段缓慢收尾」，所以用带过冲感的 cubic-bezier
+   而非 ease；位移取 8px、缩放取 0.992 —— 都在「能感觉到但不夸张」的区间。
+   ⚠️ 不用 animation-fill-mode: forwards：视图是常驻 DOM，靠 .hidden 切换，
+   动画只在 display 由 none 变回时重放一次，不要让它永久保留 transform（会创建层叠上下文，
+   让 sticky 表头、position:fixed 的浮层定位出错）。 */
+.main-area > .view {
+  flex: 1 1 0; min-height: 0; overflow-y: auto; padding: 4px 20px 40px;
+  animation: viewIn .3s cubic-bezier(.32, .72, 0, 1);
+}
+@keyframes viewIn {
+  from { opacity: 0; transform: translateY(8px) scale(.992); }
+  to   { opacity: 1; transform: none; }
+}
+/* 无障碍：系统要求「减弱动态效果」时只保留最轻的淡入，不做位移与缩放。 */
+@media (prefers-reduced-motion: reduce) {
+  .main-area > .view { animation: viewFade .16s linear; }
+  @keyframes viewFade { from { opacity: 0; } to { opacity: 1; } }
+  .nav-item, .nav-item::before, .side-icon-btn, .theme-mode-card, .btn, .tb-btn, .tab {
+    transition-duration: .01ms !important;
+  }
+}
 .view-toolbar { display: flex; align-items: center; gap: 10px; padding: 12px 0; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
 .card-plain { box-shadow: none; padding: 12px 14px; }
@@ -2471,7 +2508,10 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
   display: inline-block; font-size: 11px; font-weight: 600; color: var(--primary);
   background: var(--primary-soft); padding: 3px 10px; border-radius: 20px; margin-bottom: 12px;
 }
-.ob-emoji { font-size: 42px; line-height: 1; margin-bottom: 12px; }
+/* 引导：标题上方的图标。原来是 42px 的 emoji，现在是同一尺寸的 SVG，
+   颜色统一用主色而不是各平台 emoji 字形——三套主题下都稳。 */
+.ob-emoji { font-size: 42px; line-height: 1; margin-bottom: 12px; color: var(--primary); }
+.ob-emoji .ico { width: 40px; height: 40px; stroke-width: 1.3; display: block; }
 .ob-title { margin: 0 0 10px; font-size: 20px; font-weight: 700; color: var(--text); line-height: 1.35; }
 .ob-desc { margin: 0 0 20px; font-size: 13.5px; color: var(--text-2); line-height: 1.7; }
 .ob-desc b { color: var(--primary); font-weight: 600; }
@@ -2480,9 +2520,12 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
   position: relative; padding: 8px 10px 8px 30px; font-size: 12.5px; color: var(--text-2);
   background: var(--gray-soft); border-radius: 8px; line-height: 1.55;
 }
-.ob-points li::before {
-  content: attr(data-ico); position: absolute; left: 9px; top: 8px; font-size: 13px;
+/* 行首图标：内联 SVG 取代原来的 `content: attr(data-ico)` 文本伪元素
+   （伪元素取不到 <use>，只能拿字符串，所以图标必须走真实节点）。 */
+.ob-points li > .ob-li-ico {
+  position: absolute; left: 8px; top: 8px; display: flex; color: var(--text-3);
 }
+.ob-points li > .ob-li-ico .ico { width: 14px; height: 14px; }
 .ob-points li b { color: var(--text); font-weight: 600; }
 .ob-points li code {
   font-family: "Cascadia Code", "SF Mono", Consolas, monospace; font-size: 11.5px;
