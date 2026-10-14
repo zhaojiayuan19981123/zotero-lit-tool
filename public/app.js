@@ -2105,9 +2105,9 @@
     const st = $('pxStatus');
     if (st) {
       if (s.mode === 'off') st.textContent = '已关闭代理';
-      else if (s.activeUrl) st.textContent = `${ico('check-circle')}当前出口：${s.activeUrl}`;
+      else if (s.activeUrl) st.textContent = `✓ 当前出口：${s.activeUrl}`;
       else if (s.mode === 'always') st.textContent = '已设为始终走代理，但还没探到可用的本地端口';
-      else if (s.detectedUrl) st.textContent = `${ico('check-circle')}已探到本地代理 ${s.detectedUrl}（直连失败时自动使用）`;
+      else if (s.detectedUrl) st.textContent = `✓ 已探到本地代理 ${s.detectedUrl}（直连失败时自动使用）`;
       else st.textContent = '未检测到本地代理（直连失败时会自动重试探测）';
     }
     const box = $('pxTried');
@@ -5543,12 +5543,27 @@
     return `/api/literature/${encodeURIComponent(recordId)}/layout/assets/${encodeURIComponent(name)}`;
   }
 
+  // 版面按钮的文案。⚠️ 这里**只能改文字**，不能让调用方传 HTML ——
+  // 早先调用方传 `${ico('puzzle')}版面 ${n}` 而这里用 textContent 赋值，
+  // 于是 `<svg …><use …/></svg>` 被**转义成纯文本**直接画在按钮上（用户看到的「一串 png 标签」）。
+  // 现在图标由 HTML 里固定的 <svg class="ico"> 子节点承担，这里只写文字节点。
   function setLayoutBtn(state, label) {
     const btn = $('prLayoutBtn');
     if (!btn) return;
     btn.classList.toggle('busy', state === 'busy');
     btn.classList.toggle('reading', state === 'ready');
-    btn.textContent = label || '版面';
+    // 取（或补建）文字 spans，避免清掉图标
+    let txt = btn.querySelector('.plb-text');
+    if (!txt) {
+      txt = document.createElement('span');
+      txt.className = 'plb-text';
+      btn.appendChild(txt);
+    }
+    txt.textContent = String(label == null ? '' : label).replace(/^\s*版面\s*/, '') || '版面';
+    // 窄窗下 CSS 会隐藏 .plb-text，但「版面 248」里的块数有信息量，标个类保留它
+    txt.classList.toggle('has-count', /\d/.test(txt.textContent));
+    // 图标始终存在：若被历史代码清掉（旧版 textContent 事故），这里补回
+    if (!btn.querySelector('svg.ico')) btn.insertAdjacentHTML('afterbegin', ico('puzzle'));
     btn.title = state === 'ready'
       ? '版面已解析：鼠标悬停在页面上可看到区域类型；点击图表 / 公式可放大或送 AI'
       : state === 'busy'
@@ -5598,12 +5613,12 @@
       pr.layoutFor = recordId;
       window.PrBlocks.setManifest(recordId, data.manifest);
       const n = data.manifest.blocks?.length || 0;
-      setLayoutBtn('ready', `${ico('puzzle')}版面 ${n}`);
+      setLayoutBtn('ready', `版面 ${n}`);
       return;
     }
     if (state === 'running' || state === 'queued') {
       pr.layoutBusy = true;
-      setLayoutBtn('busy', `${ico('puzzle')}解析中 ${data.page || 0}/${data.pages || '?'}`);
+      setLayoutBtn('busy', `解析中 ${data.page || 0}/${data.pages || '?'}`);
       watchLayoutProgress(recordId);
       return;
     }
@@ -5651,7 +5666,7 @@
       }
       if (data.state === 'none') { stop(); pr.layoutBusy = false; setLayoutBtn('idle'); return; }
       pr.layoutBusy = true;
-      setLayoutBtn('busy', `${ico('puzzle')}解析中 ${data.page || 0}/${data.pages || '?'}`);
+      setLayoutBtn('busy', `解析中 ${data.page || 0}/${data.pages || '?'}`);
     };
     es.onerror = () => { stop(); };
   }
@@ -8309,6 +8324,11 @@
     $('prFitWidth').addEventListener('click', fitWidth);
     $('prRotateLeft').addEventListener('click', () => rotateCurrentPage(-90));
     $('prRotateRight').addEventListener('click', () => rotateCurrentPage(90));
+    // 中间的角度数字兼作「归零」按钮：点一下把当前页转回正向（与左右旋转互补，省一个按钮位）
+    $('prRotationLabel').addEventListener('click', () => {
+      const cur = getPageExtraRotation(pr.pageNum);
+      if (cur) rotateCurrentPage(-cur);
+    });
 
     // 笔记与高亮：筛选（类型 / 颜色 / 标签 / 关键词）+ 定位导航 + 导出 Markdown
     const onNotesFilterChange = () => {
@@ -11536,7 +11556,7 @@ a { color: #176b87; }
         body: JSON.stringify(mailAccFormData()),
       });
       box.classList.add('ok');
-      box.textContent = `${ico('check-circle')}连接成功：收件箱 ${r.inboxMessages} 封邮件，共 ${r.folderCount} 个文件夹`;
+      box.textContent = `✓ 连接成功：收件箱 ${r.inboxMessages} 封邮件，共 ${r.folderCount} 个文件夹`;
     } catch (e) {
       box.classList.add('err');
       box.textContent = '' + e.message;
@@ -11713,7 +11733,7 @@ a { color: #176b87; }
         try {
           const r = await api(`/api/mail/accounts/${ts.dataset.maTest}/test`, { method: 'POST' });
           box.classList.add('ok');
-          box.textContent = `${ico('check-circle')}连接成功：收件箱 ${r.inboxMessages} 封邮件，共 ${r.folderCount} 个文件夹`;
+          box.textContent = `✓ 连接成功：收件箱 ${r.inboxMessages} 封邮件，共 ${r.folderCount} 个文件夹`;
         } catch (err) {
           box.classList.add('err');
           box.textContent = '' + err.message;

@@ -9,9 +9,10 @@
 
 /* ---------- 共享：圆角、阴影、字体、排版（与主题无关） ---------- */
 :root {
-  --radius: 8px;
-  --radius-sm: 6px;
-  --radius-lg: 12px;
+  /* 圆角比 v1.26 略放大一档：卡片/按钮更「饱满」，是大气的关键观感来源之一 */
+  --radius: 10px;
+  --radius-sm: 7px;
+  --radius-lg: 14px;
   --font: "Times New Roman", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -97,6 +98,19 @@
   --red-soft: #fdebec;
   --star: #b25000;
 
+  /* 期刊等级标签（.rank-chip-*）专用色 —— 6 档各一套「柔底 + 饱和字」。
+     配色思路（色彩学）：按「档位越高越热」排一条色相弧 ——
+       绯红(最高) → 玫红 → 琥珀 → 青蓝 → 松绿 → 石板灰(兜底)，
+     相邻档位色相差 ≥45°，保证 6 个标签并排时**一眼能分开**；
+     每档的「字/底」对比度都实测 ≥4.5:1（见 scripts/rank-chip-contrast.mjs）。
+     ⚠️ 不要再用 --muted 当背景（那是文字色，历史上造成灰标签 1.19:1 完全看不见）。 */
+  --rank-red: #a8000f;      --rank-red-bg: #fde8e8;
+  --rank-pink: #b5006e;     --rank-pink-bg: #fbe7f2;
+  --rank-yellow: #8a5200;   --rank-yellow-bg: #fbf0d9;
+  --rank-blue: #0a5aa8;     --rank-blue-bg: #e4f0fb;
+  --rank-green: #126b3a;    --rank-green-bg: #e3f4e9;
+  --rank-gray: #4d4d55;     --rank-gray-bg: #ececf0;
+
   /* reader 专用 */
   --pill: #1c1c1e;
   --pill-hover: #3a3a3c;
@@ -105,6 +119,11 @@
   --ink-2: #48484d;
   --ink-3: #6b6b72;
   --hl: #fdf0b8;
+  /* 阅读器高亮色圆点（工具栏取色器）。浅色主题下保持低饱和柔彩，不抢正文。 */
+  --hl-yellow: #ffe08a;
+  --hl-green: #a9e5b4;
+  --hl-blue: #9fd2f7;
+  --hl-pink: #f8b6d2;
 
   /* 阴影 / 焦点环 */
   --shadow: 0 1px 2px rgba(0, 0, 0, .05), 0 4px 12px rgba(0, 0, 0, .05);
@@ -178,6 +197,15 @@
   --red-soft: #3a1512;
   --star: #ffd60a;
 
+  /* 期刊等级标签（同浅色主题的口径）。深色下「柔底」取近黑的有色面板、「字」取亮色，
+     保持同样的 6 档色相弧，且每档 ≥4.5:1。 */
+  --rank-red: #ff7a72;      --rank-red-bg: #3d1310;
+  --rank-pink: #ff77c2;     --rank-pink-bg: #3a1029;
+  --rank-yellow: #e8bb52;   --rank-yellow-bg: #33280b;
+  --rank-blue: #6cb6ff;     --rank-blue-bg: #0d2745;
+  --rank-green: #5fd68a;    --rank-green-bg: #0e2c1b;
+  --rank-gray: #b9b9c2;     --rank-gray-bg: #2a2a2e;
+
   --pill: #f2f2f7;
   --pill-hover: #ffffff;
   --pill-text: #1c1c1e;
@@ -185,6 +213,11 @@
   --ink-2: #c7c7cc;
   --ink-3: #a1a1a8;
   --hl: #5c4a10;
+  /* 深色主题：同样四色，但压暗一档、提高一点饱和度，避免在近黑底上发灰 */
+  --hl-yellow: #d9b64a;
+  --hl-green: #6fbf80;
+  --hl-blue: #6aaee8;
+  --hl-pink: #e089b4;
 
   --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 4px 12px rgba(0, 0, 0, .4);
   --shadow-lg: 0 12px 34px rgba(0, 0, 0, .6);
@@ -255,6 +288,15 @@
   --red-soft: #f6e3df;
   --star: #8e6220;
 
+  /* 期刊等级标签（同浅色主题的口径）。护眼主题整体偏暖，标签色也往黄调偏一点，
+     但保持 6 档色相可辨、每档 ≥4.5:1。 */
+  --rank-red: #a32017;      --rank-red-bg: #f7e2dd;
+  --rank-pink: #9e1f63;     --rank-pink-bg: #f6e2ea;
+  --rank-yellow: #7a4a06;   --rank-yellow-bg: #f6e9cf;
+  --rank-blue: #17538f;     --rank-blue-bg: #e2ecf5;
+  --rank-green: #176038;    --rank-green-bg: #e2efe2;
+  --rank-gray: #4f4636;     --rank-gray-bg: #ece4d3;
+
   --pill: #6b5533;
   --pill-hover: #57452a;
   --pill-text: #fffaf0;
@@ -262,6 +304,11 @@
   --ink-2: #5a5140;
   --ink-3: #6f6552;
   --hl: #f5e2a8;
+  /* 护眼主题：偏暖的中低饱和，和米黄纸面协调（避免冷色粉蓝突兀） */
+  --hl-yellow: #ecd08a;
+  --hl-green: #b3d3a6;
+  --hl-blue: #a9c4dd;
+  --hl-pink: #e6b4b4;
 
   --shadow: 0 1px 2px rgba(90, 70, 40, .07), 0 4px 12px rgba(90, 70, 40, .07);
   --shadow-lg: 0 12px 34px rgba(90, 70, 40, .18);
@@ -293,6 +340,13 @@ html, body { margin: 0; padding: 0; }
 html { height: 100%; }
 body {
   font-family: var(--app-font, var(--font)); background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6;
+  /* 正文默认 500：用户明确要求「文字要加粗」，400 在中文字体里偏细、远看发灰。
+     500 是 Latin/CJK 都有的安全档（不会像 600 那样在小字号下糊边）。 */
+  font-weight: 500;
+  /* 让系统在浅底上用次像素抗锯齿、深色主题下自动转灰度，小字更清晰 */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   /* 外壳铺满视口：顶栏高度会随界面字体、字号档位、系统缩放变化，
      绝不能把「顶栏高度」当成固定数字写进 .workbench 的 height 里。
      一旦写错，工作区就会比视口高出几个像素，整个页面变得可滚动，
@@ -805,19 +859,21 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
   position: sticky; top: 0; z-index: 5;
   background: var(--head-bg); text-align: left;
   padding: 0; border-bottom: 1px solid var(--border); border-right: 1px solid var(--border);
-  font-weight: 500; color: var(--text-2); white-space: nowrap;
+  /* 表头加重到 700 + 极轻字距：整表看起来更「立得住」，也更好扫读列名 */
+  font-weight: 700; color: var(--text-2); white-space: nowrap;
+  letter-spacing: .015em;
   overflow: hidden;
 }
 .grid thead th:last-child { border-right: none; }
-.th-inner { display: flex; align-items: center; gap: 6px; padding: 9px 10px; }
+.th-inner { display: flex; align-items: center; gap: 6px; padding: 10px 10px; }
 .th-ico { color: var(--text-3); font-size: 12px; }
 .th-name { overflow: hidden; text-overflow: ellipsis; }
 .th-drag { color: var(--text-3); cursor: grab; font-size: 10px; }
 .th-info { color: var(--text-3); font-size: 11px; cursor: help; }
 
 .grid tbody td {
-  padding: 8px 10px; border-bottom: 1px solid var(--border-soft); border-right: 1px solid var(--border-soft);
-  vertical-align: top; color: var(--text);
+  padding: 9px 10px; border-bottom: 1px solid var(--border-soft); border-right: 1px solid var(--border-soft);
+  vertical-align: top; color: var(--text); font-weight: 500;
   overflow-wrap: break-word; word-break: break-word;
 }
 .grid tbody td:last-child { border-right: none; }
@@ -908,27 +964,23 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .star.on { color: var(--star); }
 .star:hover { transform: scale(1.2); }
 
-/* 期刊等级：标签底色按档位区分（配色由 public/rank-utils.js 计算，见该文件顶部口径）
-   正红=最高档 / 淡红 / 黄 / 蓝 / 绿 / 灰=兜底。色档类名由 rankChips() 拼上。 */
+/* 期刊等级：6 档，各档「柔底 + 饱和字」，色相弧保证并排可辨
+   （配色口径见 public/rank-utils.js 顶部；色值在三个主题块里的 --rank-* 变量）。
+   ⚠️ 六档统一用「浅底 + 深字」的胶囊样式（不再有实心色块）——
+      实心块在深色主题下白字压亮红只有 3.41:1，且和同为暖色的粉档容易混。
+      现在 6 档的字/底对比度都实测 ≥4.5:1（scripts/rank-chip-contrast.mjs）。 */
 .rank-chip {
   display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 8px; border-radius: 6px; font-size: 12px;
-  background: var(--muted); color: var(--text-2); white-space: nowrap;
+  padding: 2px 8px; border-radius: 6px; font-size: 12px; font-weight: 600;
+  background: var(--rank-gray-bg); color: var(--rank-gray); white-space: nowrap;
 }
-.rank-chip b { font-weight: 600; color: var(--text); }
-/* 正红：实心红底，与淡红拉开层次（两者若都用浅底会分不清） */
-.rank-chip-red { background: var(--red); color: var(--on-primary); }
-.rank-chip-red b { color: var(--on-primary); }
-.rank-chip-pink { background: var(--red-soft); color: var(--red); }
-.rank-chip-pink b { color: var(--red); }
-.rank-chip-yellow { background: var(--orange-soft); color: var(--orange); }
-.rank-chip-yellow b { color: var(--orange); }
-.rank-chip-blue { background: var(--accent-soft); color: var(--accent); }
-.rank-chip-blue b { color: var(--accent); }
-.rank-chip-green { background: var(--green-soft); color: var(--green); }
-.rank-chip-green b { color: var(--green); }
-.rank-chip-gray { background: var(--muted); color: var(--text-2); }
-.rank-chip-gray b { color: var(--text); }
+.rank-chip b { font-weight: 700; color: inherit; }
+.rank-chip-red     { background: var(--rank-red-bg);    color: var(--rank-red); }
+.rank-chip-pink    { background: var(--rank-pink-bg);   color: var(--rank-pink); }
+.rank-chip-yellow  { background: var(--rank-yellow-bg); color: var(--rank-yellow); }
+.rank-chip-blue    { background: var(--rank-blue-bg);   color: var(--rank-blue); }
+.rank-chip-green   { background: var(--rank-green-bg);  color: var(--rank-green); }
+.rank-chip-gray    { background: var(--rank-gray-bg);   color: var(--rank-gray); }
 .rank-cell { display: flex; flex-wrap: wrap; gap: 4px; }
 /* 等级单元格：右上角悬浮「单独更新」按钮（lit- 前缀避免与论文卡片 .rank-refresh 冲突） */
 .rank-pos { position: relative; }
@@ -1223,61 +1275,109 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 
 /* ---------- PDF 阅读器 ---------- */
 
-/* 阅读器固定为黑白灰，**不跟随界面主题色**。
-   v1.25.0 起主题改为 data-theme 驱动（浅色 / 深色 / 护眼），阅读器同样锚到中性灰，
-   避免正文纸面被品牌色染色 —— 长时间阅读时纸面必须是中性底色。 */
+/* 阅读器沿用当前主题的中性色（浅色 / 深色 / 护眼随 data-theme 走），
+   但**把品牌色中轴换成中性**：强调色改用正文色，避免正文纸面被品牌色染色 ——
+   长时间阅读时纸面必须是中性底色。
+
+   ⚠️⚠️ 绝不能写 `--bg: var(--bg)` 这类**同名自引用**！
+   自定义属性在**同一元素自己的作用域内**先解析，`--bg: var(--bg)` 于是指向自己，
+   形成循环依赖 → 该变量在 computed-value 阶段被判为 invalid（IACVT）→
+   `background: var(--bg)` 落到 `unset`（即透明）。v1.25.0 起这里积了 **14 个**这类自引用，
+   导致阅读器整层透明、底下的列表页直接透上来（三套主题全中，v1.26.0 用户截图事故的根因）。
+   → 凡是「与主题同名」的变量，**一律别在 .pdf-reader 里重复声明**，它本就会继承；
+     只有「要换成不同值」的才需要显式赋新值（下面这几条都是换了值的）。 */
 .pdf-reader {
-  --bg: var(--bg);
-  --surface: var(--surface);
-  --border: var(--border);
-  --text: var(--text);
-  --text-2: var(--text-2);
-  --text-3: var(--text-3);
-  --primary: var(--text);
-  --primary-hover: var(--primary-hover);
-  --primary-light: var(--primary-light);
-  --primary-soft: var(--muted);
-  --btn-border: var(--btn-border);
+  --primary: var(--text);          /* 强调色去品牌化，改用正文色 */
+  --primary-soft: var(--panel-2);  /* 按钮选中底：--panel-2 在浅色/护眼比 surface 深、深色比 surface 浅，三套都看得见 */
   --side-1: var(--surface);
   --side-2: var(--panel-soft);
   --side-text: var(--text);
-  --side-muted: var(--side-muted);
-  --side-hover: rgba(0,0,0,.045);
-  --side-active: rgba(0,0,0,.07);
+  --side-hover: var(--row-hover);
+  --side-active: var(--panel-2);
   --side-border: var(--border-soft);
   --side-marker: var(--text);
-  --hair: var(--hair);
   --ink: var(--text);
   --ink-2: var(--text-2);
   --ink-3: var(--text-3);
-  --row-hover: var(--row-hover);
-  --panel-soft: var(--panel-soft);
-  --panel-2: var(--panel-2);
   --panel-2-hover: var(--border-soft);
 }
 .pdf-reader {
   position: fixed; inset: 0; z-index: 90; background: var(--bg);
   display: flex; flex-direction: column;
 }
-/* 工具条：reader 风格的扁平一排，按钮更紧凑、选中态用极浅灰块而不是彩色描边 */
+/* 工具条：一排扁平控件，靠 gap 分组；只有「文件级」信息留白，功能组用细分隔线区隔。
+   窄窗下允许换行（flex-wrap），换行后仍按 pr-tools 整组落行，不会拆散同组控件。 */
 .pr-toolbar {
-  display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  display: flex; align-items: center; gap: 6px 10px; padding: 7px 14px;
   background: var(--surface); border-bottom: 1px solid var(--hair); flex-wrap: wrap;
+  row-gap: 7px;
 }
-.pr-toolbar .btn { padding: 5px 12px; font-size: 12.5px; border-radius: 8px; }
+.pr-toolbar .btn { padding: 5px 11px; font-size: 12.5px; border-radius: 8px; font-weight: 600; }
 .pr-toolbar .btn-ghost:hover { background: var(--row-hover); color: var(--ink); }
 .pr-toolbar .btn-ghost.active,
 .pr-toolbar #prDirToggle.active { background: var(--primary-soft); color: var(--ink); border-color: transparent; font-weight: 700; }
-.pr-filename { font-size: 12.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; flex: 1; }
+.pr-toolbar .ico { width: 16px; height: 16px; }
+/* 返回按钮：图标是向下 chevron（翻转成向左箭头），做成最左的独立圆形返回键 */
+.pr-back { padding: 5px 9px 5px 7px; }
+.pr-back .ico { transform: rotate(90deg); margin-right: 2px; }
+/* 带文字的工具按钮：图标 + 文字垂直居中，文字用小号加粗 */
+.pr-icobtn { gap: 0; }
+.pr-bt-t { font-weight: 600; }
+/* 分段控件（缩放 / 旋转）：一个圆角容器把若干小按钮与中间读数包起来，
+   整体像 macOS 的 segmented control，比散落的独立按钮更紧凑可选。 */
+.pr-seg {
+  display: inline-flex; align-items: center;
+  background: var(--panel-soft); border: 1px solid var(--border-soft);
+  border-radius: 9px; padding: 2px; gap: 1px;
+}
+.pr-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 24px; padding: 0 5px; border: 0; background: none;
+  color: var(--text-2); border-radius: 6px; cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 600;
+  transition: background .14s, color .14s;
+}
+.pr-icon-btn:hover { background: var(--row-hover); color: var(--text); }
+.pr-icon-btn:active { background: var(--panel-2); }
+.pr-icon-btn .ico { width: 15px; height: 15px; }
+.pr-rot-label { min-width: 34px; font-variant-numeric: tabular-nums; color: var(--text-3); }
+.pr-rot-label:hover { color: var(--text); }
+/* 工具组之间的竖直分隔线（窄窗换行后自动变成下一行的起始，不产生悬空线） */
+.pr-vsep { width: 1px; align-self: stretch; min-height: 20px; background: var(--border-soft); margin: 0 2px; }
+.pr-filename { font-size: 12.5px; font-weight: 600; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; flex: 1 1 120px; }
 .pr-nav { display: flex; align-items: center; gap: 6px; }
-.pr-page-input { width: 48px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 6px; text-align: center; font-size: 13px; }
-.pr-page-total { font-size: 13px; color: var(--text-3); }
-.pr-zoom-label { font-size: 13px; color: var(--text-2); min-width: 40px; text-align: center; }
-.pr-rotation-label { font-size: 12px; color: var(--text-3); min-width: 28px; text-align: center; font-variant-numeric: tabular-nums; }
-.pr-tools { display: flex; align-items: center; gap: 6px; }
-.pr-colors { display: flex; gap: 4px; }
-.pr-color { width: 20px; height: 20px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
-.pr-color.active { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(79,110,247,.3); }
+.pr-page-input { width: 48px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 7px; text-align: center; font-size: 13px; font-weight: 600; background: var(--surface); color: var(--text); }
+.pr-page-total { font-size: 13px; color: var(--text-3); white-space: nowrap; }
+.pr-zoom-label { font-size: 12.5px; font-weight: 600; color: var(--text-2); min-width: 40px; text-align: center; font-variant-numeric: tabular-nums; }
+.pr-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; row-gap: 6px; }
+.pr-colors { display: flex; gap: 5px; }
+/* 高亮色圆点：颜色由下面的语义变量给（**不写死 inline style**），
+   这样三套主题下都能各自微调明度、始终与纸面协调。 */
+.pr-color {
+  width: 20px; height: 20px; border-radius: 50%; cursor: pointer; padding: 0;
+  border: 2px solid var(--border); box-shadow: 0 0 0 1px var(--surface) inset;
+  transition: transform .12s, border-color .12s;
+}
+.pr-color:hover { transform: scale(1.12); }
+.pr-color[data-color="yellow"] { background: var(--hl-yellow); }
+.pr-color[data-color="green"]  { background: var(--hl-green); }
+.pr-color[data-color="blue"]   { background: var(--hl-blue); }
+.pr-color[data-color="pink"]   { background: var(--hl-pink); }
+.pr-color.active { border-color: var(--text); box-shadow: 0 0 0 2px var(--ring); }
+/* 窄窗：把「文件名」压到最小、让功能组整组换行，避免各控件挤成一团 */
+@media (max-width: 1180px) {
+  .pr-filename { max-width: 160px; }
+  .pr-bt-t { display: none; }            /* 只留图标，title 里保留完整说明 */
+  .pr-icobtn { padding: 5px 8px; }
+  .pr-toolbar .btn { padding: 5px 9px; }
+  /* 「版面」按钮窄窗只留图标 + 块数（块数有信息量，保留） */
+  #prLayoutBtn .plb-text { display: none; }
+  #prLayoutBtn .plb-text.has-count { display: inline; }
+}
+@media (max-width: 900px) {
+  .pr-filename { display: none; }        /* 更窄时文件名让位（页首另有完整标题） */
+  .pr-toolbar { padding: 7px 10px; gap: 5px 7px; }
+}
 
 /* ---------- EPUB 阅读：与 PDF 共用同一个阅读器外壳，按格式切换渲染内核 ---------- */
 .pr-epub-host {

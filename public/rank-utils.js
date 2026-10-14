@@ -1,12 +1,19 @@
-/* rank-utils.js —— 期刊等级标签的配色（纯逻辑，无 DOM 依赖，便于单测）
+/* rank-utils.js —— 期刊等级标签的配色档位（纯逻辑，无 DOM 依赖，便于单测）
  *
- * 配色口径：
- *   正红 red    ：最高档 —— 中科院/新锐 的 Top、ABS 4*、FMS T1、CSSCI、UTD24
- *   淡红 pink   ：次高档 —— SSCI Q1 / 中科院·新锐 1 区
- *   黄   yellow ：SSCI Q2 / 中科院·新锐 2 区 / ABS 4 / FMS T2
- *   蓝   blue   ：SSCI Q3 / 中科院·新锐 3 区 / ABS 3 / FMS T3
- *   绿   green  ：SSCI Q4 / 中科院·新锐 4 区 / ABS 2
- *   灰   gray   ：其余（ABS 1、否定取值、认不出的写法、空值兜底）
+ * 本文件只负责「把某体系的取值解析成 6 个色档之一」，**具体色值在 style.css**
+ * （三套主题各有 --rank-<tone> / --rank-<tone>-bg 一组，见该文件「期刊等级标签」注释）。
+ *
+ * 档位口径（按档位高低排一条「越热越高」的色相弧，相邻档色相明显不同、
+ * 保证 6 个标签并排时一眼能分开；每档实测 ≥4.5:1）：
+ *   red    ：最高档 —— 中科院/新锐 的 Top、ABS 4*、FMS T1、CSSCI、UTD24
+ *   pink   ：次高档 —— SSCI Q1 / 中科院·新锐 1 区
+ *   yellow ：SSCI Q2 / 中科院·新锐 2 区 / ABS 4 / FMS T2
+ *   blue   ：SSCI Q3 / 中科院·新锐 3 区 / ABS 3 / FMS T3
+ *   green  ：SSCI Q4 / 中科院·新锐 4 区 / ABS 2
+ *   gray   ：其余（ABS 1、否定取值、认不出的写法、空值兜底）
+ *
+ * ⚠️ 档位**名称**是对外契约（会拼进 class 名，且被单测断言），不要改；
+ *    要调外观请改 style.css 里的色值。
  *
  * 为什么要做「先解析档位、再按体系上色」：
  * easyScholar 的 officialRank.all 各家写法并不统一，同一个概念有数字区、
