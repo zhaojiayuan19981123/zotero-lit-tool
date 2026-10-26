@@ -116,6 +116,21 @@ test('跑到一半的记录登记在册，结束（含失败）后自动摘掉',
   assert.equal(isParseActive('reg2'), false);
 });
 
+test('整批占位：排队中的篇目也算「已认领」，避免两个批次重复跑同一篇', async () => {
+  const items = [{ id: 'c1' }, { id: 'c2' }, { id: 'c3' }];
+  const seen = [];
+  const running = runParseBatch(items, async (item) => {
+    seen.push(item.id);
+    if (item.id === 'c1') await sleep(80);
+  }, { concurrency: 1 });
+  await sleep(20); // c1 在跑，c2/c3 还在排队
+  assert.equal(isParseActive('c1'), true);
+  assert.equal(isParseActive('c2'), true, '排队中的也要占位，否则第二个批次会把它再跑一遍');
+  await running;
+  assert.deepEqual(seen, ['c1', 'c2', 'c3'], '每篇只跑一次');
+  assert.equal(isParseActive('c2'), false, '整批结束后必须全部摘除');
+});
+
 test('空批次：立刻返回，不留下 running 的幽灵进度', async () => {
   const batch = await runParseBatch([], async () => 'x', { concurrency: 4 });
   assert.deepEqual(batch.results, []);

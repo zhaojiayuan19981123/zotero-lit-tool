@@ -152,7 +152,6 @@ export async function runParseBatch(items, worker, opts = {}) {
       if (typeof timer.unref === 'function') timer.unref();
     });
 
-    activeIds.add(id);
     let outcome;
     try {
       try { opts.onItemStart?.(item); } catch (_) { /* 进度上报失败不能影响解析 */ }
@@ -183,6 +182,13 @@ export async function runParseBatch(items, worker, opts = {}) {
   }
 
   const runnerCount = Math.min(concurrency, list.length);
+  // 整批先"占位"再开跑：排队中（还没轮到）的篇目也算「本轮已认领」。
+  // 不然用户连着点两次「解析全部」时，第二批会把第一批还在排队的篇目当成"没人在跑"
+  // 再跑一遍 —— 同一篇被两个批次并行写，AI 白花钱、字段互相覆盖。
+  for (const it of list) {
+    const id = it?.id == null ? '' : String(it.id);
+    if (id) activeIds.add(id);
+  }
   const runners = Array.from({ length: runnerCount }, async () => {
     while (cursor < list.length) {
       const index = cursor++;

@@ -1809,7 +1809,9 @@ export function createApp({
    * 三个入口（解析全部 / 单篇重新解析 / 批量重新解析）共用，行为完全一致。
    */
   async function runParseJobs(items, { settings, docType, concurrency, label }) {
-    const list = (Array.isArray(items) ? items : []).filter(Boolean);
+    // 二次过滤：从「接口拿到记录」到「真正开跑」之间有几毫秒，别的批次可能刚好认领了同一篇。
+    // 这里以进程内作业表为准再筛一遍，避免同一篇被两个批次并行写。
+    const list = (Array.isArray(items) ? items : []).filter((it) => it && !isParseActive(it.id));
     const limit = clampParseConcurrency(concurrency ?? PARSE_CONCURRENCY_DEFAULT);
     const jobId = parseProgress.start(list, { label, concurrency: Math.min(limit, Math.max(1, list.length)) });
     const batch = await runParseBatch(
