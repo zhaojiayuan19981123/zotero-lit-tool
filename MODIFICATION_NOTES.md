@@ -1,3 +1,61 @@
+## v1.29.0：解析进度可见（PDF 抽取移出主线程）+ 列字段净化 + 详情卡片划词标注（2026-10-26）
+
+> 用户要求：「针对文献中心的解析功能，无论重新解析还是批量解析都要能够显示解析进度，
+> 而且针对期刊、年份、DOI 等字段，要求返回干净的字段，不要其他内容」+
+> 「同样，这个卡片中的内容也要支持高亮或者改变字体颜色标注」。
+
+### 解析进度：先把「主线程被占死」这个真问题解决掉
+
+- 现象：点重新解析后只有一句 toast，全程无反馈。
+- 根因（实测）：`extractPdfText` 在主线程跑 pdf.js，一篇 150 页学位论文占 CPU 数秒到十几秒；
+  期间请求 `/api/parse/progress` **耗时 10.5 秒**才返回 —— 光做进度接口没用，事件循环必须先空出来。
+- `src/pdfTextCore.js`：把原 `pdfParser.js` 的纯实现抽出来（`extractPdfTextInline`）。
+- `src/pdfTextWorker.js` + `src/pdfTextPool.js`：worker 线程池（`PDF_TEXT_WORKERS` 默认 min(2,CPU)，
+  上限 3；空闲 60s 回收；单篇 240s 超时后 terminate 重开）。业务错误用 `err.pdfParseError` 标记，
+  只有**线程级故障**才回退主线程重跑，同一份坏文件不会被跑两遍。
+- `src/pdfParser.js`：缩成对外入口，先走线程池、失败回退主线程；`PDF_TEXT_INPROCESS=1` 可强制主线程。
+- `src/parseProgress.js`：内存态作业槽（`start/setStage/finish/snapshot`），阶段
+  `queued → extract → ai → rank → save → done|error`；`parseRecord(record, settings, docType, tracker)`
+  每步打点，`done/failed/percent/current` 现算。重复 `finish` 不重复计数（并发晚到事件不会改回状态）。
+- `server.js`：`/api/parse`、`/api/literature/:id/parse`、`/api/literature/batch-reparse` 三个入口
+  共用同一个 tracker，新增 `GET /api/parse/progress`。
+- 前端：`withParseProgress()` 包住阻塞的 POST，轮询 700ms；面板显示「操作标签 + 完成/总数 + 进度条 +
+  当前篇目阶段 + 每篇一行」。上一轮作业的残留快照不画（否则会先闪一下"上次已完成"），
+  结束后 1.8s 自动收起。
+- 实测收益：同一批 3 篇学位论文 9.3s → 5.9s（线程池真并行），期间进度接口响应 2-5ms。
+
+### 列字段净化：提示词 + 服务端确定性清洗
+
+- 提示词里把 title/authors/journal/year/doi/keywords 单列为「列字段」，逐项写死禁止项。
+- `aiExtractor.js` 新增 `cleanJournal / cleanYear / cleanDoi / cleanTitle / cleanAuthors /
+  cleanKeywords / cleanMetaFields`，`normalizeResult()` 与规则兜底路径都过一遍。
+- 取舍：**缺失返回空串**而不是「原文未报告」，因为列里显示标签比空值更像脏数据。
+- 例：`Journal of Business Ethics（SSCI Q1，影响因子 6.9，JCR 2023）` → `Journal of Business Ethics`；
+  `2023（在线优先），2024（正式出刊）` → `2023`；`DOI: https://doi.org/10.1007/s10551-023-05371-7.`
+  → `10.1007/s10551-023-05371-7`。
+
+### 详情卡片划词标注
+
+- 渲染：`<div class="md">` → `<div class="md md-annotatable" data-field="…">`，渲染后
+  `applyFieldAnnotations(it)` 贴回标记。
+- 定位：`{ target:'field', field, start, end, quote, kind:'highlight'|'text', color }`，
+  偏移按容器 `textContent` 计；原句对不上时全文 `indexOf(quote)` 重定位，再找不到就跳过。
+- 包裹：不能用 `range.surroundContents`（跨 `<li>/<p>` 会抛 InvalidStateError），
+  改为按文本节点切分逐段包 `<mark>`，`textContent` 长度不变 → 偏移可复用。
+- 工具条 `#annoToolbar`：4 底色 + 4 字色 + 清除；`mousedown` preventDefault 保住选区；
+  滚动/关抽屉/切文献自动收起。存储走 `PATCH /api/literature/:id { annotations }`，
+  `server.js` 里对 `target:'field'` 的条目夹住数值范围。
+- 兼容：`filteredAnnotations()` 过滤掉 `target:'field'`，阅读器「笔记与高亮」不会出现「第 undefined 页」；
+  EPUB 的 `attachAnnotation` 本来就会在无 `cfi` 时返回 false。
+
+### 测试
+
+- `test/parse-progress.test.mjs`（11 项）：进度计数/阶段/失败/重复收尾/空态/长标题截断，
+  以及清洗函数与提示词要求。
+- `test/pdf-text-pool.test.mjs`（4 项）：手搓最小 PDF 走线程池（断言池里确实有线程被用起来，
+  防止有人把抽取改回主线程）、`PDF_TEXT_INPROCESS=1` 回退可出同样结果、非 PDF 与空文件的报错。
+- 全量 `node --test`：Node 22 / Node 20 各 **495/495**；浏览器全量回归 **75/75**，0 JS 错误。
+
 ## v1.28.0：侧边栏尺度统一 + 实证类字段体系重做（2026-10-26）
 
 > 用户要求：「优化侧边栏，保留内容、配色与交互沿用现有样式，统一字号、圆角和间距，

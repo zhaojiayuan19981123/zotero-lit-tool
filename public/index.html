@@ -1536,6 +1536,35 @@
 
   <div id="toast" class="toast hidden"></div>
 
+  <!-- 文献详情里的划词标注：选中正文文字后浮出，可加底色高亮或改字色。
+       批注写进文献记录的 annotations 字段（与阅读器的高亮同一处存储，用 target 区分） -->
+  <div id="annoToolbar" class="anno-toolbar hidden">
+    <button type="button" class="anno-sw anno-sw-yellow" data-anno-hl="yellow" title="黄色高亮"></button>
+    <button type="button" class="anno-sw anno-sw-green" data-anno-hl="green" title="绿色高亮"></button>
+    <button type="button" class="anno-sw anno-sw-blue" data-anno-hl="blue" title="蓝色高亮"></button>
+    <button type="button" class="anno-sw anno-sw-pink" data-anno-hl="pink" title="粉色高亮"></button>
+    <span class="anno-sep"></span>
+    <button type="button" class="anno-letter" data-anno-c="red" title="红字" style="color:var(--red)">A</button>
+    <button type="button" class="anno-letter" data-anno-c="blue" title="蓝字" style="color:var(--accent)">A</button>
+    <button type="button" class="anno-letter" data-anno-c="green" title="绿字" style="color:var(--green)">A</button>
+    <button type="button" class="anno-letter" data-anno-c="purple" title="紫字" style="color:var(--primary)">A</button>
+    <span class="anno-sep"></span>
+    <button type="button" class="anno-clear" data-anno-clear title="清除这处标注">清除</button>
+  </div>
+
+  <!-- AI 解析进度：解析接口是同步返回的，这里靠平行轮询 /api/parse/progress 实时显示
+       「已经第几篇 / 共几篇」和当前这篇卡在哪个阶段（读正文 → AI 解析 → 查等级 → 写库） -->
+  <div id="parseProgress" class="parse-progress hidden" role="status" aria-live="polite">
+    <div class="pp-head">
+      <span class="pp-spinner" aria-hidden="true"></span>
+      <span class="pp-title">AI 解析</span>
+      <span class="pp-count">0/0</span>
+    </div>
+    <div class="pp-bar"><span style="width:0%"></span></div>
+    <div class="pp-current">准备中…</div>
+    <ul class="pp-list"></ul>
+  </div>
+
   <!-- 新邮件提醒：右上角浮出，点击可直接跳到该邮件 -->
   <div id="mailNotifStack" class="mail-notif-stack"></div>
 

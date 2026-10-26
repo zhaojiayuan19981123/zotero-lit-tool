@@ -11,6 +11,7 @@ import mammoth from 'mammoth';
 
 import { extractPdfText } from './src/pdfParser.js';
 import { extract, FIELDS, TYPE_FIELDS } from './src/aiExtractor.js';
+import { createParseTracker } from './src/parseProgress.js';
 import * as store from './src/store.js';
 import * as layout from './src/layout.js';
 // 版面识别结果 → 翻译管线结构 / 逐块对照数据（见 src/layoutTranslate.js）：
@@ -1111,12 +1112,20 @@ function substituteImageDescriptions(messages, description) {
 }
 
 // ---------- 解析单篇 ----------
-async function parseRecord(record, settings, docType) {
+/**
+ * 解析单篇记录。
+ * @param {object|null} tracker 解析进度追踪器（createParseTracker 的返回值）。
+ *   每推进一步上报一次阶段，前端轮询 /api/parse/progress 就能看到「第几篇、在哪一步」。
+ *   传 null 时行为与旧版完全一致（单测直接调它不关心进度）。
+ */
+async function parseRecord(record, settings, docType, tracker = null) {
   const type = docType || record.docType || 'empirical';
   store.upsertLiterature({ ...record, status: 'parsing', error: null });
   let updated = record;
   try {
+    tracker?.setStage(record.id, 'extract');
     const { text, numPages, info } = await extractPdfText(record.filePath);
+    tracker?.setStage(record.id, 'ai');
     const result = await extract(text, info, settings, type);
     updated = {
       ...record,
@@ -1134,11 +1143,13 @@ async function parseRecord(record, settings, docType) {
   } catch (e) {
     updated = { ...record, status: 'error', error: e.message };
     store.upsertLiterature(updated);
+    tracker?.finish(record.id, e.message);
     return updated;
   }
 
   // 解析成功后自动查询期刊等级（若已配置 easyScholar SecretKey 且解析出期刊名）
   if (settings?.easyScholarKey && updated.journal) {
+    tracker?.setStage(record.id, 'rank');
     try {
       const rankData = await queryPublicationRank(updated.journal, settings.easyScholarKey);
       if (rankData?.code === 200) {
@@ -1154,7 +1165,9 @@ async function parseRecord(record, settings, docType) {
     }
   }
 
+  tracker?.setStage(record.id, 'save');
   store.upsertLiterature(updated);
+  tracker?.finish(record.id);
   return updated;
 }
 
@@ -1174,6 +1187,9 @@ export function createApp({
 } = {}) {
   let currentUploadDir = uploadDir;
   fs.mkdirSync(currentUploadDir, { recursive: true });
+
+  // AI 解析进度（每篇解析到哪一步 / 整批跑到第几篇），由 /api/parse/progress 暴露
+  const parseProgress = createParseTracker();
 
   const app = express();
   // 30mb → 80mb：全文翻译的「视觉模型识别版面」会把每页 2200px 宽的 JPEG 以 base64 内联
@@ -1727,9 +1743,17 @@ export function createApp({
     // EPUB 没有 PDF 文本层，AI 解析（提取正文 / 版面 / 图表）不适用，静默跳过
     items = items.filter((it) => it.fileKind !== 'epub');
 
+    // 开一轮进度作业：前端在本次 POST 还挂着的时候平行轮询 /api/parse/progress
+    const jobId = parseProgress.start(items, { label: items.length > 1 ? `AI 解析 · ${items.length} 篇` : 'AI 解析' });
     const concurrency = Math.max(1, Math.min(8, parseInt(req.body?.concurrency, 10) || 4));
-    const results = await runWithConcurrency(items.map((item) => () => parseRecord(item, settings, docType)), concurrency);
-    res.json({ results });
+    const results = await runWithConcurrency(items.map((item) => () => parseRecord(item, settings, docType, parseProgress)), concurrency);
+    res.json({ results, jobId });
+  });
+
+  // 解析进度：内存快照，字段含义见 src/parseProgress.js
+  // 单条重新解析 / 批量解析 / 批量重新解析 共用同一个作业槽位，前端拿到的是「当前这一轮」
+  app.get('/api/parse/progress', (req, res) => {
+    res.json(parseProgress.snapshot());
   });
 
   app.post('/api/literature/:id/parse', async (req, res) => {
@@ -1738,7 +1762,8 @@ export function createApp({
     if (item.fileKind === 'epub') {
       return res.status(400).json({ error: 'EPUB 电子书不走 AI 解析（该功能针对 PDF 正文与版面）' });
     }
-    res.json(await parseRecord(item, store.getSettings(), req.body?.docType));
+    const jobId = parseProgress.start([item], { label: '重新解析' });
+    res.json({ ...(await parseRecord(item, store.getSettings(), req.body?.docType, parseProgress)), jobId });
   });
 
   // ---------- PDF 版面解析（标题/正文/图表/表格/公式的区域识别） ----------
@@ -2139,6 +2164,25 @@ export function createApp({
     for (const k of EDITABLE) if (k in req.body) patch[k] = req.body[k];
     if ('docType' in patch) patch.docType = normalizeDocType(patch.docType);
     if ('fileKind' in patch) patch.fileKind = patch.fileKind === 'epub' ? 'epub' : 'pdf';
+    // 批注数组：阅读器（page/cfi）与详情页划词标注（target:'field' + 字符区间）共用。
+    // 这里只做「夹住字段与数值」的兜底，不改写已有结构，避免把阅读器的记录弄坏。
+    if (Array.isArray(patch.annotations)) {
+      patch.annotations = patch.annotations
+        .filter((a) => a && typeof a === 'object')
+        .map((a) => {
+          if (a.target !== 'field') return a;
+          return {
+            ...a,
+            field: String(a.field || ''),
+            start: Math.max(0, Number(a.start) || 0),
+            end: Math.max(0, Number(a.end) || 0),
+            quote: String(a.quote || '').slice(0, 4000),
+            kind: a.kind === 'text' ? 'text' : 'highlight',
+            color: String(a.color || ''),
+          };
+        })
+        .filter((a) => a.target !== 'field' || (a.field && a.end > a.start));
+    }
     // 阅读位置：只收白名单字段，避免前端顺手塞进来的东西进数据文件
     if ('readPos' in patch) {
       const rp = patch.readPos;
@@ -2212,10 +2256,11 @@ export function createApp({
     if (!targets.length) {
       return res.json({ results: [], skipped, message: skipped.length ? '选中的文献都在解析中' : '没有可重新解析的文献' });
     }
+    const jobId = parseProgress.start(targets, { label: `批量重新解析 · ${targets.length} 篇` });
     const concurrency = Math.max(1, Math.min(8, parseInt(req.body?.concurrency, 10) || 4));
-    const results = await runWithConcurrency(targets.map((item) => () => parseRecord(item, settings, docType)), concurrency);
+    const results = await runWithConcurrency(targets.map((item) => () => parseRecord(item, settings, docType, parseProgress)), concurrency);
     const failed = results.filter((r) => !r || r.status === 'error').length;
-    res.json({ results, skipped, failed, total: targets.length });
+    res.json({ results, skipped, failed, total: targets.length, jobId });
   });
 
   // ---------- 批量标记阅读进度 ----------

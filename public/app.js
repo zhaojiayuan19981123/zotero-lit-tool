@@ -260,6 +260,124 @@
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
+  // ============ AI 解析进度 ============
+  // 解析接口是同步返回的：POST 一直挂着，直到整批跑完才响应。所以进度不能靠返回值，
+  // 只能「平行轮询」——POLL 每秒取一次 /api/parse/progress 的快照画浮层。
+  // 单条重新解析、解析选中、批量重新解析、上传后自动解析，全都走这里，行为一致。
+  const PARSE_POLL_MS = 700;
+  let parsePollTimer = null;
+  let parseHideTimer = null;
+  let parsePollStartedAt = 0;
+
+  function hideParseProgress() {
+    const box = $('parseProgress');
+    if (!box) return;
+    box.classList.add('hidden');
+    box.classList.remove('is-done');
+    const bar = box.querySelector('.pp-bar > span');
+    if (bar) bar.style.width = '0%';
+    const list = box.querySelector('.pp-list');
+    if (list) list.innerHTML = '';
+  }
+
+  // 单篇失败也要让人看见，但列表不能无限长：把「进行中 / 失败 / 最近完成」挑出来即可
+  function pickProgressRows(s) {
+    const items = Array.isArray(s.items) ? s.items : [];
+    if (items.length <= 8) return items;
+    const picked = [];
+    const seen = new Set();
+    const push = (it) => { if (it && !seen.has(it.id)) { seen.add(it.id); picked.push(it); } };
+    items.filter((i) => i.status === 'running').slice(0, 5).forEach(push);
+    items.filter((i) => i.status === 'error').slice(0, 3).forEach(push);
+    items.filter((i) => i.status === 'done').slice(-3).forEach(push);
+    return picked;
+  }
+
+  function renderParseProgress(s) {
+    const box = $('parseProgress');
+    if (!box) return;
+    if (!s || (!s.total && !s.running)) { hideParseProgress(); return; }
+    box.classList.remove('hidden');
+    box.classList.toggle('is-done', !s.running);
+
+    const title = box.querySelector('.pp-title');
+    const count = box.querySelector('.pp-count');
+    const bar = box.querySelector('.pp-bar > span');
+    const current = box.querySelector('.pp-current');
+    const list = box.querySelector('.pp-list');
+
+    if (title) title.textContent = s.label || 'AI 解析';
+    if (count) count.textContent = `${s.done}/${s.total}${s.failed ? ` · 失败 ${s.failed}` : ''}`;
+    if (bar) bar.style.width = `${Math.max(0, Math.min(100, s.percent || 0))}%`;
+    if (current) {
+      current.textContent = s.running
+        ? (s.current ? `${s.current.title} · ${s.current.stageLabel}` : '正在启动…')
+        : (s.failed ? `已结束：成功 ${s.total - s.failed} 篇，失败 ${s.failed} 篇` : `已全部完成，共 ${s.total} 篇`);
+    }
+    if (list) {
+      list.innerHTML = pickProgressRows(s).map((it) => {
+        const cls = it.status === 'error' ? 'is-error' : (it.status === 'done' ? 'is-done' : 'is-running');
+        const stageText = it.status === 'error' ? (it.error ? `失败：${it.error}` : '解析失败') : it.stageLabel;
+        return `<li class="pp-item ${cls}" title="${esc(it.title)}${it.error ? ' | ' + esc(it.error) : ''}">`
+          + `<span class="pp-dot"></span><span class="pp-name">${esc(it.title)}</span>`
+          + `<span class="pp-stage">${esc(stageText)}</span></li>`;
+      }).join('');
+    }
+  }
+
+  function stopParsePoll() {
+    if (parsePollTimer) { clearInterval(parsePollTimer); parsePollTimer = null; }
+  }
+
+  function startParsePoll() {
+    stopParsePoll();
+    clearTimeout(parseHideTimer);
+    parsePollStartedAt = Date.now();
+    let sawRunning = false;
+    const tick = async () => {
+      let s;
+      try { s = await api('/api/parse/progress'); } catch (_) { return; }
+      // 上一轮作业的残留快照（在我们开始轮询之前就结束了）不能画：否则要点「重新解析」后
+      // 面板会先闪一下「上次已完成」，再跳到新进度。等新作业出现再画。
+      const startedMs = s.startedAt ? Date.parse(s.startedAt) : 0;
+      if (!s.running && startedMs && startedMs + (s.elapsedMs || 0) < parsePollStartedAt) return;
+      renderParseProgress(s);
+      if (s.running) { sawRunning = true; return; }
+      // 服务端已结束。但第一轮轮询可能赶在作业启动之前（running=false、total=0），
+      // 所以要等「见过 running」或「已经等了一会儿」再收尾，否则进度条会一闪而过。
+      const age = Date.now() - parsePollStartedAt;
+      if (sawRunning || age > 1600) {
+        stopParsePoll();
+        parseHideTimer = setTimeout(hideParseProgress, 1600);
+      }
+    };
+    parsePollTimer = setInterval(tick, PARSE_POLL_MS);
+    tick();
+  }
+
+  /**
+   * 包住一次解析请求：开跑前打开浮层轮询，请求返回后再收一次快照补到 100% 再收起。
+   * fn 里只放那个会阻塞的 POST。
+   */
+  async function withParseProgress(fn) {
+    startParsePoll();
+    try {
+      return await fn();
+    } finally {
+      stopParsePoll();
+      try {
+        const s = await api('/api/parse/progress');
+        const startedMs = s.startedAt ? Date.parse(s.startedAt) : 0;
+        // 只认「本轮」的快照，别把上一次作业的结束状态画到这一次上
+        if (s.jobId && (!startedMs || startedMs + (s.elapsedMs || 0) >= parsePollStartedAt)) {
+          renderParseProgress({ ...s, running: false });
+        }
+      } catch (_) { /* 收尾快照失败不影响主流程 */ }
+      clearTimeout(parseHideTimer);
+      parseHideTimer = setTimeout(hideParseProgress, 1800);
+    }
+  }
+
   // SVG 图标辅助：JS 里拼 HTML 时统一用它引用 index.html 里的 <symbol> 精灵，
   // 取代原先散落各处的 emoji（★ …）。图标颜色随 currentColor 走，三套主题零适配。
   // 用法：`${ico('download')}` 或 `${ico('star', 'ico-sm')}`
@@ -865,7 +983,8 @@
     try {
       // 多篇并发解析：并发数按篇数自适应（最多 8），显著缩短批量解析时间
       const concurrency = Math.max(1, Math.min(8, ids.length));
-      await api('/api/parse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, docType: docType || undefined, concurrency }) });
+      // 解析期间右下角浮层实时显示「第几篇 / 共几篇 + 当前阶段」
+      await withParseProgress(() => api('/api/parse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, docType: docType || undefined, concurrency }) }));
       await loadItems();
       const errs = items.filter((i) => ids.includes(i.id) && i.status === 'error');
       if (errs.length) toast(`解析完成，${errs.length} 篇失败`, 'error'); else toast('AI 解析完成，字段已自动写入', 'success');
@@ -1034,10 +1153,10 @@
     if (!ok) return;
     try {
       toast(`开始重新解析 ${all.length} 篇…`);
-      const r = await api('/api/literature/batch-reparse', {
+      const r = await withParseProgress(() => api('/api/literature/batch-reparse', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids, docType: lib.type }),
-      });
+      }));
       await loadItems();
       const total = r.total ?? 0;
       const failed = r.failed ?? 0;
@@ -1130,13 +1249,14 @@
 
   // ============ 阅读抽屉 ============
   function openDrawer(id) { currentId = id; el.drawer.classList.remove('hidden'); el.drawerMask.classList.remove('hidden'); renderDrawer(); }
-  function closeDrawer() { currentId = null; el.drawer.classList.add('hidden'); el.drawerMask.classList.add('hidden'); }
+  function closeDrawer() { currentId = null; el.drawer.classList.add('hidden'); el.drawerMask.classList.add('hidden'); hideAnnoToolbar(); }
   function prevId() { const list = filteredItems(); const i = list.findIndex((x) => x.id === currentId); return i > 0 ? list[i - 1].id : null; }
   function nextId() { const list = filteredItems(); const i = list.findIndex((x) => x.id === currentId); return i >= 0 && i < list.length - 1 ? list[i + 1].id : null; }
 
   function renderDrawer() {
     const it = items.find((x) => x.id === currentId);
     if (!it) { closeDrawer(); return; }
+    hideAnnoToolbar();   // 换篇/重渲染时选区已失效，工具条必须一起收掉
     el.drawerFilename.textContent = it.originalName || '';
     $('btnPrev').disabled = !prevId();
     $('btnNext').disabled = !nextId();
@@ -1160,6 +1280,7 @@
         ${it.status !== 'done' ? `<span class="badge badge-${it.status}" title="${esc(it.error || '')}">${STATUS_LABEL[it.status]}</span>` : ''}
       </div>
       ${it.error ? `<div class="modal-desc">${ico('alert')}解析失败：${esc(it.error)}</div>` : ''}
+      ${it.error ? '' : '<div class="anno-hint">提示：选中下方任意段落里的文字，可加底色高亮或改字色标注重点。</div>'}
       <section style="margin-bottom:18px"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>${ico('message')}我的思考<span class="col-ai">手写</span></h4>
         <textarea id="drawerThoughts" class="drawer-thoughts" rows="4" placeholder="写下你自己的小想法：疑问、灵感、与课题的联系…">${esc(it.thoughts || '')}</textarea>
         <button id="btnSaveDrawerThoughts" class="btn btn-primary" style="margin-top:8px">保存思考</button>
@@ -1169,7 +1290,210 @@
         <div style="display:flex;flex-wrap:wrap;gap:8px">${rankChips(it.journalRankDetail)}</div></section>` : ''}
       ${sections.map((k) => it[k] ? `
         <section style="margin-bottom:18px"><h4 style="margin:0 0 6px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>${CONTENT_COLS[k] ? (k === 'method' && it.docType === 'model' ? '求解方法' : CONTENT_COLS[k].label) : k}</h4>
-        <div class="md">${mdFull(it[k])}</div></section>` : '').join('')}`;
+        <div class="md md-annotatable" data-field="${k}">${mdFull(it[k])}</div></section>` : '').join('')}`;
+
+    // 把已存的高亮 / 字色批注画回正文（DOM 刚重建，标记需要重新贴）
+    applyFieldAnnotations(it);
+  }
+
+  // ============ 详情卡片的划词标注 ============
+  // 解析结果要反复读：关键句标黄、相反结论标红，比通读一遍快。
+  // 存储复用文献记录的 annotations 数组（阅读器的 PDF/EPUB 高亮也用这个数组），
+  // 用 target:'field' + field/start/end 区分：阅读器按 page/cfi 过滤，互不干扰。
+  const ANNO_HL_COLORS = ['yellow', 'green', 'blue', 'pink'];
+  const ANNO_TEXT_COLORS = ['red', 'blue', 'green', 'purple'];
+  let annoSelection = null;   // { field, start, end, quote }
+
+  function fieldAnnotationsOf(it) {
+    return (Array.isArray(it?.annotations) ? it.annotations : [])
+      .filter((a) => a && a.target === 'field' && a.field);
+  }
+
+  /** 把 (节点, 偏移) 折算成「相对容器文本」的字符下标，与 textContent 同口径 */
+  function offsetWithin(root, node, nodeOffset) {
+    const r = document.createRange();
+    r.selectNodeContents(root);
+    try { r.setEnd(node, nodeOffset); } catch (_) { return 0; }
+    return r.toString().length;
+  }
+
+  /**
+   * 把容器里的 [start, end) 文字逐段包进同一个标签。
+   * 不能直接用 range.surroundContents：跨 <li>/<p> 时它会抛 InvalidStateError，
+   * 所以按文本节点切分后逐段包裹（偏移口径不变，textContent 长度也不变）。
+   */
+  function wrapTextRange(root, start, end, makeEl) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const segs = [];
+    let pos = 0;
+    let node = walker.nextNode();
+    while (node) {
+      const len = node.nodeValue.length;
+      const from = Math.max(start - pos, 0);
+      const to = Math.min(end - pos, len);
+      if (to > from) segs.push({ node, from, to });
+      pos += len;
+      if (pos >= end) break;
+      node = walker.nextNode();
+    }
+    for (const seg of segs) {
+      let target = seg.node;
+      if (seg.from > 0) target = target.splitText(seg.from);
+      const keep = seg.to - seg.from;
+      if (keep < target.nodeValue.length) target.splitText(keep);
+      const el = makeEl();
+      target.parentNode.insertBefore(el, target);
+      el.appendChild(target);
+    }
+  }
+
+  /** 拆掉某一块里的所有标注，恢复成纯文本（偏移不变，可以重新贴） */
+  function clearFieldMarks(root) {
+    root.querySelectorAll('mark.anno').forEach((m) => m.replaceWith(document.createTextNode(m.textContent)));
+    root.normalize();
+  }
+
+  function drawerFieldBoxes() {
+    return [...el.drawerBody.querySelectorAll('.md-annotatable[data-field]')];
+  }
+
+  /** 按记录里存的批注，把标记贴回正文 */
+  function applyFieldAnnotations(it) {
+    if (!it) return;
+    const boxes = drawerFieldBoxes();
+    if (!boxes.length) return;
+    const anns = fieldAnnotationsOf(it);
+    for (const box of boxes) {
+      clearFieldMarks(box);
+      const field = box.dataset.field;
+      const text = box.textContent || '';
+      const mine = anns.filter((a) => a.field === field).sort((a, b) => (a.start || 0) - (b.start || 0));
+      for (const a of mine) {
+        let start = Math.max(0, Number(a.start) || 0);
+        let end = Math.max(0, Number(a.end) || 0);
+        const quote = String(a.quote || '');
+        // 内容被改过（重新解析 / 手动编辑）时旧偏移会漂：先按原句核对，对不上就全文找一遍
+        if (quote && text.slice(start, end) !== quote) {
+          const at = text.indexOf(quote);
+          if (at < 0) continue;
+          start = at; end = at + quote.length;
+        }
+        if (!(end > start)) continue;
+        const cls = a.kind === 'text'
+          ? `anno anno-c-${ANNO_TEXT_COLORS.includes(a.color) ? a.color : 'red'}`
+          : `anno anno-hl-${ANNO_HL_COLORS.includes(a.color) ? a.color : 'yellow'}`;
+        wrapTextRange(box, start, end, () => {
+          const m = document.createElement('mark');
+          m.className = cls;
+          m.dataset.annoId = a.id || '';
+          return m;
+        });
+      }
+    }
+  }
+
+  /** 当前选区落在哪一块字段里；跨段落的选择不接受 */
+  function annotationSelectionTarget() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+    const range = sel.getRangeAt(0);
+    const boxOf = (n) => {
+      const e = n && n.nodeType === 1 ? n : (n ? n.parentElement : null);
+      return e && e.closest ? e.closest('.md-annotatable[data-field]') : null;
+    };
+    const startBox = boxOf(range.startContainer);
+    const endBox = boxOf(range.endContainer);
+    if (!startBox || startBox !== endBox) return null;
+    const start = offsetWithin(startBox, range.startContainer, range.startOffset);
+    const end = offsetWithin(startBox, range.endContainer, range.endOffset);
+    if (end <= start) return null;
+    const quote = (startBox.textContent || '').slice(start, end);
+    if (!quote.trim()) return null;
+    return { field: startBox.dataset.field, start, end, quote };
+  }
+
+  function hideAnnoToolbar() {
+    const tb = $('annoToolbar');
+    if (tb) tb.classList.add('hidden');
+    annoSelection = null;
+  }
+
+  function showAnnoToolbar() {
+    const tb = $('annoToolbar');
+    const sel = window.getSelection();
+    if (!tb || !annoSelection || !sel || !sel.rangeCount) { hideAnnoToolbar(); return; }
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    if (!rect || (!rect.width && !rect.height)) { hideAnnoToolbar(); return; }
+    tb.classList.remove('hidden');
+    const w = tb.offsetWidth;
+    const h = tb.offsetHeight;
+    const left = Math.min(Math.max(8, rect.left + rect.width / 2 - w / 2), window.innerWidth - w - 8);
+    // 上方放不下就翻到选区下方，避免贴着窗口顶端被裁掉
+    const top = rect.top - h - 8 < 8 ? rect.bottom + 8 : rect.top - h - 8;
+    tb.style.left = `${Math.round(left)}px`;
+    tb.style.top = `${Math.round(top)}px`;
+  }
+
+  function onDrawerSelectionChange() {
+    if (!currentId) { hideAnnoToolbar(); return; }
+    const target = annotationSelectionTarget();
+    if (!target) { hideAnnoToolbar(); return; }
+    annoSelection = target;
+    showAnnoToolbar();
+  }
+
+  async function persistFieldAnnotations(it, anns) {
+    try {
+      const updated = await api('/api/literature/' + it.id, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ annotations: anns }),
+      });
+      const idx = items.findIndex((x) => x.id === it.id);
+      if (idx >= 0) items[idx] = updated;
+      // 原地重贴标记：不重渲染抽屉，滚动位置与展开状态都不会跳
+      applyFieldAnnotations(updated);
+    } catch (e) { toast('标注保存失败：' + e.message, 'error'); }
+  }
+
+  /** 给选区加标注：同段落上重叠的旧标注先清掉，避免叠加出看不出本色的多层底色 */
+  async function applyAnnoToSelection(kind, color) {
+    const target = annoSelection;
+    if (!target) return;
+    const it = items.find((x) => x.id === currentId);
+    if (!it) return;
+    const kept = (Array.isArray(it.annotations) ? it.annotations : []).filter((a) => !(
+      a && a.target === 'field' && a.field === target.field
+      && (Number(a.start) || 0) < target.end && target.start < (Number(a.end) || 0)
+    ));
+    kept.push({
+      id: 'fa' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      target: 'field',
+      field: target.field,
+      start: target.start,
+      end: target.end,
+      quote: target.quote,
+      kind,                       // 'highlight' 底色 | 'text' 字色
+      color,
+      text: target.quote,         // 与阅读器批注保持同名字段，导出/笔记列表能复用
+      note: '',
+      createdAt: new Date().toISOString(),
+    });
+    await persistFieldAnnotations(it, kept);
+  }
+
+  /** 清除与当前选区重叠的标注 */
+  async function clearAnnoInSelection() {
+    const target = annoSelection;
+    if (!target) return;
+    const it = items.find((x) => x.id === currentId);
+    if (!it) return;
+    const before = Array.isArray(it.annotations) ? it.annotations : [];
+    const after = before.filter((a) => !(
+      a && a.target === 'field' && a.field === target.field
+      && (Number(a.start) || 0) < target.end && target.start < (Number(a.end) || 0)
+    ));
+    if (after.length === before.length) { toast('这段文字还没有标注'); return; }
+    await persistFieldAnnotations(it, after);
+    toast('已清除这处标注', 'success');
   }
 
   // ============ 字段配置 ============
@@ -2598,6 +2922,32 @@
       const it = items.find((x) => x.id === currentId);
       if (it?.filename) window.open('/uploads/' + encodeURIComponent(it.filename), '_blank');
     });
+    // 划词标注：选中即浮出工具条。mouseup 后用 setTimeout 让浏览器先把选区定下来，
+    // 否则拿到的 range 还是上一次的（双击选词尤其明显）。
+    el.drawerBody.addEventListener('mouseup', () => setTimeout(onDrawerSelectionChange, 0));
+    el.drawerBody.addEventListener('keyup', (e) => {
+      if (e.key === 'Escape') { hideAnnoToolbar(); return; }
+      if (e.shiftKey) setTimeout(onDrawerSelectionChange, 0);   // Shift+方向键选词
+    });
+    el.drawerBody.addEventListener('scroll', hideAnnoToolbar, { passive: true });
+    const annoTb = $('annoToolbar');
+    if (annoTb) {
+      // 工具条自身不能吃掉选区：按下鼠标时阻止默认行为，选区才不会在 click 之前被清掉
+      annoTb.addEventListener('mousedown', (e) => e.preventDefault());
+      annoTb.addEventListener('click', async (e) => {
+        const b = e.target.closest('[data-anno-hl],[data-anno-c],[data-anno-clear]');
+        if (!b) return;
+        if (b.hasAttribute('data-anno-clear')) await clearAnnoInSelection();
+        else if (b.dataset.annoHl) await applyAnnoToSelection('highlight', b.dataset.annoHl);
+        else if (b.dataset.annoC) await applyAnnoToSelection('text', b.dataset.annoC);
+        window.getSelection()?.removeAllRanges();
+        hideAnnoToolbar();
+      });
+    }
+    document.addEventListener('mousedown', (e) => {
+      if (annoTb && !annoTb.contains(e.target) && !el.drawerBody.contains(e.target)) hideAnnoToolbar();
+    });
+
     el.drawerBody.addEventListener('click', async (e) => {
       const ds = e.target.closest('[data-dstar]'); if (ds) { setRating(currentId, parseInt(ds.dataset.dstar, 10)); renderDrawer(); return; }
       if (e.target.closest('[data-dprogress]')) cycleProgress(currentId).then(renderDrawer);
@@ -7694,6 +8044,9 @@
     const q = String(f.q || '').trim().toLowerCase();
     return currentAnnotations()
       .map((ann, idx) => ({ ann, idx }))
+      // 详情卡片里的划词标注（target:'field'）和阅读器批注共用一个数组，
+      // 但它们没有页码/CFI，出现在「笔记与高亮」里会变成「第 undefined 页」，必须滤掉
+      .filter(({ ann }) => ann && ann.target !== 'field')
       .filter(({ ann }) => {
         if (f.type !== 'all' && (ann.type || 'highlight') !== f.type) return false;
         if (f.color !== 'all' && (ann.color || '') !== f.color) return false;

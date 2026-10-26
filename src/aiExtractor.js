@@ -64,14 +64,17 @@ export const TYPE_FIELDS = {
 };
 
 // ---------- 提示词 ----------
-const COMMON_SPEC = `【公共字段】
+// 「列字段」（标题/作者/期刊/年份/DOI/关键词）在文献中心是表格列，要排序、筛选、查等级，
+// 所以要求只给值本身 —— 任何说明性文字都会被列宽和字符串匹配吃掉。
+const COMMON_SPEC = `【公共字段】（以下六个都是「列字段」：只给值本身，不要任何解释、注释、等级说明或前缀）
 - title：论文标题。原文标题照抄；若有中文官方译名就用官方译名，否则给直译并在译名后标「（译）」。保留副标题。
 - authors：全部可识别的作者，按原文顺序，姓名保留原文写法。只有原文明确标出时才写通讯作者或单位，不要凭作者位次推断。
-- journal：期刊 / 会议 / 工作论文 / 预印本的准确名称，尽量带上卷(期)、页码或文章号。仓库名不等于期刊名，投稿中不等于已发表。
-- year：你所分析这一版的年份。预印本、在线优先、正式出刊年份不同时，把几个年份及含义都写出来；不要拿数据收集年份冒充发表年份。
-- doi：只取本文自身的 DOI，写成 10.xxxx/xxxxx。参考文献里别人的 DOI、arXiv 号、数据库登录号都不算。拿不到就写「原文未报告」。
+- journal：只写期刊 / 会议 / 工作论文 / 预印本的名称本身。禁止出现卷(期)、页码、文章号、「SSCI Q1」「影响因子 6.9」「CSSCI」「北大核心」这类等级或分区注释，不要「期刊：」前缀，不要书名号，不要「（译）」。仓库名不等于期刊名，投稿中不等于已发表。
+- year：只写四位数字年份，例如 2023。不要写「2023（在线优先），2024（正式出刊）」这种多段说明；预印本与正式出刊年份不同时，取你分析这一版的年份，差异写进 criticalThinking。
+- doi：只写 10.xxxx/xxxxx 这串本身。不要「DOI:」前缀，不要 https://doi.org/ 链接，不要句末标点。参考文献里别人的 DOI、arXiv 号、数据库登录号都不算。拿不到就写「原文未报告」。
 - keywords：先写「作者原列关键词」（忠实翻译并保留英文原词），再另起「AI 补充检索词：」给 5-8 个有原文依据的检索词（主题、构念、情境、方法）。原文没有关键词就直说，不要把自己的词当成作者的。
-- abstract：原文摘要的中文翻译，保留原有结构与限定语（样本、条件、边界），不加入你的评论与文外的发现。材料里没有摘要就写「所提供材料未包含摘要」，不要自己写一段冒充摘要。`;
+- abstract：原文摘要的中文翻译，保留原有结构与限定语（样本、条件、边界），不加入你的评论与文外的发现。材料里没有摘要就写「所提供材料未包含摘要」，不要自己写一段冒充摘要。
+以上六个字段除 keywords 外，都必须是一行、无换行、无 markdown 标记；拿不到就写「原文未报告」，不要用解释代替值。`;
 
 // 实证类提示词分三段：角色与规则（含语言）、逐字段要求、公共字段要求。
 // 拆开是为了拼装时能把「逐字段要求」放在公共字段之后，读起来是「规则 → 字段 → 格式」。
@@ -217,10 +220,136 @@ function sanitizeField(val) {
   return String(val);
 }
 
+// ---------- 书目字段净化 ----------
+// 期刊 / 年份 / DOI 在文献中心是「列」，要参与排序、筛选、查期刊等级，宽度也有限。
+// 但模型很爱在它们后面补一句解释：
+//   journal: "Journal of Business Ethics（SSCI Q1，影响因子 6.9，JCR 2023）"
+//   year:    "2023（在线优先），2024（正式出刊）"
+//   doi:     "DOI: https://doi.org/10.1007/s10551-023-05371-7."
+// 这些内容不是错，但塞进列里就废了：排序按字符串、查等级按全名匹配，全都匹配不上。
+// 提示词里已经要求只给「干净的值」，这里再做一次确定性清洗 —— 模型不听话也不会污染数据。
+//
+// 原则：拿不到就返回空串（不返回「原文未报告」这种标签），因为列里显示标签反而更像脏数据；
+// 缺失信息在提示词里已经要求写进对应字段的正文（例如 criticalThinking 里交代材料不全）。
+const META_MISSING = /^(?:原文未报告|所提供材料未包含|无法确认|不适用)\s*[。.]?$/;
+
+function isMissingLabel(s) {
+  return !s || META_MISSING.test(s.trim());
+}
+
+/** 去掉 markdown 标记与「字段名：」前缀，返回干净字符串 */
+function stripMetaNoise(raw, labels) {
+  let s = String(raw == null ? '' : raw).trim();
+  if (!s) return '';
+  s = s.replace(/\*\*/g, '').replace(/^\s*[-*•]\s+/, '');
+  if (labels) s = s.replace(new RegExp(`^(?:${labels})\\s*[:：]\\s*`, 'i'), '');
+  return s.trim();
+}
+
+/** DOI：只保留 10.xxxx/xxxxx 本体，去掉 DOI: 前缀、doi.org 链接与句末标点 */
+export function cleanDoi(raw) {
+  const s = stripMetaNoise(raw, 'DOI|doi');
+  if (isMissingLabel(s)) return '';
+  const m = s.match(/10\.\d{4,9}\/[^\s"'<>,;，。；、）)】\]]+/);
+  if (!m) return '';
+  // 句末的点、逗号、右括号属于句子而不是 DOI
+  return m[0].replace(/[.,;:]+$/, '');
+}
+
+/** 年份：只保留四位数字年份。多版本年份（在线优先 / 正式出刊）取第一个可识别年份 */
+export function cleanYear(raw) {
+  const s = stripMetaNoise(raw, '年份|出版年|发表年份|year');
+  if (isMissingLabel(s)) return '';
+  const m = s.match(/\b(1[89]\d{2}|20\d{2})\b/);
+  return m ? m[1] : '';
+}
+
+// 括号里出现这些词，说明是「等级 / 分区 / 译名 / 版本」之类的注释，不属于刊名本身
+const JOURNAL_ANNOTATION = /(译|SSCI|SCIE|SCI|CSSCI|EI|CSCD|北大核心|南大核心|核心期刊|Q[1-4]|分区|影响因子|IF|JCR|中科院|预印本|工作论文|在线优先|forthcoming|in press|accept|published)/i;
+
+/** 刊名本身是否就是「卷期页」这种元信息片段（用来判断逗号分段该在哪里停） */
+function looksLikeJournalMeta(seg) {
+  const s = String(seg || '').trim();
+  if (!s) return true;
+  if (/^(?:1[89]\d{2}|20\d{2})$/.test(s)) return true;                       // 2023
+  if (/^\d+\s*(?:[(（]\s*[\d\-–/]+\s*[)）])?\s*(?:[:：]\s*[\deE\-–—.+]+)?$/.test(s)) return true; // 66(3) / 66(3): 123-145
+  if (/^(?:vol|no|issue|pp?|article|pages?)\.?\s*[\d\-–—]+/i.test(s)) return true;
+  if (/^\d+\s*[-–—]\s*\d+$/.test(s)) return true;                            // 123-145
+  if (/^(?:doi|https?:|www\.)/i.test(s)) return true;
+  return false;
+}
+
+/** 期刊 / 会议：只保留名称本体（去掉《》、等级分区注释、卷期页、前缀） */
+export function cleanJournal(raw) {
+  let s = stripMetaNoise(raw, '期刊|会议|刊物|期刊名称|发表期刊|期刊/会议|journal|venue');
+  if (!s) return '';
+  if (isMissingLabel(s)) return '';
+  // 书名号 / 引号包裹
+  s = s.replace(/^[《「『“"']+/, '').replace(/[》」』”"']+$/, '').trim();
+  // 结尾的「（译）」「（原文未报告）」这类标注
+  s = s.replace(/[（(]\s*(?:译|译名|原文未报告|所提供材料未包含|无法确认|不适用)\s*[）)]\s*$/i, '').trim();
+  // 反复剥掉结尾的括号注释：含数字，或提到等级/分区/版本，就直接丢掉
+  for (let i = 0; i < 4; i += 1) {
+    const m = s.match(/[（(]([^（）()]*)[）)]\s*$/);
+    if (!m) break;
+    if (/\d/.test(m[1]) || JOURNAL_ANNOTATION.test(m[1])) {
+      s = s.slice(0, m.index).replace(/[,，、;；:：\-\s]+$/, '').trim();
+    } else break;
+  }
+  // 逗号分段：从「2023」「66(3)」「pp. 1-20」这类元信息开始，后面的都不是刊名了
+  const segs = s.split(/[,，;；]\s*/).filter((x) => x !== '');
+  const keep = [];
+  for (const seg of segs) {
+    if (keep.length && looksLikeJournalMeta(seg)) break;
+    if (!keep.length && segs.length > 1 && looksLikeJournalMeta(seg)) continue;
+    keep.push(seg.trim());
+  }
+  s = keep.join(', ').replace(/^[,，、\s]+|[,，、.。\s]+$/g, '').trim();
+  return s;
+}
+
+/** 作者：去掉「作者：」前缀，保留原文顺序与分隔符 */
+export function cleanAuthors(raw) {
+  const s = stripMetaNoise(raw, '作者|authors?');
+  if (isMissingLabel(s)) return '';
+  return s.replace(/\s*\n+\s*/g, '；').replace(/[;；]{2,}/g, '；').trim();
+}
+
+/** 标题：去掉前缀与包裹的引号/书名号，保留副标题原样 */
+export function cleanTitle(raw) {
+  let s = stripMetaNoise(raw, '标题|题目|title');
+  if (isMissingLabel(s)) return '';
+  s = s.replace(/^[《「『“"']+/, '').replace(/[》」』”"']+$/, '').trim();
+  return s;
+}
+
+/** 关键词：只去掉「关键词：」这种前缀，保留「作者原列 / AI 补充」两段结构 */
+export function cleanKeywords(raw) {
+  const s = stripMetaNoise(raw, '关键词|关键字|keywords?');
+  if (isMissingLabel(s)) return '';
+  return s;
+}
+
+/**
+ * 对一条提取结果做书目字段净化（AI 与规则两条路径共用）。
+ * 只动「列字段」，正文类字段原样保留 —— 那些字段本来就该写解释。
+ */
+export function cleanMetaFields(out) {
+  return {
+    ...out,
+    title: cleanTitle(out.title),
+    authors: cleanAuthors(out.authors),
+    journal: cleanJournal(out.journal),
+    year: cleanYear(out.year),
+    doi: cleanDoi(out.doi),
+    keywords: cleanKeywords(out.keywords),
+  };
+}
+
 function normalizeResult(obj) {
   const out = {};
   for (const f of FIELDS) out[f] = sanitizeField(obj[f]);
-  return out;
+  return cleanMetaFields(out);
 }
 
 /** 节选之间插入的省略标记：既是给模型的「这里断开了」信号，也是给用户的可解释线索 */
@@ -274,7 +403,7 @@ export async function extract(text, pdfInfo, settings, docType = 'empirical') {
     return { ...normalizeResult(parsed), _source: 'ai' };
   }
 
-  // 规则兜底（规则提取不区分类型，抽取公共字段）
+  // 规则兜底（规则提取不区分类型，抽取公共字段）；书目字段同样按同一套规则净化
   const rules = extractByRules(text, pdfInfo);
-  return { ...rules, _source: 'rule' };
+  return { ...cleanMetaFields(rules), _source: 'rule' };
 }

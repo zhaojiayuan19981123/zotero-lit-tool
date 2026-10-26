@@ -1166,6 +1166,106 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .toast.error { background: var(--red); }
 .toast.success { background: var(--green); }
 
+/* ---------- AI 解析进度浮层 ----------
+   解析是「点一下、等几十秒到几分钟」的操作，以前只有一条提示语，用户不知道
+   现在跑到第几篇、卡在哪一步。这里把整批进度 + 当前这篇的阶段实时画出来：
+   右下角浮层，不遮挡表格主体，解析结束后自动收起。 */
+.parse-progress {
+  position: fixed; right: 20px; bottom: 20px; z-index: 210;
+  width: 340px; max-width: calc(100vw - 40px);
+  padding: 12px 14px 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow-lg);
+  color: var(--text); font-family: var(--font-ui); font-size: 12.5px;
+  animation: ppIn .18s var(--ease);
+}
+.parse-progress.hidden { display: none; }
+@keyframes ppIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.pp-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.pp-spinner {
+  width: 13px; height: 13px; flex-shrink: 0; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--primary);
+  animation: ppSpin .8s linear infinite;
+}
+.parse-progress.is-done .pp-spinner { border-color: var(--green); animation: none; }
+@keyframes ppSpin { to { transform: rotate(360deg); } }
+.pp-title {
+  flex: 1; min-width: 0; font-weight: 600; font-size: 13px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pp-count { flex-shrink: 0; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.pp-bar { height: 5px; border-radius: 3px; background: var(--border-soft); overflow: hidden; }
+.pp-bar > span {
+  display: block; height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--primary-light), var(--primary));
+  transition: width .3s var(--ease);
+}
+.parse-progress.is-done .pp-bar > span { background: var(--green); }
+.pp-current {
+  margin-top: 7px; color: var(--text-2); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pp-list {
+  list-style: none; margin: 6px 0 0; padding: 6px 0 0;
+  max-height: 136px; overflow-y: auto; border-top: 1px solid var(--border-soft);
+}
+.pp-list:empty { display: none; }
+.pp-item { display: flex; align-items: center; gap: 7px; padding: 3px 0; color: var(--text-2); }
+.pp-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--text-3); }
+.pp-item.is-running .pp-dot { background: var(--primary); animation: ppPulse 1.1s ease-in-out infinite; }
+.pp-item.is-done .pp-dot { background: var(--green); }
+.pp-item.is-error .pp-dot { background: var(--red); }
+@keyframes ppPulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.pp-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pp-stage { flex-shrink: 0; font-size: 11.5px; color: var(--text-3); }
+.pp-item.is-error .pp-stage { color: var(--red); }
+
+/* ---------- 文献详情：划词标注（高亮 / 字色） ----------
+   解析结果是拿来反复读的：关键句标黄、反面结论标红，比重新通读一遍快得多。
+   标记用 <mark class="anno"> 包住文字，颜色走 CSS 变量，三套主题自动适配；
+   批注本身存进文献记录（annotations 数组，target:'field'），换机器/重开都还在。 */
+.md-annotatable mark.anno {
+  border-radius: 3px; padding: 0 1px; color: inherit;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+}
+/* 底色用 color-mix 半透明：深色主题下也不会把文字压成看不清 */
+mark.anno-hl-yellow { background: color-mix(in srgb, #ffd60a 42%, transparent); }
+mark.anno-hl-green { background: color-mix(in srgb, #34c759 34%, transparent); }
+mark.anno-hl-blue { background: color-mix(in srgb, #0a84ff 30%, transparent); }
+mark.anno-hl-pink { background: color-mix(in srgb, #ff375f 26%, transparent); }
+mark.anno-c-red { color: var(--red); background: none; }
+mark.anno-c-blue { color: var(--accent); background: none; }
+mark.anno-c-green { color: var(--green); background: none; }
+mark.anno-c-purple { color: var(--primary); background: none; }
+
+.anno-toolbar {
+  position: fixed; z-index: 260; display: flex; align-items: center; gap: 3px;
+  padding: 5px 7px; background: var(--elevated); border: 1px solid var(--border);
+  border-radius: 999px; box-shadow: var(--shadow-lg);
+}
+.anno-toolbar.hidden { display: none; }
+.anno-sw {
+  width: 18px; height: 18px; padding: 0; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 5px;
+}
+.anno-sw:hover { transform: scale(1.08); }
+.anno-sw-yellow { background: color-mix(in srgb, #ffd60a 62%, var(--surface)); }
+.anno-sw-green { background: color-mix(in srgb, #34c759 52%, var(--surface)); }
+.anno-sw-blue { background: color-mix(in srgb, #0a84ff 46%, var(--surface)); }
+.anno-sw-pink { background: color-mix(in srgb, #ff375f 42%, var(--surface)); }
+.anno-letter {
+  width: 22px; height: 20px; padding: 0; cursor: pointer; font-weight: 700; font-size: 12.5px;
+  background: none; border: 1px solid transparent; border-radius: 5px; font-family: var(--font-ui);
+}
+.anno-letter:hover { background: var(--primary-soft); }
+.anno-sep { width: 1px; height: 16px; background: var(--border); margin: 0 3px; }
+.anno-clear {
+  padding: 2px 6px; cursor: pointer; font-size: 12px; color: var(--text-3);
+  background: none; border: none; border-radius: 5px; font-family: var(--font-ui);
+}
+.anno-clear:hover { color: var(--red); background: var(--red-soft); }
+.anno-hint { margin: -2px 0 14px; color: var(--text-3); font-size: 11.5px; }
+
 /* ---------- 应用更新 ---------- */
 .update-dialog { width: 560px; }
 .update-version-line { margin: 3px 0 0; color: var(--text-3); font-size: 11.5px; }
