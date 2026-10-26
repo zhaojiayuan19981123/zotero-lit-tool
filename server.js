@@ -10,7 +10,7 @@ import katex from 'katex';
 import mammoth from 'mammoth';
 
 import { extractPdfText } from './src/pdfParser.js';
-import { extract, FIELDS } from './src/aiExtractor.js';
+import { extract, FIELDS, TYPE_FIELDS } from './src/aiExtractor.js';
 import * as store from './src/store.js';
 import * as layout from './src/layout.js';
 // 版面识别结果 → 翻译管线结构 / 逐块对照数据（见 src/layoutTranslate.js）：
@@ -1127,7 +1127,10 @@ async function parseRecord(record, settings, docType) {
       parsedAt: new Date().toISOString(),
       error: null,
     };
-    for (const key of FIELDS) updated[key] = result[key] ?? '';
+    // 只写「当前类型实际产出的字段」：旧版字段（研究背景 / 一段话总结 / 创新点 / 结论…）
+    // 已从界面移出，但老记录里的内容不能被一次重解析清成空串。
+    const written = TYPE_FIELDS[type] || FIELDS;
+    for (const key of written) updated[key] = result[key] ?? '';
   } catch (e) {
     updated = { ...record, status: 'error', error: e.message };
     store.upsertLiterature(updated);

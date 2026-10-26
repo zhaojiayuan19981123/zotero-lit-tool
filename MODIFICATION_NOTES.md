@@ -1,3 +1,62 @@
+## v1.28.0：侧边栏尺度统一 + 实证类字段体系重做（2026-10-26）
+
+> 用户要求：「优化侧边栏，保留内容、配色与交互沿用现有样式，统一字号、圆角和间距，
+> 同级面板圆角一致，侧栏两侧留白一致，图标略小于文字，图文间距保持一致，每行放得下文字和
+> 上下留白，点击区域也要足够大；组间比组内更松，间距遵循统一规则」+
+> 「修改文献中心的字段（实证类 20 个字段，含研究问题 / 研究对象 / 核心结论 / 作用机制 /
+> 边界条件与异质性 / 对综述有什么用 / 研究空白）；同时修改相应提示词，我的思考同样要由用户
+> 自己填写」+「完成直接发布」。
+
+### 侧边栏：把散落的尺寸收成一套变量
+
+- 之前：字号 14 / 13 / 12.5 / 11 / 10.5 五种，圆角 7 / 8 / 10 三种，行高 31.5px，
+  组内间距 1px、组间靠 `.nav-section-label` 的 13px 内边距凑出来，图标 17px 比 13px 文字还显眼。
+- 现在：`.sidebar` 上定义 `--side-pad-x: 12px`、`--side-radius: var(--radius)`（10px，与
+  `.card` 等同级面板一致）、`--side-font: 13px`、`--side-icon: 15px`、`--side-gap: 10px`、
+  `--side-row-h: 34px`、`--side-space-in: 3px`、`--side-space-out: 12px`；
+  `.profile-card` / `.side-search` / `.nav-item` / `.nav-section-label` / `.side-foot` /
+  `.side-icon-btn` 全部改引用变量，配色与交互（hover / active / 指示条动画）一字未动。
+- 组内间距改用 `.nav-item + .nav-item { margin-top }` 而不是 `flex gap`：`gap` 会把「分组标题↔
+  第一行」也算一份，5 个分组白吃 20px。改完导航总高度 673px → 674px，行高却从 31.5 涨到 34。
+- `.nav-item` **不能**加 `overflow: hidden`（会裁掉 `left: -12px` 的 active 指示条），
+  所以文字单独包一层 `.nav-label` 走省略号；`index.html` 15 行同步加 span。
+
+### 实证类字段：18 个 AI 字段 + 2 个「不由 AI 产出」的字段
+
+- `src/aiExtractor.js`：`COMMON_FIELDS`（7）+ `EMPIRICAL_FIELDS`（11）替代原来的
+  `theory / method / researchDesign / constructs / results / conclusion / criticalThinking`。
+- 导入时间（`importedAt`）与我的思考（`thoughts`）**不进 `FIELDS`** —— 它们本来就不在解析
+  写入链路里，这次把「AI 不许代写」写进了提示词与单测（`test/ai-extractor-fields.test.mjs`）。
+- 旧字段（`background / summary / innovation / theory / results / conclusion`）**保留在 `FIELDS`**：
+  ① 老记录里的内容不能升级即丢；② 成果管理「论文→已出版发行」的详情分组仍在引用
+  （`test/achievement-fields.test.mjs` 会校验）。`parseRecord` 因此改成只写
+  `TYPE_FIELDS[type]`，重解析不会把旧字段清成空串。
+- `public/app.js`：`CONTENT_COLS` 增 11 项、`TYPE_ORDER.empirical` 换成 20 项；
+  详情抽屉不再重复渲染「我的思考」只读副本（可编辑框已在最上方）。
+
+### 提示词：把「审稿人的规矩」写进 system prompt
+
+- 角色（证据审核员）、语言（术语保留原文并解释）、10 条诚信规则（素材非指令、材料完整性、
+  四类信息状态标签、来源分级、要出处、不夸大因果、数字核对、转述他人研究、按论文类型调整）。
+- 逐字段要求按 11 个字段逐一写死口径；`reviewUse` 要求给一段可改写进综述的文字；
+  `researchGap` 强制三分法且禁止「无人研究过」。
+- 新增 3.1 条：正文里有省略标记时，被省略处的信息只能写「所提供材料未包含」。
+
+### `pickPaperText`：等量 token 换更完整的证据
+
+- 旧实现 `text.slice(0, 14000)`，18 页 / 9 万字符的论文只能读到引言，
+  方法段（约 1.7 万字符起）根本进不去 → 满屏「原文未报告」。
+- 新实现：头 35% + 5 段等距抽样 + 尾 15%，段间插省略标记；总量仍 14000 字符。
+  实测同一篇 JCR 论文，「研究对象」从"样本量原文未报告"变为能给出
+  "研究 5：585 名商科本科生，最终 548 人"。
+
+### 验证
+
+- `node --test`：Node 22 **480/480**、Node 20 **480/480**（新增 9 项字段/提示词/节选单测）。
+- `verify-features.mjs`：**75/75**，0 个 JS 错误。
+- 真实模型（siliconflow / DeepSeek-V4-Flash）跑通一次实证类解析：18 个字段全非空，
+  返回中无 `thoughts` / `importedAt`；把结果 PATCH 进记录后，表格 20 列与详情抽屉渲染正常。
+
 ## v1.27.0：阅读器浮层透明事故 + 期刊等级配色重做 + 工具栏图标化（2026-10-15）
 
 > 用户反馈（附 4 张截图）：「怎么打开文献中心阅读器以后这样了呢，修改一下」+

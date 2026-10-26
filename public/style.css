@@ -771,14 +771,15 @@ label.field > span .ml-required, label.field > span b.ml-required { background: 
 }
 .side-ops button:hover { background: var(--surface); color: var(--primary); }
 .side-ops button[data-delcol]:hover { color: var(--red); }
+/* 页脚的内边距与上面几块共用 --side-pad-x，四块内容的左右边线保持一条直线 */
 .side-foot {
-  padding: 10px 14px; border-top: 1px solid var(--side-border); font-size: 12px; color: var(--side-muted);
-  display: flex; flex-direction: column; gap: 5px;
+  padding: 10px var(--side-pad-x) 12px; border-top: 1px solid var(--side-border); font-size: 12px; color: var(--side-muted);
+  display: flex; flex-direction: column; gap: 6px;
 }
 .side-foot .side-progress-row b { margin-left: auto; color: var(--side-text); }
 .side-foot .btn-ghost { color: var(--side-text); border-color: var(--side-border); }
 .side-foot .btn-ghost:hover { background: var(--side-active); color: var(--side-text); }
-.side-progress-row { display: flex; align-items: center; gap: 7px; }
+.side-progress-row { display: flex; align-items: center; gap: var(--side-gap); }
 .side-progress-row b { margin-left: auto; color: var(--text); }
 .dot { width: 8px; height: 8px; border-radius: 50%; }
 .dot-done { background: var(--green); }
@@ -1961,18 +1962,37 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 
 /* ==================== 科研工作台（应用级侧边栏 + 多视图） ==================== */
 
-/* 应用级侧边栏（浅色 / 深色 / 护眼三套由 --side-* 变量驱动） */
+/* 应用级侧边栏（浅色 / 深色 / 护眼三套由 --side-* 变量驱动）
+   ------------------------------------------------------------------
+   整栏尺度只此一处定义，下面所有侧栏规则都从这里取值 —— 这样「字号 / 圆角 /
+   间距 / 图标 / 点击区」永远同级一致，不会像以前那样 7px、8px、10px 三套圆角并存：
+     · 左右留白 12px（左右恒等，卡片、搜索框、导航行、页脚共用同一条内边距线）
+     · 圆角 = var(--radius) 10px：与 .card / 浮层等「同级面板」完全对齐
+     · 行高 34px：13px 文字 + 上下留白，点击区比原来的 31.5px 更大且整行满宽可点
+     · 图标 15px < 文字视觉块：图标只做定位提示，不抢文字的视觉重量
+     · 图文间距 10px：所有「图标 + 文字」的组合都用它
+     · 组内 3px / 组间 12px：分组比组内更松，层级靠间距而不是靠描边区分
+   ------------------------------------------------------------------ */
 .sidebar {
+  --side-pad-x: 12px;             /* 左右留白（两侧恒等） */
+  --side-radius: var(--radius);   /* 10px：与同级面板同圆角 */
+  --side-font: 13px;              /* 行字号 */
+  --side-icon: 15px;              /* 图标尺寸（略小于文字） */
+  --side-gap: 10px;               /* 图文间距 */
+  --side-row-h: 34px;             /* 每行高度 = 点击区域 */
+  --side-space-in: 3px;           /* 组内行间距 */
+  --side-space-out: 12px;         /* 组间距（必须大于组内） */
+
   width: 232px; flex-shrink: 0; color: var(--side-text);
   background: var(--side-2);
   border-right: none;
   display: flex; flex-direction: column; overflow: hidden;
 }
 .profile-card {
-  display: flex; align-items: center; gap: 10px;
-  margin: 12px 10px 7px; padding: 10px 12px;
+  display: flex; align-items: center; gap: var(--side-gap);
+  margin: 12px var(--side-pad-x) 8px; padding: 10px 12px;
   background: var(--side-hover);
-  border: 1px solid var(--side-border); border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--side-border); border-radius: var(--side-radius); cursor: pointer;
   transition: background .15s;
 }
 .profile-card:hover { background: var(--side-active); }
@@ -1984,28 +2004,42 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
   border: none; flex-shrink: 0;
 }
 .profile-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.profile-info b { font-size: 14px; color: var(--side-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-info b { font-size: var(--side-font); color: var(--side-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .profile-info span { font-size: 11px; color: var(--side-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .profile-edit { width: 14px; height: 14px; color: var(--side-muted); }
 
-.side-nav { padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 1px; flex: 1; min-height: 0; overflow-y: auto; }
-.nav-section-label {
-  padding: 13px 10px 5px; color: var(--side-muted); font-size: 10.5px;
-  font-weight: 700; letter-spacing: .06em;
+/* 导航区：左右内边距与上面两张卡片共用 --side-pad-x，所以四块内容的边线是齐的 */
+.side-nav {
+  padding: 4px var(--side-pad-x) 8px;
+  display: flex; flex-direction: column;
+  flex: 1; min-height: 0; overflow-y: auto;
 }
-.nav-section-label:first-child { padding-top: 6px; }
+/* 组内间距只用「相邻两行之间」的 margin 表达：
+   用 flex gap 的话，分组标题与它下面第一行之间也会被算一份，5 个分组白吃掉 20px。 */
+.nav-item + .nav-item { margin-top: var(--side-space-in); }
+.nav-section-label {
+  margin-top: var(--side-space-out);
+  padding: 0; color: var(--side-muted); font-size: 11px;
+  font-weight: 700; letter-spacing: .06em; line-height: 1.35;
+}
+.nav-section-label:first-child { margin-top: 0; }
 .nav-item {
-  display: flex; align-items: center; gap: 10px;
-  padding: 7px 10px; border-radius: 7px; font-size: 13px; color: var(--side-text);
+  display: flex; align-items: center; gap: var(--side-gap);
+  min-height: var(--side-row-h); padding: 6px 10px;
+  border-radius: var(--side-radius); font-size: var(--side-font); color: var(--side-text);
   cursor: pointer; user-select: none;
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
-  font-weight: 500; position: relative; line-height: 1.35;
+  font-weight: 500; position: relative; line-height: 1.4;
 }
+/* 文字单独成一层：极长标签走省略号，而不是把行撑宽或压掉右侧角标。
+   注意 .nav-item 不能加 overflow:hidden —— 会连带裁掉左侧的 active 指示条。 */
+.nav-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-item:hover { background: var(--side-hover); color: var(--side-text); }
 .nav-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -1px; }
 .nav-item.active { background: var(--side-active); color: var(--side-marker); font-weight: 700; }
 .nav-item.active::before {
-  content: ''; position: absolute; left: -10px; top: 7px; bottom: 7px;
+  /* 指示条贴在侧栏左缘：行自身左移了 --side-pad-x，所以这里取负值回到栏边 */
+  content: ''; position: absolute; left: calc(-1 * var(--side-pad-x)); top: 9px; bottom: 9px;
   width: 3px; background: var(--side-marker); border-radius: 0 3px 3px 0;
   /* iOS 标签栏那种「指示条落位」的弹性感：只播一次，随 active 类切换重放 */
   animation: navMarker .28s cubic-bezier(.34, 1.4, .64, 1);
@@ -2015,7 +2049,7 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
   from { transform: scaleY(.2); opacity: .3; }
   to   { transform: scaleY(1); opacity: 1; }
 }
-.nav-item .ico { color: var(--side-muted); transition: color var(--dur) var(--ease); }
+.nav-item .ico { width: var(--side-icon); height: var(--side-icon); color: var(--side-muted); transition: color var(--dur) var(--ease); }
 .nav-item:hover .ico { color: var(--side-text); }
 .nav-item.active .ico { color: var(--side-marker); }
 /* 旧版用 <span class="nav-ico"> 承载 emoji，保留兜底避免动态生成的节点没有图标 */
@@ -2032,21 +2066,21 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 
 /* 侧边栏搜索框：从顶栏迁来（搜索只作用于文献，放在侧栏更贴合"按范围检索"的心智） */
 .side-search {
-  display: flex; align-items: center; gap: 7px;
-  margin: 2px 10px 4px; padding: 6px 9px;
+  display: flex; align-items: center; gap: var(--side-gap);
+  margin: 2px var(--side-pad-x) 6px; padding: 6px 10px;
   background: var(--side-hover);
-  border: 1px solid var(--side-border); border-radius: 8px;
+  border: 1px solid var(--side-border); border-radius: var(--side-radius);
   transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 .side-search:focus-within {
   border-color: var(--side-marker);
   background: var(--side-1);
 }
-.side-search-ico { width: 15px; height: 15px; color: var(--side-muted); }
+.side-search-ico { width: var(--side-icon); height: var(--side-icon); color: var(--side-muted); }
 .side-search:focus-within .side-search-ico { color: var(--side-marker); }
 .side-search-input {
   flex: 1; min-width: 0; border: none; outline: none; background: none;
-  font-family: inherit; font-size: 12.5px; color: var(--side-text); padding: 0;
+  font-family: inherit; font-size: var(--side-font); color: var(--side-text); padding: 0;
 }
 .side-search-input::placeholder { color: var(--side-muted); }
 /* 去掉 WebKit 搜索框自带的清除按钮，改用统一的 DOM 按钮，三套主题下外观才一致 */
@@ -2058,11 +2092,11 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .side-search-clear:hover { color: var(--side-text); background: var(--side-active); }
 
 /* 侧边栏页脚：进度统计 + 一排图标动作按钮 */
-.side-foot-actions { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
+.side-foot-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
 .side-icon-btn {
-  position: relative; width: 30px; height: 30px; flex-shrink: 0;
+  position: relative; width: 32px; height: 32px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
-  border: 1px solid var(--side-border); border-radius: 7px;
+  border: 1px solid var(--side-border); border-radius: var(--side-radius);
   background: var(--side-hover); color: var(--side-text);
   cursor: pointer; padding: 0;
   transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);

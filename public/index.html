@@ -197,30 +197,32 @@
       </div>
 
       <nav class="side-nav">
+        <!-- 每行 = 图标 + .nav-label + 可选角标。文字单独包一层是为了超长时走省略号，
+             同时不裁掉行左侧的 active 指示条（见 style.css 里 .sidebar 的尺度变量）。 -->
         <div class="nav-section-label">概览</div>
-        <div class="nav-item active" data-view="home"><svg class="ico" aria-hidden="true"><use href="#i-home"/></svg>首页</div>
+        <div class="nav-item active" data-view="home"><svg class="ico" aria-hidden="true"><use href="#i-home"/></svg><span class="nav-label">首页</span></div>
 
         <div class="nav-section-label">文献</div>
-        <div class="nav-item" data-view="library"><svg class="ico" aria-hidden="true"><use href="#i-library"/></svg>文献中心</div>
-        <div class="nav-item" data-view="thesis"><svg class="ico" aria-hidden="true"><use href="#i-thesis"/></svg>学位论文</div>
-        <div class="nav-item" data-view="topjournals"><svg class="ico" aria-hidden="true"><use href="#i-journal"/></svg>顶刊追踪<span id="navTopJournalBadge" class="nav-badge hidden">0</span></div>
-        <div class="nav-item" data-view="papers"><svg class="ico" aria-hidden="true"><use href="#i-papers"/></svg>论文进度</div>
+        <div class="nav-item" data-view="library"><svg class="ico" aria-hidden="true"><use href="#i-library"/></svg><span class="nav-label">文献中心</span></div>
+        <div class="nav-item" data-view="thesis"><svg class="ico" aria-hidden="true"><use href="#i-thesis"/></svg><span class="nav-label">学位论文</span></div>
+        <div class="nav-item" data-view="topjournals"><svg class="ico" aria-hidden="true"><use href="#i-journal"/></svg><span class="nav-label">顶刊追踪</span><span id="navTopJournalBadge" class="nav-badge hidden">0</span></div>
+        <div class="nav-item" data-view="papers"><svg class="ico" aria-hidden="true"><use href="#i-papers"/></svg><span class="nav-label">论文进度</span></div>
 
         <div class="nav-section-label">研究</div>
-        <div class="nav-item" data-view="projects"><svg class="ico" aria-hidden="true"><use href="#i-projects"/></svg>项目管理</div>
-        <div class="nav-item" data-view="tasks"><svg class="ico" aria-hidden="true"><use href="#i-tasks"/></svg>任务安排</div>
-        <div class="nav-item" data-view="mail"><svg class="ico" aria-hidden="true"><use href="#i-mail"/></svg>邮箱<span id="navMailBadge" class="nav-badge hidden">0</span></div>
+        <div class="nav-item" data-view="projects"><svg class="ico" aria-hidden="true"><use href="#i-projects"/></svg><span class="nav-label">项目管理</span></div>
+        <div class="nav-item" data-view="tasks"><svg class="ico" aria-hidden="true"><use href="#i-tasks"/></svg><span class="nav-label">任务安排</span></div>
+        <div class="nav-item" data-view="mail"><svg class="ico" aria-hidden="true"><use href="#i-mail"/></svg><span class="nav-label">邮箱</span><span id="navMailBadge" class="nav-badge hidden">0</span></div>
 
         <div class="nav-section-label">写作</div>
-        <div class="nav-item" data-view="notes"><svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg>研究记录</div>
-        <div class="nav-item" data-view="markdown"><svg class="ico" aria-hidden="true"><use href="#i-note"/></svg>Markdown 笔记</div>
-        <div class="nav-item" data-view="ideas"><svg class="ico" aria-hidden="true"><use href="#i-ideas"/></svg>灵感孵化</div>
-        <div class="nav-item" data-view="reviewer"><svg class="ico" aria-hidden="true"><use href="#i-reviewer"/></svg>模拟审稿</div>
-        <div class="nav-item" data-view="achievements"><svg class="ico" aria-hidden="true"><use href="#i-trophy"/></svg>成果管理</div>
-        <div class="nav-item" data-view="ai"><svg class="ico" aria-hidden="true"><use href="#i-ai"/></svg>AI 助手</div>
+        <div class="nav-item" data-view="notes"><svg class="ico" aria-hidden="true"><use href="#i-flask"/></svg><span class="nav-label">研究记录</span></div>
+        <div class="nav-item" data-view="markdown"><svg class="ico" aria-hidden="true"><use href="#i-note"/></svg><span class="nav-label">Markdown 笔记</span></div>
+        <div class="nav-item" data-view="ideas"><svg class="ico" aria-hidden="true"><use href="#i-ideas"/></svg><span class="nav-label">灵感孵化</span></div>
+        <div class="nav-item" data-view="reviewer"><svg class="ico" aria-hidden="true"><use href="#i-reviewer"/></svg><span class="nav-label">模拟审稿</span></div>
+        <div class="nav-item" data-view="achievements"><svg class="ico" aria-hidden="true"><use href="#i-trophy"/></svg><span class="nav-label">成果管理</span></div>
+        <div class="nav-item" data-view="ai"><svg class="ico" aria-hidden="true"><use href="#i-ai"/></svg><span class="nav-label">AI 助手</span></div>
 
         <div class="nav-section-label">工具</div>
-        <div class="nav-item" data-view="worldlib"><svg class="ico" aria-hidden="true"><use href="#i-globe"/></svg>世图下载助手</div>
+        <div class="nav-item" data-view="worldlib"><svg class="ico" aria-hidden="true"><use href="#i-globe"/></svg><span class="nav-label">世图下载助手</span></div>
       </nav>
 
       <div class="side-foot">

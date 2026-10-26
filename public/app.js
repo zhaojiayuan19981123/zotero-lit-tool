@@ -18,24 +18,37 @@
     doi: { key: 'doi', label: 'DOI', type: 'text', ai: true, w: 120 },
     keywords: { key: 'keywords', label: '关键词', type: 'text', ai: true, w: 160 },
     abstract: { key: 'abstract', label: '摘要(中文)', type: 'md', ai: true, w: 240 },
+    // —— 实证类深度解析字段（顺序与 src/aiExtractor.js 的 TYPE_FIELDS.empirical 一致）——
+    researchQuestion: { key: 'researchQuestion', label: '研究问题', type: 'md', ai: true, w: 280 },
+    researchObject: { key: 'researchObject', label: '研究对象（样本）', type: 'md', ai: true, w: 260 },
+    coreFindings: { key: 'coreFindings', label: '核心结论', type: 'md', ai: true, w: 300 },
+    mechanism: { key: 'mechanism', label: '作用机制（为什么）', type: 'md', ai: true, w: 280 },
+    boundaryConditions: { key: 'boundaryConditions', label: '边界条件/异质性', type: 'md', ai: true, w: 260 },
+    method: { key: 'method', label: '研究方法', type: 'md', ai: true, w: 200 },
+    researchDesign: { key: 'researchDesign', label: '研究设计', type: 'md', ai: true, w: 260 },
+    constructs: { key: 'constructs', label: '构念', type: 'md', ai: true, w: 240 },
+    criticalThinking: { key: 'criticalThinking', label: '批判性思考', type: 'md', ai: true, w: 260 },
+    reviewUse: { key: 'reviewUse', label: '对文献综述有什么用', type: 'md', ai: true, w: 280 },
+    researchGap: { key: 'researchGap', label: '研究空白', type: 'md', ai: true, w: 260 },
+    // 我的思考：用户手写，AI 解析不会写入（服务端字段集里本来就没有这个 key）
+    thoughts: { key: 'thoughts', label: '我的思考', type: 'md', w: 220 },
+    // —— 旧版字段：实证类界面已不再展示，但模型类与历史记录仍在用，定义保留 ——
     background: { key: 'background', label: '研究背景', type: 'md', ai: true, w: 260 },
     summary: { key: 'summary', label: '一段话总结', type: 'md', ai: true, w: 280 },
     innovation: { key: 'innovation', label: '创新点', type: 'md', ai: true, w: 240 },
     theory: { key: 'theory', label: '理论', type: 'md', ai: true, w: 220 },
-    method: { key: 'method', label: '研究方法', type: 'md', ai: true, w: 200 },
-    researchDesign: { key: 'researchDesign', label: '研究设计', type: 'md', ai: true, w: 260 },
-    constructs: { key: 'constructs', label: '构念', type: 'md', ai: true, w: 240 },
     results: { key: 'results', label: '实验结果', type: 'md', ai: true, w: 260 },
     conclusion: { key: 'conclusion', label: '结论', type: 'md', ai: true, w: 260 },
-    criticalThinking: { key: 'criticalThinking', label: '批判性思考', type: 'md', ai: true, w: 260 },
-    thoughts: { key: 'thoughts', label: '我的思考', type: 'md', w: 220 },
     model: { key: 'model', label: '模型', type: 'md', ai: true, w: 220 },
     paramDiscussion: { key: 'paramDiscussion', label: '参数讨论', type: 'md', ai: true, w: 260 },
   };
   // 两个文库各自的字段排布（界面分开，不一致）
+  // 实证类：导入时间 → 书目 → 摘要 → 研究问题/对象/结论/机制/边界 → 方法/设计/构念 →
+  //        批判性思考 → 我的思考（手写） → 对文献综述的用处 → 研究空白
   const TYPE_ORDER = {
-    empirical: ['importedAt', 'title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract', 'background',
-      'theory', 'method', 'researchDesign', 'constructs', 'results', 'conclusion', 'criticalThinking', 'thoughts', 'summary', 'innovation'],
+    empirical: ['importedAt', 'title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract',
+      'researchQuestion', 'researchObject', 'coreFindings', 'mechanism', 'boundaryConditions',
+      'method', 'researchDesign', 'constructs', 'criticalThinking', 'thoughts', 'reviewUse', 'researchGap'],
     model: ['importedAt', 'title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract', 'background',
       'model', 'method', 'paramDiscussion', 'results', 'thoughts', 'summary', 'innovation'],
   };
@@ -1130,8 +1143,9 @@
     $('btnOpenPdf').disabled = !it.filename;
     $('btnRead').disabled = !it.filename;
 
+    // thoughts 由上面那块可编辑的「我的思考」承载，这里不再重复渲染一遍只读副本
     const sections = TYPE_ORDER[it.docType || lib.type]
-      .filter((k) => !['title', 'authors', 'journal', 'year', 'doi', 'keywords', 'importedAt'].includes(k));
+      .filter((k) => !['title', 'authors', 'journal', 'year', 'doi', 'keywords', 'importedAt', 'thoughts'].includes(k));
     const chip = (l, v) => (v ? `<span class="meta-chip"><b>${l}：</b>${esc(v)}</span>` : '');
     const col = collections.find((c) => c.id === it.collectionId);
 
