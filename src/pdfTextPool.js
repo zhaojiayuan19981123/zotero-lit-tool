@@ -6,7 +6,9 @@
 // 挪到 worker 线程后，主线程空出来服务请求，同时多篇 PDF 能真正并行抽取。
 //
 // 设计取舍：
-//   · 池子上限默认 2（最多 3）：抽取是纯 CPU 活，开太多线程反而互相抢核、还吃内存；
+//   · 池子上限默认 4（最多 6）：AI 解析默认 6 路并行，前面几篇会同时进入「抽正文」阶段，
+//     只给 2 个线程的话它们要排队，等于把并行的好处浪费在第一阶段；4 个线程在 8 核机器上
+//     既吃得下并发，又不会互相抢核到反而变慢（8 核以下会自动降到更小的值）；
 //   · 空闲 60 秒自动回收，不常驻占内存；
 //   · 单篇 4 分钟超时：扫描件/损坏文件可能把 pdf.js 卡死，超时就杀掉这个线程重开；
 //   · 线程起不来（某些打包环境限制 worker）时由调用方退回主线程，功能绝不因此丢失。
@@ -14,7 +16,7 @@ import os from 'node:os';
 import { Worker } from 'node:worker_threads';
 
 const CPU_COUNT = (os.cpus() || []).length || 2;
-const MAX_WORKERS = Math.max(1, Math.min(3, parseInt(process.env.PDF_TEXT_WORKERS, 10) || Math.min(2, CPU_COUNT)));
+const MAX_WORKERS = Math.max(1, Math.min(6, parseInt(process.env.PDF_TEXT_WORKERS, 10) || Math.min(4, Math.max(2, CPU_COUNT - 1))));
 const JOB_TIMEOUT_MS = Math.max(30000, parseInt(process.env.PDF_TEXT_TIMEOUT_MS, 10) || 240000);
 const IDLE_TTL_MS = 60000;
 
@@ -28,12 +30,15 @@ const idleTimers = new Map();
 
 function scheduleIdleCleanup(w) {
   clearTimeout(idleTimers.get(w));
-  idleTimers.set(w, setTimeout(() => {
+  const timer = setTimeout(() => {
     idleTimers.delete(w);
     const i = idle.indexOf(w);
     if (i >= 0) idle.splice(i, 1);
     try { w.terminate(); } catch (_) { /* ignore */ }
-  }, IDLE_TTL_MS));
+  }, IDLE_TTL_MS);
+  // 回收定时器不该拉着进程不让退出（Electron 关窗、单测收尾都会因此多等一分钟）
+  if (typeof timer.unref === 'function') timer.unref();
+  idleTimers.set(w, timer);
 }
 
 function settle(worker, err, data) {

@@ -12,6 +12,10 @@ import mammoth from 'mammoth';
 import { extractPdfText } from './src/pdfParser.js';
 import { extract, FIELDS, TYPE_FIELDS } from './src/aiExtractor.js';
 import { createParseTracker } from './src/parseProgress.js';
+import {
+  runParseBatch, clampParseConcurrency, pickStaleParsing, isParseActive,
+  PARSE_CONCURRENCY_DEFAULT, PARSE_INTERRUPTED_MESSAGE, resolveItemTimeoutMs,
+} from './src/parseRunner.js';
 import * as store from './src/store.js';
 import * as layout from './src/layout.js';
 // 版面识别结果 → 翻译管线结构 / 逐块对照数据（见 src/layoutTranslate.js）：
@@ -1112,38 +1116,67 @@ function substituteImageDescriptions(messages, description) {
 }
 
 // ---------- 解析单篇 ----------
+const PARSE_ERROR_MAX = 300;
+
+/** 错误信息压缩成一行：库里的 error 字段是直接显示在表格和抽屉里的 */
+function shortError(err) {
+  const raw = err instanceof Error ? (err.message || err.name) : String(err || '解析失败');
+  const one = raw.replace(/\s+/g, ' ').trim() || '解析失败';
+  return one.length > PARSE_ERROR_MAX ? `${one.slice(0, PARSE_ERROR_MAX)}…` : one;
+}
+
 /**
- * 解析单篇记录。
+ * 解析单篇记录。**永不抛错** —— 失败也返回一条 status='error' 的记录，
+ * 这样批量执行器就不会因为一篇坏文件中断整批。
+ *
  * @param {object|null} tracker 解析进度追踪器（createParseTracker 的返回值）。
  *   每推进一步上报一次阶段，前端轮询 /api/parse/progress 就能看到「第几篇、在哪一步」。
  *   传 null 时行为与旧版完全一致（单测直接调它不关心进度）。
+ * @param {object|null} job 单篇作业句柄（parseRunner.createParseJob）。
+ *   signal 用来掐断 HTTP；assertLive 在每个 await 之后检查是否已经超时，
+ *   避免「界面已经标成超时失败、后台又把结果写回库里」这种鬼状态。
  */
-async function parseRecord(record, settings, docType, tracker = null) {
+async function parseRecord(record, settings, docType, tracker = null, job = null) {
   const type = docType || record.docType || 'empirical';
-  store.upsertLiterature({ ...record, status: 'parsing', error: null });
+  const startedAtIso = new Date().toISOString();
+  // 解析期间用户可能还在改「我的思考」、加高亮批注、调星级。收尾时要合并「此刻库里的记录」，
+  // 而不是拿批次开始时那份快照覆盖 —— 否则一顿并发解析下来，刚写的东西全没了。
+  const freshest = () => store.getLiterature(record.id) || record;
+  // 先落盘「解析中」+ 开始时间：应用如果在解析途中被杀掉，下次启动才能靠
+  // parseStartedAt 判断这条记录是僵尸（见 reclaimStaleParsing）。
+  store.upsertLiterature({ ...record, status: 'parsing', error: null, parseStartedAt: startedAtIso });
   let updated = record;
   try {
+    job?.assertLive();
     tracker?.setStage(record.id, 'extract');
     const { text, numPages, info } = await extractPdfText(record.filePath);
+    job?.assertLive();
     tracker?.setStage(record.id, 'ai');
-    const result = await extract(text, info, settings, type);
+    const result = await extract(text, info, settings, type, {
+      signal: job?.signal,
+      // 用户可在「高级设置」里调单次请求超时；没调就按 180 秒兜底（见 aiExtractor.resolveAiTimeoutMs）
+      timeoutMs: currentRequestTimeoutMs(),
+    });
+    job?.assertLive();
     updated = {
-      ...record,
+      ...freshest(),
       status: 'done',
       numPages,
       source: result._source || null,
       docType: type,
       parsedAt: new Date().toISOString(),
       error: null,
+      parseStartedAt: null,
     };
     // 只写「当前类型实际产出的字段」：旧版字段（研究背景 / 一段话总结 / 创新点 / 结论…）
     // 已从界面移出，但老记录里的内容不能被一次重解析清成空串。
     const written = TYPE_FIELDS[type] || FIELDS;
     for (const key of written) updated[key] = result[key] ?? '';
   } catch (e) {
-    updated = { ...record, status: 'error', error: e.message };
-    store.upsertLiterature(updated);
-    tracker?.finish(record.id, e.message);
+    const message = shortError(e);
+    updated = { ...freshest(), status: 'error', error: message, parseStartedAt: null };
+    try { store.upsertLiterature(updated); } catch (_) { /* 落盘失败也要把进度收尾 */ }
+    tracker?.finish(record.id, message);
     return updated;
   }
 
@@ -1151,7 +1184,8 @@ async function parseRecord(record, settings, docType, tracker = null) {
   if (settings?.easyScholarKey && updated.journal) {
     tracker?.setStage(record.id, 'rank');
     try {
-      const rankData = await queryPublicationRank(updated.journal, settings.easyScholarKey);
+      // 查等级有 12 秒硬时限：它要是吊死，前面 AI 跑出来的结果就落不了盘
+      const rankData = await queryPublicationRank(updated.journal, settings.easyScholarKey, { signal: job?.signal });
       if (rankData?.code === 200) {
         const f = formatRank(rankData.data);
         updated.journalRank = f.summary;
@@ -1161,14 +1195,32 @@ async function parseRecord(record, settings, docType, tracker = null) {
         updated.journalRankError = (rankData?.msg || '查询失败');
       }
     } catch (e) {
-      updated.journalRankError = e.message;
+      updated.journalRankError = shortError(e);
     }
   }
 
+  // 到这里 AI 结果已经有了，哪怕作业已经超时也把结果存下来（白跑一趟太浪费）；
+  // 只是不再向进度面板汇报，收尾由 settleTimedOutParse 负责。
   tracker?.setStage(record.id, 'save');
-  store.upsertLiterature(updated);
+  try { store.upsertLiterature(updated); } catch (e) { updated.error = shortError(e); }
   tracker?.finish(record.id);
   return updated;
+}
+
+/**
+ * 看门狗兜底：单篇到点被掐断时，parseRecord 可能正卡在一个不可中断的 await 里
+ * （比如 pdf.js 抽取），永远不会返回。这时候库里的记录还是 parsing，
+ * 必须在批次结束的这一刻把它改成 error —— 否则它就变成「永远解析中」的僵尸。
+ */
+function settleTimedOutParse(item, error, tracker) {
+  const message = shortError(error);
+  try {
+    const latest = store.getLiterature(item.id);
+    if (latest && latest.status === 'parsing') {
+      store.upsertLiterature({ ...latest, status: 'error', error: message, parseStartedAt: null });
+    }
+  } catch (_) { /* 落盘失败不影响其他篇 */ }
+  tracker?.finish(item.id, message);
 }
 
 // ---------- 构建应用 ----------
@@ -1718,36 +1770,97 @@ export function createApp({
   });
 
   // ---------- 解析 ----------
-  // 并发解析：LLM 调用是主要的耗时瓶颈，串行逐篇会非常慢。
-  // 用有限并发（默认 3）并发跑，既显著提速，又避免同时打爆 LLM 接口/限流。
-  async function runWithConcurrency(tasks, limit) {
-    const results = new Array(tasks.length);
-    let cursor = 0;
-    const workers = Array.from({ length: Math.min(limit, tasks.length) }, async () => {
-      while (cursor < tasks.length) {
-        const i = cursor++;
-        results[i] = await tasks[i]();
-      }
+  // 并发解析：LLM 调用是主要瓶颈（每篇几十秒），串行跑一批 20 篇要十几分钟。
+  // 这里默认 6 路并行（可传 1~8）：LLM 是 IO 等待，6 路并行实测能把整批的墙上时间
+  // 压到 1/4 左右，又不会把上游限流打爆。真正的执行交给 src/parseRunner.js ——
+  // 它负责并发池、单篇看门狗和失败隔离（一篇卡死不再拖垮整批）。
+
+  /** 单篇预算：AI 单次超时 + 正文抽取 / 查期刊等级的余量 */
+  function parseItemBudgetMs() {
+    const aiMs = Math.max(currentRequestTimeoutMs(), 180000);
+    return resolveItemTimeoutMs(aiMs + 180000);
+  }
+
+  // 僵尸 parsing 清理。
+  // 库里 status==='parsing' 只说明「上次开始过」：应用退出、请求被断开、看门狗把某一篇
+  // 掐掉之后，这条记录会永远停在解析中。而「解析全部」又明确跳过 parsing ——
+  // 于是它再也没机会被重跑，用户看到的就是「这篇文献一直卡在解析中」。
+  // 现在以进程内的真实作业表（isParseActive）为准，把「没人在跑」的 parsing 一律收回。
+  function reclaimStaleParsing({ all = false } = {}) {
+    const stale = pickStaleParsing(store.listLiterature(), {
+      all,
+      maxAgeMs: parseItemBudgetMs() + 90000,
+      isActive: isParseActive,
     });
-    await Promise.all(workers);
-    return results;
+    const ids = [];
+    for (const it of stale) {
+      try {
+        store.upsertLiterature({ ...it, status: 'error', error: PARSE_INTERRUPTED_MESSAGE, parseStartedAt: null });
+        ids.push(it.id);
+      } catch (_) { /* 单条落盘失败不影响其他条 */ }
+    }
+    return ids;
+  }
+  // 进程刚起来时内存里的作业表必然是空的 → 启动时全量回收一次
+  reclaimStaleParsing({ all: true });
+
+  /**
+   * 跑一批解析：登记进度作业 → 并发执行 → 收尾。
+   * 三个入口（解析全部 / 单篇重新解析 / 批量重新解析）共用，行为完全一致。
+   */
+  async function runParseJobs(items, { settings, docType, concurrency, label }) {
+    const list = (Array.isArray(items) ? items : []).filter(Boolean);
+    const limit = clampParseConcurrency(concurrency ?? PARSE_CONCURRENCY_DEFAULT);
+    const jobId = parseProgress.start(list, { label, concurrency: Math.min(limit, Math.max(1, list.length)) });
+    const batch = await runParseBatch(
+      list,
+      (item, job) => parseRecord(item, settings, docType, parseProgress, job),
+      {
+        concurrency: limit,
+        itemTimeoutMs: parseItemBudgetMs(),
+        // 看门狗掐断的那一篇，parseRecord 可能还卡在不可中断的 await 里没返回，
+        // 这里兜底把库里的 parsing 改掉，别留下僵尸。
+        onItemDone: (outcome) => {
+          if (!outcome.ok) settleTimedOutParse(outcome.item, outcome.error, parseProgress);
+        },
+      },
+    );
+    return { jobId, batch, concurrency: limit };
+  }
+
+  /** 把执行器结果转回「记录数组」——接口老前端只认这个形状 */
+  function toRecords(batch) {
+    return batch.results.map((r) => (r.ok && r.value ? r.value : (store.getLiterature(r.item.id) || r.item)));
   }
 
   app.post('/api/parse', async (req, res) => {
     const settings = store.getSettings();
     const docType = req.body?.docType;
+    // 先把上次崩溃/超时留下的「假解析中」收回来，否则它们会被下面的过滤跳过
+    reclaimStaleParsing();
     let items = store.listLiterature();
     const ids = req.body?.ids;
     if (Array.isArray(ids) && ids.length) items = items.filter((it) => ids.includes(it.id));
-    else items = items.filter((it) => it.status !== 'done' && it.status !== 'parsing');
+    else items = items.filter((it) => it.status !== 'done');
+    // 「解析中」是否跳过，以此刻真在跑的作业为准，而不是库里的 status
+    items = items.filter((it) => !isParseActive(it.id));
     // EPUB 没有 PDF 文本层，AI 解析（提取正文 / 版面 / 图表）不适用，静默跳过
     items = items.filter((it) => it.fileKind !== 'epub');
 
-    // 开一轮进度作业：前端在本次 POST 还挂着的时候平行轮询 /api/parse/progress
-    const jobId = parseProgress.start(items, { label: items.length > 1 ? `AI 解析 · ${items.length} 篇` : 'AI 解析' });
-    const concurrency = Math.max(1, Math.min(8, parseInt(req.body?.concurrency, 10) || 4));
-    const results = await runWithConcurrency(items.map((item) => () => parseRecord(item, settings, docType, parseProgress)), concurrency);
-    res.json({ results, jobId });
+    const { jobId, batch, concurrency } = await runParseJobs(items, {
+      settings,
+      docType,
+      concurrency: req.body?.concurrency,
+      label: items.length > 1 ? `AI 解析 · ${items.length} 篇` : 'AI 解析',
+    });
+    res.json({
+      results: toRecords(batch),
+      jobId,
+      concurrency,
+      total: batch.results.length,
+      failed: batch.failed,
+      elapsedMs: batch.elapsedMs,
+    });
   });
 
   // 解析进度：内存快照，字段含义见 src/parseProgress.js
@@ -1762,8 +1875,14 @@ export function createApp({
     if (item.fileKind === 'epub') {
       return res.status(400).json({ error: 'EPUB 电子书不走 AI 解析（该功能针对 PDF 正文与版面）' });
     }
-    const jobId = parseProgress.start([item], { label: '重新解析' });
-    res.json({ ...(await parseRecord(item, store.getSettings(), req.body?.docType, parseProgress)), jobId });
+    // 单篇也走同一个执行器：同样有超时兜底，界面不会因为一次卡住就永远转圈
+    const { jobId } = await runParseJobs([item], {
+      settings: store.getSettings(),
+      docType: req.body?.docType,
+      concurrency: 1,
+      label: '重新解析',
+    });
+    res.json({ ...(store.getLiterature(item.id) || item), jobId });
   });
 
   // ---------- PDF 版面解析（标题/正文/图表/表格/公式的区域识别） ----------
@@ -2144,11 +2263,16 @@ export function createApp({
   });
 
   // ---------- 查询 ----------
-  app.get('/api/literature', (_req, res) => res.json(store.listLiterature().map((it) => ({
-    ...it,
-    // 旧数据没有 importedAt 字段：依次回退到解析时间 / 创建时间
-    importedAt: it.importedAt || it.parsedAt || it.createdAt || null,
-  }))));
+  // 列表前顺手回收僵尸 parsing：前端每次刷新都会走到这里，卡住的记录最多多显示一个刷新周期，
+  // 之后会自动变成「解析被中断」（可重新解析），而不是永远转圈。
+  app.get('/api/literature', (_req, res) => {
+    reclaimStaleParsing();
+    res.json(store.listLiterature().map((it) => ({
+      ...it,
+      // 旧数据没有 importedAt 字段：依次回退到解析时间 / 创建时间
+      importedAt: it.importedAt || it.parsedAt || it.createdAt || null,
+    })));
+  });
   app.get('/api/literature/:id', (req, res) => {
     const item = store.getLiterature(req.params.id);
     if (!item) return res.status(404).json({ error: '记录不存在' });
@@ -2247,20 +2371,33 @@ export function createApp({
   app.post('/api/literature/batch-reparse', async (req, res) => {
     const settings = store.getSettings();
     const docType = req.body?.docType;
+    // 卡住的「假解析中」先收回来，这样才能被这次批量重跑救活
+    reclaimStaleParsing();
     let targets = store.listLiterature();
     const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
     if (ids.length) targets = targets.filter((it) => ids.includes(it.id));
-    // 正在解析中的跳过，避免同一记录被并发写两次
-    const skipped = targets.filter((it) => it.status === 'parsing').map((it) => it.id);
-    targets = targets.filter((it) => it.status !== 'parsing');
+    // 真的在跑的才跳过（避免同一记录被并发写两次）；库里写着 parsing 但没人在跑的照常重跑
+    const skipped = targets.filter((it) => isParseActive(it.id)).map((it) => it.id);
+    targets = targets.filter((it) => !isParseActive(it.id));
     if (!targets.length) {
       return res.json({ results: [], skipped, message: skipped.length ? '选中的文献都在解析中' : '没有可重新解析的文献' });
     }
-    const jobId = parseProgress.start(targets, { label: `批量重新解析 · ${targets.length} 篇` });
-    const concurrency = Math.max(1, Math.min(8, parseInt(req.body?.concurrency, 10) || 4));
-    const results = await runWithConcurrency(targets.map((item) => () => parseRecord(item, settings, docType, parseProgress)), concurrency);
-    const failed = results.filter((r) => !r || r.status === 'error').length;
-    res.json({ results, skipped, failed, total: targets.length, jobId });
+    const { jobId, batch, concurrency } = await runParseJobs(targets, {
+      settings,
+      docType,
+      concurrency: req.body?.concurrency,
+      label: `批量重新解析 · ${targets.length} 篇`,
+    });
+    res.json({
+      results: toRecords(batch),
+      skipped,
+      failed: batch.failed,
+      total: batch.results.length,
+      timedOut: batch.timedOut,
+      concurrency,
+      elapsedMs: batch.elapsedMs,
+      jobId,
+    });
   });
 
   // ---------- 批量标记阅读进度 ----------

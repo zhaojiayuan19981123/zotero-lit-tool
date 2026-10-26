@@ -43,9 +43,12 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
  * 查询期刊等级
  * @param {string} publicationName 期刊名称
  * @param {string} secretKey easyScholar SecretKey
+ * @param {{signal?:AbortSignal, timeoutMs?:number}} [opts]
+ *   查等级是解析的最后一步，它要是吊死，前面 AI 已经跑出来的结果就落不了盘
+ *   —— 记录会停在「核对期刊等级」这个阶段一直转圈。所以这里必须有硬时限。
  * @returns {Promise<object>} 原始返回的 JSON
  */
-export async function queryPublicationRank(publicationName, secretKey) {
+export async function queryPublicationRank(publicationName, secretKey, opts = {}) {
   const url = 'https://www.easyscholar.cc/open/getPublicationRank'
     + '?secretKey=' + encodeURIComponent(secretKey)
     + '&publicationName=' + encodeURIComponent(publicationName);
@@ -55,11 +58,32 @@ export async function queryPublicationRank(publicationName, secretKey) {
   lastRequestAt = now + wait;
   if (wait > 0) await sleep(wait);
 
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'SciTerminal/1.0', Accept: 'application/json' },
-  });
-  if (!res.ok) throw new Error('easyScholar 请求失败 HTTP ' + res.status);
-  return res.json();
+  const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 12000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  const onExternalAbort = () => controller.abort();
+  if (opts.signal) {
+    if (opts.signal.aborted) controller.abort();
+    else opts.signal.addEventListener?.('abort', onExternalAbort, { once: true });
+  }
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'SciTerminal/1.0', Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error('easyScholar 请求失败 HTTP ' + res.status);
+    return await res.json();
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      if (opts.signal?.aborted && opts.signal.reason instanceof Error) throw opts.signal.reason;
+      throw new Error(`easyScholar 查询超时（${Math.round(timeoutMs / 1000)} 秒无响应）`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    opts.signal?.removeEventListener?.('abort', onExternalAbort);
+  }
 }
 
 /**

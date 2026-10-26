@@ -169,33 +169,122 @@ ${EMPIRICAL_JSON_KEYS.map((k) => `   ${k}：${FIELD_LABELS[k]}`).join('\n')}
 只返回 JSON 对象本身。`;
 }
 
+// ---------- AI 请求的超时 / 重试 ----------
+// 解析一篇文献要一次吐出十几个字段，实测 20~120 秒；慢可以接受，「死」不行。
+// 老版本这里是裸 fetch，没有任何信号与时限 —— 上游半死不活（连接建起来但不返回、
+// 公司网关吞包、代理挂着）时 Promise 永不 settle，那篇文献就永远停在 parsing，
+// 整批解析跟着一起卡死。所以这里给每次请求加硬时限，并对「快速失败」类错误重试。
+//
+// 取舍：超时不重试（已经白等了一个完整预算，再等一轮只会让用户更难受，
+// 交给上层的单篇看门狗统一收尾）；429 / 5xx / 网络层错误重试，这类通常几百毫秒就失败，
+// 重试几乎不增加等待，却能救掉网关抖动。
+const AI_MIN_TIMEOUT_MS = 180000;
+const AI_MAX_TIMEOUT_MS = 600000;
+const AI_MAX_ATTEMPTS = 3;
+
+export class AiRequestTimeoutError extends Error {
+  constructor(ms) {
+    super(`AI 接口 ${Math.round(ms / 1000)} 秒无响应，已中止这篇（可在「AI 设置 → 高级设置」调大单次请求超时，或换一个更快的模型）`);
+    this.name = 'AiRequestTimeoutError';
+    this.code = 'AI_TIMEOUT';
+    this.timeoutMs = ms;
+  }
+}
+
+/** 单次请求时限：显式传参 > 用户设置 > 180 秒，夹在 [180s, 10min] */
+export function resolveAiTimeoutMs(explicit) {
+  const asNum = Number(explicit);
+  const base = Number.isFinite(asNum) && asNum > 0 ? asNum : AI_MIN_TIMEOUT_MS;
+  return Math.min(AI_MAX_TIMEOUT_MS, Math.max(AI_MIN_TIMEOUT_MS, Math.round(base)));
+}
+
+function sleep(ms) {
+  return new Promise((r) => { const t = setTimeout(r, ms); if (typeof t.unref === 'function') t.unref(); });
+}
+
+/** 值得重试的错误：网关抖动 / 限流 / 连接被掐；超时和 4xx 参数错不重试 */
+function isRetriable(err) {
+  if (!err) return false;
+  if (err.code === 'AI_TIMEOUT') return false;
+  const status = Number(err.status);
+  if (Number.isFinite(status) && status > 0) return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+  return /fetch failed|network|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|other side closed|terminated/i.test(String(err.message || ''));
+}
+
+async function callLLMOnce(url, payload, settings, { signal, timeoutMs }) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  const onExternalAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener?.('abort', onExternalAbort, { once: true });
+  }
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${settings.apiKey}`,
+      },
+      body: payload,
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      const err = new Error(`LLM 接口返回 ${res.status}: ${body.slice(0, 300)}`);
+      err.status = res.status;
+      throw err;
+    }
+    const data = await res.json();
+    return data?.choices?.[0]?.message?.content || '';
+  } catch (e) {
+    if (timedOut) throw new AiRequestTimeoutError(timeoutMs);
+    // 外部主动中止（单篇看门狗到点 / 用户取消）：把原始原因抛上去，别包装成超时
+    if (signal?.aborted) throw (signal.reason instanceof Error ? signal.reason : e);
+    if (e && (e.name === 'AbortError' || e.name === 'TimeoutError')) throw new AiRequestTimeoutError(timeoutMs);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.('abort', onExternalAbort);
+  }
+}
+
 /**
  * 调用 OpenAI 兼容的 Chat Completions 接口（硅基流动 / 其他兼容服务）
+ * @param {object} settings
+ * @param {string} systemPrompt
+ * @param {string} userContent
+ * @param {{signal?:AbortSignal, timeoutMs?:number, attempts?:number}} [opts]
  */
-async function callLLM(settings, systemPrompt, userContent) {
+export async function callLLM(settings, systemPrompt, userContent, opts = {}) {
   const url = (settings.baseURL || '').replace(/\/+$/, '') + '/chat/completions';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${settings.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: settings.model || 'deepseek-ai/DeepSeek-V4-Flash',
-      temperature: 0.1,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userContent },
-      ],
-    }),
+  const payload = JSON.stringify({
+    model: settings.model || 'deepseek-ai/DeepSeek-V4-Flash',
+    temperature: 0.1,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userContent },
+    ],
   });
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`LLM 接口返回 ${res.status}: ${body.slice(0, 300)}`);
+  const timeoutMs = resolveAiTimeoutMs(opts.timeoutMs);
+  const maxAttempts = Math.min(AI_MAX_ATTEMPTS, Math.max(1, parseInt(opts.attempts, 10) || AI_MAX_ATTEMPTS));
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (opts.signal?.aborted) {
+      throw (opts.signal.reason instanceof Error ? opts.signal.reason : new Error('AI 请求已中止'));
+    }
+    try {
+      return await callLLMOnce(url, payload, settings, { signal: opts.signal, timeoutMs });
+    } catch (e) {
+      lastErr = e;
+      if (attempt >= maxAttempts || opts.signal?.aborted || !isRetriable(e)) break;
+      await sleep(500 * attempt);
+    }
   }
-  const data = await res.json();
-  return data?.choices?.[0]?.message?.content || '';
+  throw lastErr || new Error('AI 请求失败');
 }
 
 function parseJsonLoose(str) {
@@ -390,15 +479,17 @@ export function pickPaperText(text, { maxChars = 14000, slices = 5 } = {}) {
  * @param {object} pdfInfo 元信息
  * @param {object} settings 设置（含 aiProvider/apiKey/model/baseURL/language）
  * @param {string} docType 文献类型 'empirical' | 'model'
+ * @param {{signal?:AbortSignal, timeoutMs?:number, attempts?:number}} [opts]
+ *   signal 由批量解析的单篇看门狗提供：到点立即掐断 HTTP 连接，避免请求吊死。
  */
-export async function extract(text, pdfInfo, settings, docType = 'empirical') {
+export async function extract(text, pdfInfo, settings, docType = 'empirical', opts = {}) {
   const useAI = (settings?.aiProvider === 'openai' || settings?.aiProvider === 'siliconflow') && settings?.apiKey;
 
   if (useAI) {
     const lang = settings.language === 'zh' ? '简体中文' : 'English';
     const systemPrompt = buildPrompt(docType, lang);
     const userContent = pickPaperText(text);
-    const raw = await callLLM(settings, systemPrompt, userContent);
+    const raw = await callLLM(settings, systemPrompt, userContent, opts);
     const parsed = parseJsonLoose(raw);
     return { ...normalizeResult(parsed), _source: 'ai' };
   }

@@ -1044,6 +1044,21 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .meta-chip b { color: var(--text); }
 .drawer-nav-hint { text-align: center; color: var(--text-3); font-size: 12px; margin-top: 14px; }
 
+/* 从表格某一列点进详情卡片时，目标字段闪一下，告诉用户「你点的是这个」。
+   只动背景与描边（不动布局），三套主题下都用 --primary 的低透明度版本。
+   注意：动画结束必须回到透明，不能留下永久底色 —— 否则会和划词高亮撞色。 */
+@keyframes fieldFlash {
+  0%   { background: color-mix(in srgb, var(--primary) 26%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 22%, transparent); }
+  70%  { background: color-mix(in srgb, var(--primary) 14%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 12%, transparent); }
+  100% { background: transparent; box-shadow: 0 0 0 3px transparent; }
+}
+[data-field-anchor].field-flash {
+  animation: fieldFlash 1.5s ease-out;
+  border-radius: 6px;
+}
+/* 整行都是详情卡片的入口（复选框 / 序号 / 操作按钮自己有光标语义，不覆盖） */
+table.grid tbody td:not(.cell-check):not(.cell-num) { cursor: pointer; }
+
 /* markdown 渲染（抽屉） */
 .md { font-size: 14px; line-height: 1.85; }
 .md ul { margin: 6px 0; padding-left: 18px; }

@@ -280,14 +280,16 @@
     if (list) list.innerHTML = '';
   }
 
-  // 单篇失败也要让人看见，但列表不能无限长：把「进行中 / 失败 / 最近完成」挑出来即可
+  // 单篇失败也要让人看见，但列表不能无限长：把「进行中 / 失败 / 最近完成」挑出来即可。
+  // 进行中的条数要跟着并发度走：并行 6 篇时只列 5 条，会跟上面那句「正在并行解析 6 篇」打架。
   function pickProgressRows(s) {
     const items = Array.isArray(s.items) ? s.items : [];
     if (items.length <= 8) return items;
+    const runningCap = Math.min(8, Math.max(5, s.concurrency || 5));
     const picked = [];
     const seen = new Set();
     const push = (it) => { if (it && !seen.has(it.id)) { seen.add(it.id); picked.push(it); } };
-    items.filter((i) => i.status === 'running').slice(0, 5).forEach(push);
+    items.filter((i) => i.status === 'running').slice(0, runningCap).forEach(push);
     items.filter((i) => i.status === 'error').slice(0, 3).forEach(push);
     items.filter((i) => i.status === 'done').slice(-3).forEach(push);
     return picked;
@@ -310,14 +312,24 @@
     if (count) count.textContent = `${s.done}/${s.total}${s.failed ? ` · 失败 ${s.failed}` : ''}`;
     if (bar) bar.style.width = `${Math.max(0, Math.min(100, s.percent || 0))}%`;
     if (current) {
-      current.textContent = s.running
-        ? (s.current ? `${s.current.title} · ${s.current.stageLabel}` : '正在启动…')
-        : (s.failed ? `已结束：成功 ${s.total - s.failed} 篇，失败 ${s.failed} 篇` : `已全部完成，共 ${s.total} 篇`);
+      const parallel = Array.isArray(s.active) ? s.active.length : 0;
+      if (!s.running) {
+        current.textContent = s.failed
+          ? `已结束：成功 ${s.total - s.failed} 篇，失败 ${s.failed} 篇`
+          : `已全部完成，共 ${s.total} 篇`;
+      } else if (parallel > 1) {
+        // 并行解析时「当前篇」这个概念已经不成立了，直接说有几篇在同时跑
+        current.textContent = `正在并行解析 ${parallel} 篇${s.concurrency > 1 ? `（并发 ${s.concurrency}）` : ''}`;
+      } else {
+        current.textContent = s.current ? `${s.current.title} · ${s.current.stageLabel}` : '正在启动…';
+      }
     }
     if (list) {
       list.innerHTML = pickProgressRows(s).map((it) => {
         const cls = it.status === 'error' ? 'is-error' : (it.status === 'done' ? 'is-done' : 'is-running');
-        const stageText = it.status === 'error' ? (it.error ? `失败：${it.error}` : '解析失败') : it.stageLabel;
+        // 进行中的条目带上已用时：一眼能区分「在动」和「卡住了」，不用猜
+        const secs = it.status === 'running' && it.elapsedMs > 3000 ? ` · ${Math.round(it.elapsedMs / 1000)}s` : '';
+        const stageText = it.status === 'error' ? (it.error ? `失败：${it.error}` : '解析失败') : `${it.stageLabel}${secs}`;
         return `<li class="pp-item ${cls}" title="${esc(it.title)}${it.error ? ' | ' + esc(it.error) : ''}">`
           + `<span class="pp-dot"></span><span class="pp-name">${esc(it.title)}</span>`
           + `<span class="pp-stage">${esc(stageText)}</span></li>`;
@@ -757,7 +769,8 @@
       const tr = document.createElement('tr');
       tr.dataset.id = it.id;
       tr.draggable = true;
-      if (it.status === 'parsing') tr.classList.add('uploading');
+      // 卡住的僵尸解析不再整行染成「上传中」的底色（那会让人以为还在跑）
+      if (it.status === 'parsing' && !isStaleParsing(it)) tr.classList.add('uploading');
       if (selectedIds.has(it.id)) tr.classList.add('row-selected');
       tr.innerHTML = `<td class="cell-check"><input type="checkbox" data-check${selectedIds.has(it.id) ? ' checked' : ''} /></td>` +
         `<td class="cell-num">${idx + 1}</td>` +
@@ -783,7 +796,7 @@
       }
       case 'title': {
         const v = it.title || '';
-        return `<div class="clamp cell-title" data-open="${it.id}" title="点击查看全文解析">${esc(v) || '<span class="cell-empty">（未命名）</span>'}</div>`;
+        return `<div class="clamp cell-title" data-open="${it.id}" data-field="title" title="点击查看全文解析">${esc(v) || '<span class="cell-empty">（未命名）</span>'}</div>`;
       }
       case 'attach': return attachCell(it);
       case 'progress': {
@@ -794,7 +807,11 @@
         const r = Math.round(it.rating || 0);
         return `<span class="stars" data-rating="${it.id}">` + [1, 2, 3, 4, 5].map((n) => `<button class="star ${n <= r ? 'on' : ''}" data-star="${n}" title="${n} 星">★</button>`).join('') + `</span>`;
       }
-      case 'status': return `<span class="badge badge-${it.status}" title="${esc(it.error || STATUS_LABEL[it.status])}">${STATUS_LABEL[it.status] || it.status}</span>`;
+      case 'status': {
+        // 长时间停在 parsing 的，界面上不要再说「解析中」（那是在骗人），直接说中断、可重解析
+        if (isStaleParsing(it)) return '<span class="badge badge-error" title="上次解析被中断（应用退出或超时），点右侧 ↻ 或「重新解析」可重新开始">解析中断</span>';
+        return `<span class="badge badge-${it.status}" title="${esc(it.error || STATUS_LABEL[it.status])}">${STATUS_LABEL[it.status] || it.status}</span>`;
+      }
       case 'actions':
         return `<div class="row-actions">
           <button class="icon-btn" data-act="parse" title="重新解析">↻</button>
@@ -831,7 +848,7 @@
   }
 
   function attachCell(it) {
-    if (it.status === 'parsing') return `<div class="cell-spinner" title="AI 解析中…"></div>`;
+    if (it.status === 'parsing' && !isStaleParsing(it)) return `<div class="cell-spinner" title="AI 解析中…"></div>`;
     if (!it.filename) return `<div class="cell-attach" data-upload="${it.id}" title="点击或拖入 PDF 上传"><div class="attach-empty">＋</div></div>`;
     const url = '/uploads/' + encodeURIComponent(it.filename);
     const thumb = it.thumb ? `<img src="${it.thumb}" alt="" loading="lazy" />` : `<div class="pdf-icon"></div>`;
@@ -979,12 +996,22 @@
   }
 
   // ============ 解析 ============
+  // 「解析中」这个状态有可能是假的：应用被强杀、请求断开之后，库里会留下 status='parsing'
+  // 却没有任何进程在跑的僵尸记录。超过单篇预算（默认 6 分钟）还停在这里的，就当成残留，
+  // 允许用户直接重新点解析 —— 服务端也会按同样口径自动收回。
+  const STALE_PARSING_MS = 8 * 60 * 1000;
+  function isStaleParsing(it) {
+    if (!it || it.status !== 'parsing') return false;
+    const started = it.parseStartedAt ? Date.parse(it.parseStartedAt) : 0;
+    if (!started || Number.isNaN(started)) return true; // 老版本留下的，没有开始时间
+    return Date.now() - started > STALE_PARSING_MS;
+  }
+
   async function parseIds(ids, docType) {
     try {
-      // 多篇并发解析：并发数按篇数自适应（最多 8），显著缩短批量解析时间
-      const concurrency = Math.max(1, Math.min(8, ids.length));
-      // 解析期间右下角浮层实时显示「第几篇 / 共几篇 + 当前阶段」
-      await withParseProgress(() => api('/api/parse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, docType: docType || undefined, concurrency }) }));
+      // 并发度交给服务端决定（默认 6，可传 1~8）。LLM 是 IO 等待，多篇并行是这批提速的主要来源。
+      // 解析期间右下角浮层实时显示「第几篇 / 共几篇 + 每篇在哪个阶段」。
+      await withParseProgress(() => api('/api/parse', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, docType: docType || undefined }) }));
       await loadItems();
       const errs = items.filter((i) => ids.includes(i.id) && i.status === 'error');
       if (errs.length) toast(`解析完成，${errs.length} 篇失败`, 'error'); else toast('AI 解析完成，字段已自动写入', 'success');
@@ -1037,7 +1064,21 @@
         render();
         return;
       }
-      const open = e.target.closest('[data-open]'); if (open) openDrawer(open.dataset.open);
+      const open = e.target.closest('[data-open]');
+      if (open) { openDrawer(open.dataset.open, { field: open.dataset.field }); return; }
+
+      // 点单元格任意位置 = 打开详情卡片，并定位到这一列对应的字段。
+      // 以前只有标题那一格能点开，用户看到「期刊/年份/DOI 有内容却点不动」，
+      // 只能去右边找那个 ⤢ 图标，路径太绕。这里把整行都变成入口：
+      //   · 复选框 / 序号列不响应（它们表达的是「选中」而不是「看内容」）；
+      //   · 附件、阅读进度、评级、操作列有自己的交互，前面已经 return 掉了。
+      const cellEl = e.target.closest('td');
+      if (tr && cellEl && !cellEl.classList.contains('cell-check') && !cellEl.classList.contains('cell-num')) {
+        const cols = buildColumns();
+        const colIndex = [...tr.children].indexOf(cellEl) - 2;
+        const col = cols[colIndex];
+        openDrawer(tr.dataset.id, { field: drawerFieldOf(col) });
+      }
     });
     // 表头全选框
     el.theadRow.addEventListener('click', (e) => {
@@ -1116,20 +1157,22 @@
     } catch (e) { toast('批量删除失败：' + e.message, 'error'); }
   }
 
-  // 解析选中：只解析勾选的文献，且跳过已完成/解析中的（增量补齐）
+  // 解析选中：只解析勾选的文献，且跳过已完成的（真正在跑的也跳过；卡住的僵尸照常重跑）
   async function batchParse() {
     const ids = pickIdsOrWarn();
     if (!ids) return;
     const all = items.filter((i) => ids.includes(i.id));
-    const todo = all.filter((i) => i.status !== 'done' && i.status !== 'parsing');
+    const todo = all.filter((i) => i.status !== 'done' && !(i.status === 'parsing' && !isStaleParsing(i)));
+    const stale = todo.filter((i) => i.status === 'parsing').length;
     const skipped = all.length - todo.length;
     if (!todo.length) {
       toast(`选中的 ${all.length} 篇都已解析完成。若需重跑请用「批量重新解析」`, 'error');
       return;
     }
     const ok = confirm(
-      `将对选中的 ${todo.length} 篇文献执行 AI 解析。\n` +
-      (skipped ? `（已跳过 ${skipped} 篇已完成/解析中的文献）\n` : '') +
+      `将对选中的 ${todo.length} 篇文献执行 AI 解析（并发处理，多篇同时进行）。\n` +
+      (skipped ? `（已跳过 ${skipped} 篇已完成/正在解析的文献）\n` : '') +
+      (stale ? `（其中 ${stale} 篇上次解析卡住了，这次会重新开始）\n` : '') +
       `\n解析会调用大模型接口，可能产生费用与等待时间。确认继续？`
     );
     if (!ok) return;
@@ -1142,9 +1185,9 @@
     const ids = pickIdsOrWarn();
     if (!ids) return;
     const all = items.filter((i) => ids.includes(i.id));
-    const parsing = all.filter((i) => i.status === 'parsing').length;
+    const parsing = all.filter((i) => i.status === 'parsing' && !isStaleParsing(i)).length;
     const ok = confirm(
-      `将对选中的 ${all.length} 篇文献强制重新解析。\n\n` +
+      `将对选中的 ${all.length} 篇文献强制重新解析（并发处理，多篇同时进行）。\n\n` +
       `· 已有的解析结果会被新一轮结果覆盖\n` +
       `· 你手动编辑过的字段也会被 AI 覆盖\n` +
       (parsing ? `· 其中 ${parsing} 篇正在解析中，将自动跳过\n` : '') +
@@ -1248,12 +1291,46 @@
   }
 
   // ============ 阅读抽屉 ============
-  function openDrawer(id) { currentId = id; el.drawer.classList.remove('hidden'); el.drawerMask.classList.remove('hidden'); renderDrawer(); }
+  /**
+   * 打开详情卡片。
+   * @param {string} id 文献 id
+   * @param {{field?:string}} [opts] 从表格哪一列点进来的 —— 打开后滚动到对应字段并闪一下，
+   *   让「点期刊 → 看到期刊」这条动线闭合，而不是打开一个长文档让用户自己找。
+   */
+  function openDrawer(id, opts = {}) {
+    currentId = id;
+    el.drawer.classList.remove('hidden');
+    el.drawerMask.classList.remove('hidden');
+    renderDrawer(opts);
+  }
+
+  /** 表格列 → 详情卡片里的字段锚点（没有对应区块的列返回 null） */
+  function drawerFieldOf(col) {
+    if (!col || !col.key) return null;
+    const own = ['attachment', 'readingProgress', 'rating', 'actions'];
+    if (own.includes(col.key)) return null;
+    return col.key;
+  }
+
+  /** 滚动到详情卡片里的某个字段并高亮一下 */
+  function focusDrawerField(field) {
+    if (!field) return;
+    const target = el.drawerBody.querySelector(`[data-field-anchor="${field}"]`);
+    if (!target) return;
+    requestAnimationFrame(() => {
+      try { target.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (_) { target.scrollIntoView(); }
+      target.classList.remove('field-flash');
+      // 强制 reflow，保证连续两次点同一字段时动画能重放
+      void target.offsetWidth;
+      target.classList.add('field-flash');
+      setTimeout(() => target.classList.remove('field-flash'), 1500);
+    });
+  }
   function closeDrawer() { currentId = null; el.drawer.classList.add('hidden'); el.drawerMask.classList.add('hidden'); hideAnnoToolbar(); }
   function prevId() { const list = filteredItems(); const i = list.findIndex((x) => x.id === currentId); return i > 0 ? list[i - 1].id : null; }
   function nextId() { const list = filteredItems(); const i = list.findIndex((x) => x.id === currentId); return i >= 0 && i < list.length - 1 ? list[i + 1].id : null; }
 
-  function renderDrawer() {
+  function renderDrawer(opts = {}) {
     const it = items.find((x) => x.id === currentId);
     if (!it) { closeDrawer(); return; }
     hideAnnoToolbar();   // 换篇/重渲染时选区已失效，工具条必须一起收掉
@@ -1266,34 +1343,46 @@
     // thoughts 由上面那块可编辑的「我的思考」承载，这里不再重复渲染一遍只读副本
     const sections = TYPE_ORDER[it.docType || lib.type]
       .filter((k) => !['title', 'authors', 'journal', 'year', 'doi', 'keywords', 'importedAt', 'thoughts'].includes(k));
-    const chip = (l, v) => (v ? `<span class="meta-chip"><b>${l}：</b>${esc(v)}</span>` : '');
+    // 每个概要字段都挂 data-field-anchor：表格里点「期刊」这一列，卡片就滚到这里并闪一下
+    const chip = (l, v, anchor) => (v ? `<span class="meta-chip"${anchor ? ` data-field-anchor="${anchor}"` : ''}><b>${l}：</b>${esc(v)}</span>` : '');
     const col = collections.find((c) => c.id === it.collectionId);
+    const importRaw = it.importedAt || it.parsedAt || it.createdAt || '';
+    let importText = '';
+    if (importRaw) {
+      const d = new Date(importRaw);
+      if (!isNaN(d)) {
+        const p2 = (n) => String(n).padStart(2, '0');
+        importText = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+      } else importText = String(importRaw);
+    }
 
     el.drawerBody.innerHTML = `
-      <h2 class="drawer-title">${esc(it.title || '（未命名文献）')}</h2>
+      <h2 class="drawer-title" data-field-anchor="title">${esc(it.title || '（未命名文献）')}</h2>
       <div class="drawer-meta">
-        ${chip('作者', it.authors)} ${chip('期刊/会议', it.journal)} ${chip('年份', it.year)} ${chip('DOI', it.doi)} ${chip('关键词', it.keywords)}
+        ${chip('导入时间', importText, 'importedAt')} ${chip('作者', it.authors, 'authors')} ${chip('期刊/会议', it.journal, 'journal')} ${chip('年份', it.year, 'year')} ${chip('DOI', it.doi, 'doi')} ${chip('关键词', it.keywords, 'keywords')}
         ${col ? `<span class="meta-chip"><b>分类：</b>${esc(col.name)}</span>` : ''}
         <span class="badge badge-source">${it.docType === 'model' ? '模型类' : '实证类'}</span>
         <button class="progress-badge progress-${it.readingProgress || '未阅读'}" data-dprogress>◔ ${it.readingProgress || '未阅读'}</button>
         <span class="stars" data-drating>${[1, 2, 3, 4, 5].map((n) => `<button class="star ${n <= Math.round(it.rating || 0) ? 'on' : ''}" data-dstar="${n}">★</button>`).join('')}</span>
-        ${it.status !== 'done' ? `<span class="badge badge-${it.status}" title="${esc(it.error || '')}">${STATUS_LABEL[it.status]}</span>` : ''}
+        ${it.status !== 'done' ? `<span class="badge badge-${it.status}" data-field-anchor="status" title="${esc(it.error || '')}">${STATUS_LABEL[it.status]}</span>` : ''}
       </div>
-      ${it.error ? `<div class="modal-desc">${ico('alert')}解析失败：${esc(it.error)}</div>` : ''}
+      ${it.error ? `<div class="modal-desc" data-field-anchor="status">${ico('alert')}解析失败：${esc(it.error)}</div>` : ''}
       ${it.error ? '' : '<div class="anno-hint">提示：选中下方任意段落里的文字，可加底色高亮或改字色标注重点。</div>'}
-      <section style="margin-bottom:18px"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>${ico('message')}我的思考<span class="col-ai">手写</span></h4>
+      <section style="margin-bottom:18px" data-field-anchor="thoughts"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>${ico('message')}我的思考<span class="col-ai">手写</span></h4>
         <textarea id="drawerThoughts" class="drawer-thoughts" rows="4" placeholder="写下你自己的小想法：疑问、灵感、与课题的联系…">${esc(it.thoughts || '')}</textarea>
         <button id="btnSaveDrawerThoughts" class="btn btn-primary" style="margin-top:8px">保存思考</button>
       </section>
       ${it.journalRankDetail && it.journalRankDetail.length ? `
-        <section style="margin-bottom:18px"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>期刊等级<span class="col-ai">easyScholar</span></h4>
+        <section style="margin-bottom:18px" data-field-anchor="journalRank"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>期刊等级<span class="col-ai">easyScholar</span></h4>
         <div style="display:flex;flex-wrap:wrap;gap:8px">${rankChips(it.journalRankDetail)}</div></section>` : ''}
       ${sections.map((k) => it[k] ? `
-        <section style="margin-bottom:18px"><h4 style="margin:0 0 6px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>${CONTENT_COLS[k] ? (k === 'method' && it.docType === 'model' ? '求解方法' : CONTENT_COLS[k].label) : k}</h4>
+        <section style="margin-bottom:18px" data-field-anchor="${k}"><h4 style="margin:0 0 6px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>${CONTENT_COLS[k] ? (k === 'method' && it.docType === 'model' ? '求解方法' : CONTENT_COLS[k].label) : k}</h4>
         <div class="md md-annotatable" data-field="${k}">${mdFull(it[k])}</div></section>` : '').join('')}`;
 
     // 把已存的高亮 / 字色批注画回正文（DOM 刚重建，标记需要重新贴）
     applyFieldAnnotations(it);
+    // 从表格某一列点进来时，滚到那一块并闪一下（opts.field 由 openDrawer 透传）
+    if (opts.field) focusDrawerField(opts.field);
   }
 
   // ============ 详情卡片的划词标注 ============
@@ -3363,7 +3452,8 @@
     const statusHtml = it.status === 'done'
       ? ''
       : `<div class="pr-an-empty" style="padding:14px;text-align:left">
-           ${it.status === 'parsing' ? `${ico('loader')}该文献正在解析中，稍后刷新可看到结果。`
+           ${it.status === 'parsing' && !isStaleParsing(it) ? `${ico('loader')}该文献正在解析中，稍后刷新可看到结果。`
+             : it.status === 'parsing' ? `${ico('alert')}上次解析被中断了（应用退出或超时）。点下方「开始解析」重新跑一遍即可。`
              : it.status === 'error' ? `${ico('alert')}解析失败：${esc(it.error || '未知错误')}`
              : '这篇文献还没有解析结果。点下方「开始解析」，AI 会自动读全文并填写字段。'}
          </div>`;
