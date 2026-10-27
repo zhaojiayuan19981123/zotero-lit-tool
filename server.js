@@ -3973,70 +3973,210 @@ export function createApp({
 
   // ---------- 世图科研下载助手：服务端直接下载 PDF 并导入文献中心 ----------
   const DL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+  const DL_MAX_BYTES = 300 * 1024 * 1024;
 
-  function fetchWithTimeout(u, opts = {}, ms = 90000) {
+  /**
+   * 抓一个地址并读完整个响应体，超时**覆盖正文下载**。
+   * 老实现是 `fetch().finally(clearTimeout)` —— 收到响应头就把定时器清了，
+   * 正文卡住时请求会永久挂着，用户只看到"一直在下载"。
+   */
+  async function fetchBufferGuarded(u, { headers = {}, timeoutMs = 120000, maxBytes = DL_MAX_BYTES } = {}) {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), ms);
-    return fetch(u, { ...opts, signal: ctrl.signal, redirect: 'follow' })
-      .finally(() => clearTimeout(timer));
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    try {
+      const res = await fetch(u, { headers, signal: ctrl.signal, redirect: 'follow' });
+      if (!res.ok) {
+        const err = new Error(`响应 HTTP ${res.status}`);
+        err.httpStatus = res.status;
+        throw err;
+      }
+      const len = Number(res.headers.get('content-length') || 0);
+      if (len > maxBytes) {
+        throw new Error(`文件 ${Math.round(len / 1048576)}MB，超过 ${Math.round(maxBytes / 1048576)}MB 上限，已放弃下载`);
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      return { res, buf, finalUrl: res.url || u };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function sanitizeWlName(s) {
     return String(s || '').replace(/[\\/:*?"<>|\r\n]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80) || 'document';
   }
 
-  // 从解析页 HTML 中提取 PDF 直链（兼容「文件下载」按钮 href / 页面裸链接 / onclick 跳转）
-  function extractPdfLink(html, baseUrl) {
+  /** HTML 实体还原：中转页里的链接常写成 ?a=1&amp;b=2，不还原就会带着 &amp; 去请求 */
+  function decodeHtmlEntities(s) {
+    return String(s || '')
+      .replace(/&amp;/gi, '&')
+      .replace(/&#0*38;/g, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#0*39;|&apos;/gi, "'")
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>');
+  }
+
+  /** 只取 URL 的路径部分 —— 判断"是不是文件"必须看路径，不能看整串（查询串里常有 .pdf） */
+  function urlPathOf(u) {
+    try { return new URL(u).pathname; } catch (_) { return ''; }
+  }
+
+  /**
+   * 从「中转页」里提取真正的文件地址。
+   * 世图的中转页长这样（实测）：
+   *   <p>http://42.228.14.222:8123/UPLOAD/DOIFILES/10.1016/xxx-MAIN.PDF?token=…</p>
+   *   <a href='http://42.228.14.222:8123/UPLOAD/DOIFILES/…/xxx-MAIN.PDF?token=…'>文件下载</a>
+   * 所以既要认「文件下载」按钮，也要认页面里裸印的一条地址。
+   *
+   * @param {string} html 中转页内容
+   * @param {string} baseUrl 用来解析相对地址的基准
+   * @param {string|null} skip 刚访问过的地址（防止原地打转）
+   */
+  function extractPdfLink(html, baseUrl, skip = null) {
     if (!html) return null;
+    const text = decodeHtmlEntities(html);
     const cands = [];
     let m;
-    const attrRe = /(?:href|src)\s*=\s*["']([^"']+)["']/gi;
-    while ((m = attrRe.exec(html)) !== null) cands.push(m[1]);
-    const jsRe = /(?:location\.href|window\.open|location\.replace)\s*[=(]\s*["']([^"']+)["']/gi;
-    while ((m = jsRe.exec(html)) !== null) cands.push(m[1]);
-    const aTextRe = /<a[^>]*>\s*[^<]*文件下载[^<]*\s*<\/a>/gi;
-    while ((m = aTextRe.exec(html)) !== null) {
-      const hm = /href\s*=\s*["']([^"']+)["']/i.exec(m[0]);
-      if (hm) cands.unshift(hm[1]); // 「文件下载」按钮优先
+    // href / src / data-url 三种写法（含不带引号的）
+    const attrRe = /(?:href|src|data-url|data-href)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi;
+    while ((m = attrRe.exec(text)) !== null) cands.push(m[1] || m[2] || m[3]);
+    // JS 跳转
+    const jsRe = /(?:location\.href|location\.replace|location\.assign|window\.open)\s*[=(]\s*["']([^"']+)["']/gi;
+    while ((m = jsRe.exec(text)) !== null) cands.push(m[1]);
+    // <meta http-equiv="refresh" content="0;url=...">
+    const metaRe = /<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]*content\s*=\s*["'][^"']*url=([^"'>\s]+)/gi;
+    while ((m = metaRe.exec(text)) !== null) cands.push(m[1]);
+    // JSON 响应（有些中转接口直接回 {"url": "..."}）
+    const jsonRe = /"(?:url|downurl|downloadUrl|fileUrl|file_url|src)"\s*:\s*"([^"]+)"/gi;
+    while ((m = jsonRe.exec(text)) !== null) cands.push(m[1]);
+    // 「文件下载」按钮优先
+    const btnRe = /<a[^>]*>[^<]*文件下载[^<]*<\/a>/gi;
+    while ((m = btnRe.exec(text)) !== null) {
+      const hm = /href\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i.exec(m[0]);
+      if (hm) cands.unshift(hm[1] || hm[2] || hm[3]);
     }
-    const bareRe = /https?:\/\/[^\s"'<>()]+/gi;
-    while ((m = bareRe.exec(html)) !== null) cands.push(m[0]);
-    const abs = (u) => { try { return new URL(u, baseUrl).href; } catch (_) { return null; } };
-    const list = cands.map((u) => String(u || '').trim()).filter(Boolean).map(abs).filter(Boolean);
-    return list.find((u) => /\.pdf(\?|#|$)/i.test(u))
-        || list.find((u) => /getdownfile|download|UPLOAD/i.test(u) && !/\.ashx\?action=getdownfile/i.test(u))
-        || null;
+    // 页面上直接印着的地址
+    const bareRe = /https?:\/\/[^\s"'<>()\\]+/gi;
+    while ((m = bareRe.exec(text)) !== null) cands.push(m[0]);
+    if (!cands.length) return null;
+
+    const abs = (u) => {
+      const s = String(u || '').trim().replace(/[.,;:]+$/, '');
+      if (!s) return null;
+      try { return new URL(s, baseUrl).href; } catch (_) { return null; }
+    };
+    const list = cands
+      .map(abs)
+      .filter((u) => u && u !== skip && !/^data:/i.test(u))
+      // 静态资源不是文件地址
+      .filter((u) => !/\.(css|js|png|jpe?g|gif|svg|ico|woff2?|ttf)(\?|$)/i.test(urlPathOf(u)));
+
+    const uniq = [...new Set(list)];
+    const byName = uniq.find((u) => /\.pdf$/i.test(urlPathOf(u)));           // 路径以 .pdf 结尾：最可靠
+    if (byName) return byName;
+    const byKeyword = uniq.find((u) => {
+      const p = urlPathOf(u);
+      if (/\.ashx$/i.test(p)) return false;                                  // 别再指回中转接口自身
+      return /getdownfile|download|getfile|attach|doifiles|upload|file/i.test(p + (new URL(u).search || ''));
+    });
+    if (byKeyword) return byKeyword;
+    // 页面里只剩一条外链：中转页通常就长这样，直接当文件地址用
+    // （真实文件地址不一定带 .pdf，比如 /get?id=123&token=…）
+    if (uniq.length === 1 && !/\.(html?|aspx?)$/i.test(urlPathOf(uniq[0]))) return uniq[0];
+    return null;
   }
 
+  /**
+   * 救「空主机 + 端口」的地址：世图的链接里 path 参数长这样
+   *   path=:8123/upload/doifiles/10.1016/xxx-main.pdf
+   * 浏览器会自动补上当前站点的主机名，Node 里 `new URL()` 直接抛错 —— 所以自己拼一次：
+   *   https://<当前站点主机>:8123/upload/doifiles/…
+   */
+  function repairPortOnlyUrl(rawUrl, baseUrl) {
+    let u;
+    try { u = new URL(rawUrl); } catch (_) { return null; }
+    const p = String(u.searchParams.get('path') || '').trim();
+    const m = /^:(\d{2,5})\/(.+)$/.exec(p);
+    if (!m) return null;
+    let origin;
+    try { origin = new URL(baseUrl || rawUrl); } catch (_) { origin = u; }
+    return `${origin.protocol}//${origin.hostname}:${m[1]}/${m[2]}`;
+  }
+
+  /** PDF 只看文件头魔数。前 64 字节里出现 %PDF- 就算（个别服务器会在前面塞 BOM） */
   function isPdfBuffer(buf) {
-    return buf && buf.length > 4 && buf.subarray(0, 5).toString('latin1') === '%PDF-';
+    if (!buf || buf.length < 8) return false;
+    return buf.subarray(0, 64).toString('latin1').includes('%PDF-');
   }
 
-  // 下载世图 PDF：先请求用户给的链接；若返回 HTML 解析页，则提取真实直链再下载
+  /** 把底层网络错误翻成人话：用户看到的应该是"端口被拦"而不是 "fetch failed" */
+  function describeDownloadError(e, url) {
+    const code = String(e?.cause?.code || e?.code || '');
+    const host = (() => { try { const u = new URL(url); return `${u.hostname}${u.port ? ':' + u.port : ''}`; } catch (_) { return url; } })();
+    if (e?.name === 'AbortError' || code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'ETIMEDOUT') {
+      return `下载超时（120 秒），对方服务器没有响应：${host}`;
+    }
+    if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return `域名解析失败：${host}（链接里的站点可能写错或已下线）`;
+    if (code === 'ECONNREFUSED') return `对方拒绝连接：${host}（端口没开，或该地址只允许校内网访问）`;
+    if (code === 'ECONNRESET' || code === 'UND_ERR_SOCKET') return `连接被对方中断：${host}（下载被限流或链接已过期）`;
+    if (/CERT|SSL|TLS/i.test(code)) return `HTTPS 证书校验失败：${host}`;
+    return e?.message || `下载失败：${host}`;
+  }
+
+  /**
+   * 下载世图 PDF：先请求用户给的链接；若返回的是「中转页」就解析出真实直链再下一跳。
+   *
+   * 判定是不是 PDF **只看内容魔数**，绝不看 URL 结尾 —— 这正是之前那个 bug：
+   * 中转链接 …/submit_ajax.ashx?action=getdownfile&path=:8123/xxx/main.pdf 整串也以
+   * `.pdf` 结尾，老代码据此认为"这就是 PDF"，随后魔数校验失败，用户看到
+   * 「下载内容不是有效的 PDF 文件」，但其实那只是一个 HTML 跳转页。
+   */
   async function downloadWorldlibPdf(pageUrl) {
-    const headers = {
+    const baseHeaders = {
       'User-Agent': DL_UA,
       'Accept': 'text/html,application/xhtml+xml,application/pdf,*/*;q=0.8,*;q=0.5',
       'Accept-Language': 'zh-CN,zh;q=0.9',
+      // 世图的中转接口会看 Referer，缺了偶尔直接给 403
+      'Referer': (() => { try { const u = new URL(pageUrl); return `${u.protocol}//${u.host}/`; } catch (_) { return ''; } })(),
     };
+    const visited = new Set();
     let cur = pageUrl;
-    for (let hop = 0; hop < 3; hop++) {
-      const r = await fetchWithTimeout(cur, { headers });
-      if (!r.ok) throw new Error(`链接响应 ${r.status}，链接可能已失效或需要登录世图账号`);
-      const ct = String(r.headers.get('content-type') || '').toLowerCase();
-      if (ct.includes('pdf') || /\.pdf(\?|#|$)/i.test(r.url || cur)) {
-        const buf = Buffer.from(await r.arrayBuffer());
-        if (!isPdfBuffer(buf)) throw new Error('下载内容不是有效的 PDF 文件');
-        return { buf, finalUrl: r.url || cur };
+    let referer = baseHeaders.Referer;
+    let lastError = null;
+
+    for (let hop = 0; hop < 4; hop += 1) {
+      visited.add(cur);
+      let got;
+      try {
+        got = await fetchBufferGuarded(cur, { headers: { ...baseHeaders, ...(referer ? { Referer: referer } : {}) }, timeoutMs: 120000 });
+      } catch (e) {
+        // 端口式地址（path=:8123/…）直接拼出来试一次：那往往就是真文件
+        const repaired = repairPortOnlyUrl(cur, referer || pageUrl);
+        if (repaired && !visited.has(repaired)) { cur = repaired; continue; }
+        lastError = e;
+        break;
       }
-      // HTML 解析页：提取直链后继续
-      const html = await r.text();
-      const direct = extractPdfLink(html, r.url || cur);
-      if (!direct) throw new Error('未能从页面解析出 PDF 直链（链接可能已失效，或需要登录世图账号后重新复制链接）');
-      cur = direct;
-      headers['Referer'] = r.url || pageUrl;
+      if (isPdfBuffer(got.buf)) return { buf: got.buf, finalUrl: got.finalUrl };
+
+      const ct = String(got.res.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('pdf')) {
+        throw new Error('服务器声明这是 PDF，但内容不是有效文件（链接可能已过期，请回世图重新复制一次）');
+      }
+      const text = got.buf.toString('utf8');
+      const next = extractPdfLink(text, got.finalUrl, cur);
+      if (!next) {
+        const repaired = repairPortOnlyUrl(cur, got.finalUrl);
+        if (repaired && !visited.has(repaired)) { referer = got.finalUrl; cur = repaired; continue; }
+        throw new Error(`没能从中转页里找到文件地址（HTTP ${got.res.status}，${ct || '未知类型'}）。`
+          + '链接可能已失效，或在世图需要先登录再复制「文件下载」的地址');
+      }
+      referer = got.finalUrl;
+      cur = next;
     }
-    throw new Error('多次跳转仍未拿到 PDF 文件，请确认链接是否为「文件下载」链接');
+
+    if (lastError) throw new Error(describeDownloadError(lastError, cur));
+    throw new Error('转了 4 层仍未拿到 PDF 文件，请确认复制的是「文件下载」那一行的地址');
   }
 
   app.post('/api/worldlib/download', async (req, res) => {
@@ -4086,7 +4226,9 @@ export function createApp({
       store.upsertLiterature(rec);
       res.json({ ok: true, record: rec, replacedId: replaced?.id || null });
     } catch (e) {
-      const msg = e?.name === 'AbortError' ? '下载超时（90 秒），请稍后重试' : (e.message || '下载失败');
+      // downloadWorldlibPdf 内部已经把网络错误翻成人话；这里只兜底 AbortError 与空消息
+      const msg = e?.name === 'AbortError' ? '下载超时（120 秒），对方服务器没有响应，请稍后重试'
+        : (e?.message || '下载失败');
       res.status(502).json({ error: msg });
     }
   });

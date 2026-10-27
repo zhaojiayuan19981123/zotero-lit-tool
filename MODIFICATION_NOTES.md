@@ -1,3 +1,61 @@
+## v1.32.1：世图下载助手修好「中转链接一直提示不是 PDF」（2026-10-27）
+
+> 用户反馈：`https://reseach1.worldlib.site/tools/submit_ajax.ashx?action=getdownfile&path=:8123/upload/doifiles/10.1016/1-s2.0-S0278431926000216-main.pdf`
+> 这种链接下载失败，要求修复。
+
+### 一、真因：用 URL 结尾判断「是不是 PDF」
+
+老代码在 `downloadWorldlibPdf` 里是这样判的：
+
+```js
+if (ct.includes('pdf') || /\.pdf(\?|#|$)/i.test(r.url || cur)) { /* 当作 PDF 收下 */ }
+```
+
+世图的中转链接是 `…/submit_ajax.ashx?action=getdownfile&path=:8123/upload/…/xxx-main.pdf` ——
+**整条 URL 正好以 `.pdf` 结尾**（`.pdf` 在查询参数里），于是收到 200 的 **HTML 中转页**后
+仍被当成 PDF 收下，紧接着 `isPdfBuffer` 校验失败，用户看到
+「下载内容不是有效的 PDF 文件」—— 一个和真实原因完全无关的错误。
+
+实测那条链接返回的是 895 字节的 HTML，里面印着真地址：
+
+```
+<p>http://42.228.14.222:8123/UPLOAD/DOIFILES/10.1016/…-MAIN.PDF?token=…</p>
+<a href='…'>文件下载</a>
+```
+
+### 二、改法
+
+- **只看内容魔数**：抓下来先看前 64 字节有没有 `%PDF-`，是就收工；不是就按中转页处理。
+  URL 结尾不再参与任何判断。
+- **超时覆盖正文**：老实现 `fetch().finally(clearTimeout)` 在收到响应头时就清了定时器，
+  正文卡住会永久挂着（用户只看到"一直在下载"）。现在统一走 `fetchBufferGuarded()`，
+  120 秒预算覆盖到 `arrayBuffer()` 读完，并加了 300MB 体积上限。
+- **中转页解析增强**（`extractPdfLink`）：
+  - 认「文件下载」按钮、`href/src/data-url`、`location.href/open/replace`、
+    `<meta http-equiv="refresh">`、JSON 里的 `url/fileUrl`、以及**页面里裸印的地址**；
+  - **HTML 实体还原**（`&amp;` → `&`）—— 不还原就会带着 `&amp;` 去请求，对方直接 400；
+  - 优先级：路径以 `.pdf` 结尾 > 路径/查询里带 download 类关键字 > 页面只剩一条外链时就用它；
+  - **判断只看路径不看查询串**：中转接口的查询串里常带 `.pdf`，拿整串判断会自己指回自己；
+  - 带 `skip` 参数防止原地打转。
+- **补全「空主机 + 端口」的地址**：`path=:8123/upload/…` 是世图的内部写法（浏览器自动补当前主机，
+  Node 里 `new URL()` 直接抛错）。新增 `repairPortOnlyUrl()`：拼成
+  `https://<当前站点主机>:8123/upload/…` 再试一次 —— 这往往就是真文件地址。
+- **错误信息说人话**（`describeDownloadError`）：域名解析失败 / 拒绝连接（多为校内网限制）/
+  连接被中断 / 证书错误 / 超时，各自带上是哪个主机端口，而不是甩一句 `fetch failed`。
+- 顺带：首跳就带上 `Referer`（世图会看），`isPdfBuffer` 允许前 64 字节内有 BOM。
+
+### 三、验证
+
+- `test/worldlib-download.test.mjs`（8 条，全本地 mock 站）：
+  ① 中转页链接**本身以 .pdf 结尾但返回 HTML** → 解析出真直链并落盘（这条就是本次 bug 的回归用例）；
+  ② `path=:PORT/…` 自动补主机名；③ `&amp;` 还原后对方才给文件；④ 真直链直下；
+  ⑤ 声明 PDF 内容不是 → 明确报错且**不留文件也不留记录**；⑥ 找不到地址 → 报"没能从中转页"；
+  ⑦ 404 / 连接被拒 → 错误里点出原因；⑧ 同名 409 + overwrite 覆盖不产生重复记录。
+- 真实链接实测（本机，走真实世图站点）：
+  - 用户给的中转链接 → `fileSize 5544164`，落盘文件头 `%PDF-1.7`；
+  - 从该中转页解析出的直链 → 同样成功。
+- 全量 **535 项** × Node 20.10.0 + Node 22.22.2 全绿；浏览器回归 75/75。
+
 ## v1.32.0：中文文献不再整篇翻译（自动判语种 + 三处入口一起收）（2026-10-27）
 
 > 用户要求：「针对中文文献就不必要整篇翻译了」。
