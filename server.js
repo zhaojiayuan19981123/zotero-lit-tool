@@ -12,6 +12,7 @@ import mammoth from 'mammoth';
 import { extractPdfText } from './src/pdfParser.js';
 import { extract, FIELDS, TYPE_FIELDS } from './src/aiExtractor.js';
 import { createParseTracker } from './src/parseProgress.js';
+import { detectDocLanguage } from './src/docLanguage.js';
 import {
   runParseBatch, clampParseConcurrency, pickStaleParsing, isParseActive,
   PARSE_CONCURRENCY_DEFAULT, PARSE_INTERRUPTED_MESSAGE, resolveItemTimeoutMs,
@@ -1217,6 +1218,9 @@ async function parseRecord(record, settings, docType, tracker = null, job = null
     tracker?.setStage(record.id, 'extract');
     const { text, numPages, info } = await extractPdfText(record.filePath);
     job?.assertLive();
+    // 顺手判定正文语言（纯字符串扫描，几乎不花时间）：中文文献不需要整篇翻译，
+    // 阅读器/翻译流水线都靠这个字段决定要不要把「整篇翻译」递到用户面前。
+    const langInfo = detectDocLanguage(text);
     tracker?.setStage(record.id, 'ai');
     const result = await extract(text, info, settings, type, {
       signal: job?.signal,
@@ -1233,6 +1237,9 @@ async function parseRecord(record, settings, docType, tracker = null, job = null
       parsedAt: new Date().toISOString(),
       error: null,
       parseStartedAt: null,
+      docLang: langInfo.lang,
+      docLangRatio: langInfo.ratio,
+      docLangAt: new Date().toISOString(),
     };
     // 只写「当前类型实际产出的字段」：旧版字段（研究背景 / 一段话总结 / 创新点 / 结论…）
     // 已从界面移出，但老记录里的内容不能被一次重解析清成空串。
@@ -1966,6 +1973,43 @@ export function createApp({
       label: '重新解析',
     });
     res.json({ ...(store.getLiterature(item.id) || item), jobId });
+  });
+
+  // ---------- 正文语言（中文文献不需要整篇翻译） ----------
+  // 解析时已经把 docLang 写进记录了（顺手、零成本）；这个接口是给
+  //   · 这个版本之前就解析过的老记录（没有 docLang 字段）
+  //   · 只挂了 PDF、还没解析过的记录
+  // 按需补判一次，结果缓存回记录，后续全是读缓存。
+  // 判定不出来（扫描件、样本太少）就返回 unknown —— 前端按"不是中文"处理，
+  // 宁可多给一次翻译入口，也不要因为判断不出来把功能藏掉。
+  app.get('/api/literature/:id/language', async (req, res) => {
+    const item = store.getLiterature(req.params.id);
+    if (!item) return res.status(404).json({ error: '记录不存在' });
+    if (item.docLang && item.docLang !== 'unknown' && req.query.refresh !== '1') {
+      return res.json({ lang: item.docLang, ratio: item.docLangRatio ?? null, cached: true });
+    }
+    if (item.fileKind === 'epub') return res.json({ lang: 'unknown', reason: 'epub', cached: false });
+    if (!item.filePath || !fs.existsSync(item.filePath)) {
+      return res.json({ lang: 'unknown', reason: 'nofile', cached: false });
+    }
+    try {
+      const { text } = await extractPdfText(item.filePath);
+      const info = detectDocLanguage(text);
+      if (info.lang !== 'unknown') {
+        try {
+          store.upsertLiterature({
+            ...(store.getLiterature(item.id) || item),
+            docLang: info.lang,
+            docLangRatio: info.ratio,
+            docLangAt: new Date().toISOString(),
+          });
+        } catch (_) { /* 缓存失败不影响本次返回 */ }
+      }
+      res.json({ ...info, cached: false });
+    } catch (e) {
+      // 扫描件 / 文件损坏：不下结论，前端照旧给出翻译入口
+      res.json({ lang: 'unknown', error: shortError(e), cached: false });
+    }
   });
 
   // ---------- 在文件管理器里定位 / 用系统程序打开原 PDF ----------

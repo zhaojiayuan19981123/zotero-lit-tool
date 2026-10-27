@@ -20,6 +20,7 @@ import path from 'node:path';
 
 import { PdfTranslateService, TARGET_LANGS, parseGlossary, parsePageRange, DEFAULT_PDF_TRANSLATE_OPTIONS } from './index.js';
 import { describeFont, downloadCjkFont, platformFontHint } from './fonts.js';
+import { shouldSkipFullTranslate } from '../docLanguage.js';
 
 /** 输出成品下拉项：value 可以是具体模式，也可以是 both / all 这类别名 */
 const MODE_CHOICES = [
@@ -191,6 +192,19 @@ export function registerPdfTranslateRoutes(app, deps) {
   app.post('/api/pdf-translate/jobs', (req, res) => {
     const resolved = resolveSourceFile(req.body, { store, getUploadDir, resolveAchievementFile });
     if (resolved.error) return res.status(400).json({ error: resolved.error });
+    // 中文文献翻成中文：没有任何收益，却要跑版面识别 + 逐段调模型 + 嵌 CJK 字体，
+    // 一篇几十页能白烧几分钟。这里直接拦掉（目标语言是外文时照常放行 —— 那是真需求）。
+    const litId = req.body?.literatureId;
+    const rec = litId && typeof store.getLiterature === 'function' ? store.getLiterature(litId) : null;
+    if (shouldSkipFullTranslate(rec, req.body?.options?.targetLang)) {
+      return res.status(409).json({
+        error: '这篇文献的正文以中文为主，不需要整篇翻译；阅读器里点任意段落就能单独翻译',
+        skipped: true,
+        reason: 'chinese-doc',
+        docLang: 'zh',
+        literatureId: litId,
+      });
+    }
     try {
       const job = service.start({
         filePath: resolved.path,

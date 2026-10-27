@@ -3914,6 +3914,14 @@ body.pn-resizing * { cursor: col-resize !important; }
 .cmp-start-title { margin: 10px 0 8px; font-size: 19px; font-weight: 700; color: var(--ink); letter-spacing: .2px; }
 .cmp-start-desc { margin: 0 0 14px; font-size: 13px; line-height: 1.9; color: var(--ink-2); }
 .cmp-start-desc b { color: var(--ink); }
+/* 中文文献提示条：整篇翻译这一步可以跳过。用主题色系而不是红色 —— 这不是错误，是省事 */
+.cmp-zh-note {
+  margin: 0 0 10px; padding: 8px 11px; border-radius: 8px;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  border-left: 3px solid var(--primary);
+  font-size: 12.5px; line-height: 1.75; color: var(--ink-2);
+}
+.cmp-zh-note b { color: var(--ink); }
 .cmp-start-steps { margin: 0 0 18px; padding-left: 22px; font-size: 12.5px; line-height: 2.05; color: var(--ink-2); }
 .cmp-start-steps li.done { color: var(--green); }
 .cmp-start-steps li.now { color: var(--ink); font-weight: 700; }

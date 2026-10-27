@@ -6813,9 +6813,32 @@
     } catch (_) { /* 拉不到就保留「跟随设置」这一项 */ }
   }
 
+  // ---------- 正文语言：中文文献不跑整篇翻译 ----------
+  // 判定在服务端做（读 PDF 正文数汉字占比），结果缓存在文献记录上（docLang）；
+  // 这里只加一层内存缓存，免得每次开面板都问一次接口。
+  // 判不出来（unknown）一律按"不是中文"处理：宁可多给一次翻译入口，也不要因为
+  // 判断不出来就把功能藏掉。
+  const docLangCache = new Map();
+  async function docLangOf(id) {
+    if (!id) return 'unknown';
+    if (docLangCache.has(id)) return docLangCache.get(id);
+    const local = items.find((x) => x.id === id);
+    if (local?.docLang) { docLangCache.set(id, local.docLang); return local.docLang; }
+    try {
+      const r = await api('/api/literature/' + encodeURIComponent(id) + '/language');
+      const lang = r?.lang || 'unknown';
+      docLangCache.set(id, lang);
+      if (local && lang !== 'unknown') local.docLang = lang;
+      return lang;
+    } catch (_) {
+      return 'unknown';
+    }
+  }
+
   /** 刷新启动面板：把「版面识别 → 对照结构 → 全文翻译」三步的当前状态画出来 */
   async function refreshCmpStart() {
     await fillCmpForm();
+    const zhDoc = (await docLangOf(pr.recordId)) === 'zh';
     const hasLayout = (pr.layoutFor === pr.recordId && !!pr.recordId) || !!cmp.data;
     const q = await findCmpAlignJob();
     const hasStruct = !!cmp.data;
@@ -6830,28 +6853,54 @@
       text: hasStruct ? '② 对照结构：已铺开（大纲 + 原文流，译文按需生成）'
         : '② 对照结构：版面识别完成后自动铺开',
     });
-    steps.push({
-      cls: q ? 'done' : hasStruct ? 'now' : 'todo',
-      text: q ? '③ 全文翻译：已完成，逐段译文已就位（整篇最省事）'
-        : '③ 全文翻译（可选）：选好引擎整篇翻一遍；不跑也能点任意段落单独翻',
-    });
+    steps.push(zhDoc
+      // 中文文献：整篇翻译没有收益（翻出来的还是中文），这一步直接标成"不需要"
+      ? { cls: 'done', text: '③ 全文翻译：不需要 —— 这篇正文以中文为主，点哪一段就翻哪一段即可' }
+      : {
+        cls: q ? 'done' : hasStruct ? 'now' : 'todo',
+        text: q ? '③ 全文翻译：已完成，逐段译文已就位（整篇最省事）'
+          : '③ 全文翻译（可选）：选好引擎整篇翻一遍；不跑也能点任意段落单独翻',
+      });
     const box = cmpEl('cmpStartSteps');
     if (box) box.innerHTML = steps.map((s) => `<li class="${s.cls}">${esc(s.text)}</li>`).join('');
     // 没有版面结果时，把「先识别版面」这个按钮露出来
     cmpEl('cmpParseBtn')?.classList.toggle('hidden', hasLayout);
     const desc = cmpEl('cmpStartDesc');
     if (desc) {
-      desc.innerHTML = hasLayout
+      const body = hasLayout
         ? '版面已经识别好了：左侧列出本章大纲，中间左右对照原文与译文，点击任一段落两侧同步定位，'
           + '选中的段落可一键送入右侧 AI 助读。<b>不整篇翻译也能用</b> —— 点哪一段就翻哪一段。'
         : '对照精读要以<b>版面识别</b>的结果为基准：块的切分、页码、顺序都来自它，'
           + '左右两侧才能逐段对齐。这篇还没有解析过版面 —— 点下面的「先识别版面」，等它跑完再回来。';
+      // 中文文献先说结论：整篇翻译这一步可以跳过，省下几分钟和一笔 token
+      desc.innerHTML = (zhDoc
+        ? '<div class="cmp-zh-note">这篇文献的正文以中文为主，<b>不需要整篇翻译</b>'
+          + '（翻出来的还是中文）。想查某个英文概念，选中那段文字单独翻一下就行。</div>'
+        : '') + body;
     }
     const load = cmpEl('cmpLoadBtn');
     if (load) {
       load.classList.toggle('hidden', !hasLayout);
       load.textContent = q ? '读取已有结果' : '铺出版面结构';
       load.title = q ? '不重新翻译，直接读取这篇已经生成过的对照数据' : '不翻译，先把版面结构（大纲 + 原文流）铺出来';
+    }
+    // 中文文献：把「开始对照翻译」收起来（翻译目标语言还是中文，跑一遍纯属浪费），
+    // 工具条那个入口也改名成「对照结构」，免得点开又看到"不需要翻译"的提示，白跑一趟。
+    // 引擎 / 目标语言 / 页码范围 / 「参考文献也翻译」只服务于整篇翻译，一并收起。
+    const startBtn = cmpEl('cmpStartBtn');
+    if (startBtn) {
+      startBtn.classList.toggle('hidden', zhDoc);
+      startBtn.title = zhDoc ? '中文文献不需要整篇翻译' : '';
+    }
+    document.querySelector('#cmpStart .cmp-start-form')?.classList.toggle('hidden', zhDoc);
+    document.querySelector('#cmpStart .cmp-start-switch')?.classList.toggle('hidden', zhDoc);
+    const toggle = cmpEl('cmpStartToggle');
+    if (toggle) {
+      toggle.title = zhDoc
+        ? '这篇正文以中文为主，不需要整篇翻译；点这里铺出/收起对照结构'
+        : '选择翻译引擎，把整篇按版面块逐段翻译';
+      const labelNode = [...toggle.childNodes].find((n) => n.nodeType === 3 && n.nodeValue.trim());
+      if (labelNode) labelNode.nodeValue = zhDoc ? ' 对照结构' : ' 整篇翻译';
     }
     cmpEl('cmpStartClose')?.classList.toggle('hidden', !hasStruct);
   }
@@ -7421,6 +7470,13 @@
     if (cmp.busy) return;
     const src = cmpSourceBody();
     if (!src?.literatureId) { toast('对照精读只支持文献中心里的文献', 'error'); return; }
+    // 中文文献不整篇翻译：翻出来的还是中文，白跑几分钟 + 一笔 token。
+    // （服务端也会拦，这里先拦是为了不让用户等到作业起来才看到失败。）
+    if ((await docLangOf(src.literatureId)) === 'zh') {
+      toast('这篇文献正文以中文为主，不需要整篇翻译；点任意段落就能单独翻译', 'error');
+      refreshCmpStart();
+      return;
+    }
     if (pr.layoutFor !== pr.recordId && !cmp.data) {
       toast('还没有版面识别结果 —— 先点「先识别版面」，等跑完再开始翻译', 'error');
       refreshCmpStart();
@@ -7749,6 +7805,13 @@
       }
       setCmpAutoChip('busy', '正在打开对照精读…');
       await openCmpMode();
+      return;
+    }
+    // ①.5 中文文献：整篇翻译没有收益（目标语言就是中文），自动管线到这里就收手 ——
+    //     不自动跑版面识别、更不自动起翻译作业，只提示一句，用户想看结构可以自己点。
+    if ((await docLangOf(recordId)) === 'zh') {
+      if (pr.recordId !== recordId) return;
+      setCmpAutoChip('done', '中文文献，无需整篇翻译');
       return;
     }
     // ② 已有在跑的翻译作业（上次没等完就关了阅读器）→ 跟踪它而不是再起一篇
