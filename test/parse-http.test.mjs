@@ -14,6 +14,10 @@ import test from 'node:test';
 
 import { createApp } from '../server.js';
 import * as store from '../src/store.js';
+import { shutdownPdfTextPool } from '../src/pdfTextPool.js';
+
+// 真实解析会拉起 PDF 抽取线程；收尾时关掉，否则测试进程要多等一轮空闲回收
+test.after(async () => { await shutdownPdfTextPool(); });
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${server.address().port}`)));
@@ -128,9 +132,11 @@ test('批量解析：一次提交 6 篇真的并发跑，且全部写完字段',
     assert.equal(res.status, 200);
     assert.equal(body.failed, 0, `不该有失败的篇目：${JSON.stringify(body.results?.map((r) => r.error))}`);
     assert.equal(body.results.length, 6);
-    // ④ 并发：6 篇 × 120ms，串行至少要 720ms；并发跑应该在 500ms 内完成
+    // ④ 并发：判据看「上游同时在途的请求数」，而不是墙上时间 ——
+    // 全量测试是多个文件并行跑的，机器一忙墙上时间就飘（实测同一段代码 400ms~1100ms 都出现过）。
+    // 在途峰值才是「真的并发」的硬证据；墙上时间只留一个极宽松的上限，防止退化成严格串行。
     assert.ok(state.peak >= 3, `上游同时只收到 ${state.peak} 个请求，并发没生效`);
-    assert.ok(cost < 900, `整批耗时 ${cost}ms，看起来还是串行`);
+    assert.ok(cost < 6000, `整批耗时 ${cost}ms，像是退化成了逐篇串行`);
 
     // 字段真的写进去了（并发不能靠丢数据换速度）
     for (const it of store.listLiterature()) {

@@ -1125,6 +1125,72 @@ function shortError(err) {
   return one.length > PARSE_ERROR_MAX ? `${one.slice(0, PARSE_ERROR_MAX)}…` : one;
 }
 
+// ---------- 用 AI 解析出的标题给 PDF 改名 ----------
+// 为什么需要：上传后磁盘上的文件名是 multer 生成的一串随机码（或出版社给的
+// 「1-s2.0-S0969698925-main.pdf」这种），分享出去对方根本不知道是哪篇。
+// AI 解析出标题之后顺手把文件改成「标题.pdf」，用户从文件夹里直接拖出去就能发。
+//
+// 四条红线：
+//   · 只在 **AI 解析成功**（source==='ai'）时才改 —— 规则兜底抽出来的"标题"往往是
+//     PDF 第一行页眉，改成那样还不如不改；
+//   · 只在同一个目录里改（不跨盘、不动别的记录的文件），目标已存在就加序号；
+//   · 任何一步失败都只是"没改名"，绝不能让解析失败（文件被阅读器占用时
+//     Windows 会抛 EBUSY/EPERM，这是常态）；
+//   · EPUB 不动（它有自己的目录结构，改文件名会破坏阅读进度定位）。
+const FILE_STEM_MAX = 80;
+
+/** 把标题洗成合法文件名：去掉 Windows 禁用字符、首尾点与空格、保留名加前缀 */
+export function sanitizeFileStem(title) {
+  let s = String(title || '')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ')   // 路径分隔符与 Windows 禁用字符
+    .replace(/[\u200b-\u200f\ufeff]/g, '')         // 零宽字符
+    .replace(/\s+/g, ' ')
+    .trim();
+  s = s.replace(/^[.\s]+/, '').replace(/[.\s]+$/, ''); // Windows 不接受结尾的点
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(s)) s = `_${s}`;
+  if (s.length > FILE_STEM_MAX) s = s.slice(0, FILE_STEM_MAX).trim();
+  return s;
+}
+
+/**
+ * 按记录里的 title 把 PDF 文件改名，返回 { filename, filePath, originalName } 或 null。
+ * 调用方负责把返回值合并进记录并落盘（这里只动磁盘，不碰 store）。
+ * 导出仅供单测使用。
+ */
+export function renamePdfFileToTitle(record) {
+  if (!record || (record.fileKind && record.fileKind !== 'pdf')) return null;
+  const src = record.filePath;
+  if (!src) return null;
+  let stat = null;
+  try { stat = fs.statSync(src); } catch (_) { return null; }   // 文件不在（被移走/删了）就别动
+  if (!stat.isFile()) return null;
+
+  const stem = sanitizeFileStem(record.title);
+  // 太短的名字（"研究" / "论文"）改出来反而更难认，至少 6 个字才值得改
+  if (stem.length < 6) return null;
+
+  const ext = path.extname(src) || '.pdf';
+  const dir = path.dirname(src);
+  const currentStem = path.basename(src, ext);
+  if (currentStem === stem) return null;                          // 已经是标题名了
+
+  let target = path.join(dir, `${stem}${ext}`);
+  let n = 2;
+  while (path.resolve(target) !== path.resolve(src) && fs.existsSync(target)) {
+    if (n > 50) return null;                                      // 同名太多，放弃
+    target = path.join(dir, `${stem} (${n})${ext}`);
+    n += 1;
+  }
+
+  try {
+    fs.renameSync(src, target);
+  } catch (e) {
+    // 被阅读器/杀毒占用、权限不足、文件系统不支持 —— 都只是"没改名"，不影响解析结果
+    return null;
+  }
+  return { filename: path.basename(target), filePath: target, originalName: path.basename(target) };
+}
+
 /**
  * 解析单篇记录。**永不抛错** —— 失败也返回一条 status='error' 的记录，
  * 这样批量执行器就不会因为一篇坏文件中断整批。
@@ -1172,6 +1238,21 @@ async function parseRecord(record, settings, docType, tracker = null, job = null
     // 已从界面移出，但老记录里的内容不能被一次重解析清成空串。
     const written = TYPE_FIELDS[type] || FIELDS;
     for (const key of written) updated[key] = result[key] ?? '';
+
+    // AI 标题到手了，顺手把磁盘上的 PDF 改成「标题.pdf」——分享出去对方才知道是哪篇。
+    // 只在 AI 解析成功时改：规则兜底抽出来的"标题"常常是页眉/期刊名，改成那样还不如不改。
+    if (result._source === 'ai') {
+      try {
+        const renamed = renamePdfFileToTitle(updated);
+        if (renamed) {
+          updated.originalUploadName = updated.originalUploadName || updated.originalName || '';
+          updated.filename = renamed.filename;
+          updated.filePath = renamed.filePath;
+          updated.originalName = renamed.originalName;
+          updated.renamedAt = new Date().toISOString();
+        }
+      } catch (_) { /* 改名失败不影响解析结果，旧文件名照旧能用 */ }
+    }
   } catch (e) {
     const message = shortError(e);
     updated = { ...freshest(), status: 'error', error: message, parseStartedAt: null };
@@ -1885,6 +1966,54 @@ export function createApp({
       label: '重新解析',
     });
     res.json({ ...(store.getLiterature(item.id) || item), jobId });
+  });
+
+  // ---------- 在文件管理器里定位 / 用系统程序打开原 PDF ----------
+  // 「点 PDF 链接」以前是 window.open('/uploads/xxx')：那只是把文件又通过 HTTP 读一遍，
+  // 用户在磁盘上根本找不到它，也没法直接把文件分享给别人。现在桌面版调系统能力 ——
+  // 「在文件夹中显示并选中」或「用默认程序打开」；纯浏览器运行则退回新标签打开。
+  app.post('/api/literature/:id/reveal', async (req, res) => {
+    const item = store.getLiterature(req.params.id);
+    if (!item) return res.status(404).json({ error: '记录不存在' });
+    const filePath = item.filePath;
+    if (!filePath || !fs.existsSync(filePath)) {
+      return res.status(404).json({ error: '找不到这份 PDF 文件（可能已被移动或删除），重新上传一份即可' });
+    }
+    const mode = req.body?.mode === 'open' ? 'open' : 'folder';
+    const url = item.filename ? '/uploads/' + encodeURIComponent(item.filename) : '';
+    const browserFallback = () => res.status(409).json({
+      error: '当前是浏览器运行方式，打不开系统文件夹；已改为在新标签打开',
+      fallback: 'url', url,
+    });
+
+    if (mode === 'open') {
+      if (typeof openPath !== 'function') return browserFallback();
+      try {
+        const err = await openPath(filePath);
+        if (!err) return res.json({ ok: true, mode, filePath });
+        // 系统没有关联程序：退一步定位到文件夹，别让用户什么都拿不到
+        if (typeof revealFile === 'function') { revealFile(filePath); return res.json({ ok: true, mode: 'folder', filePath }); }
+        return res.status(500).json({ error: `系统里没有能打开该文件的程序（${err}）`, fallback: 'url', url });
+      } catch (e) {
+        return res.status(500).json({ error: `打开失败：${shortError(e)}`, fallback: 'url', url });
+      }
+    }
+
+    if (typeof revealFile === 'function') {
+      try {
+        revealFile(filePath);
+        return res.json({ ok: true, mode, filePath });
+      } catch (e) {
+        return res.status(500).json({ error: `无法定位文件：${shortError(e)}` });
+      }
+    }
+    if (typeof openPath === 'function') {
+      try {
+        const err = await openPath(path.dirname(filePath));
+        if (!err) return res.json({ ok: true, mode, filePath });
+      } catch (_) { /* 落到下面的兜底 */ }
+    }
+    return browserFallback();
   });
 
   // ---------- PDF 版面解析（标题/正文/图表/表格/公式的区域识别） ----------

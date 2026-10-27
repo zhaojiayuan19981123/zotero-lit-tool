@@ -852,9 +852,30 @@
     if (!it.filename) return `<div class="cell-attach" data-upload="${it.id}" title="点击或拖入 PDF 上传"><div class="attach-empty">＋</div></div>`;
     const url = '/uploads/' + encodeURIComponent(it.filename);
     const thumb = it.thumb ? `<img src="${it.thumb}" alt="" loading="lazy" />` : `<div class="pdf-icon"></div>`;
+    // 文件名这一行是「定位到磁盘上的文件」，不是「在浏览器里再看一遍」：
+    // 点了直接在资源管理器里选中它，方便拖出去发给别人。href 留着是为了中键/右键「另存」仍有东西可指。
+    const tip = it.originalUploadName && it.originalUploadName !== it.originalName
+      ? `点击在文件夹中定位这个 PDF（原名：${it.originalUploadName}）`
+      : '点击在文件夹中定位这个 PDF';
     return `<div class="cell-attach" data-upload="${it.id}" title="${esc(it.originalName)}（点击替换 / 拖入重新上传）">
       <div class="attach-box">${thumb}<button class="attach-del" data-delattach="${it.id}" title="移除附件">✕</button></div>
-      <div class="attach-name"><a href="${url}" target="_blank" data-pdflink>${esc(it.originalName)}</a></div></div>`;
+      <div class="attach-name"><a href="${url}" data-pdflink data-reveal="${it.id}" title="${esc(tip)}">${esc(it.originalName)}</a></div></div>`;
+  }
+
+  /** 在系统文件管理器里定位（或打开）这篇文献的 PDF */
+  async function revealLitFile(id, mode = 'folder') {
+    if (!id) return;
+    try {
+      await api(`/api/literature/${id}/reveal`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }),
+      });
+      toast(mode === 'open' ? '已用系统默认程序打开原 PDF' : '已在文件夹中定位并选中这个文件', 'success');
+    } catch (e) {
+      // 浏览器运行方式下没有系统能力：退回新标签打开（服务端已经把 url 一起返回了）
+      const it = items.find((x) => x.id === id);
+      if (it?.filename) window.open('/uploads/' + encodeURIComponent(it.filename), '_blank');
+      toast(e.message || '无法定位文件', 'error');
+    }
   }
 
   function mdLines(v) { return String(v).split('\n').map((l) => l.trim()).filter(Boolean); }
@@ -977,7 +998,9 @@
       const epubCount = data.created.length - pdfRecords.length;
       if (pdfRecords.length) await parseIds(pdfRecords.map((c) => c.id));
       else if (epubCount) toast(`已导入 ${epubCount} 本 EPUB 电子书`, 'success');
-      pdfRecords.forEach((c) => ensureThumb(c));
+      // 解析成功后服务端会把 PDF 改名成「标题.pdf」，缩略图必须用刷新后的记录去生成，
+      // 否则会拿着旧文件名去请求一张 404 的图
+      pdfRecords.forEach((c) => ensureThumb(items.find((x) => x.id === c.id) || c));
     } catch (e) { toast('上传失败：' + e.message, 'error'); }
   }
   async function uploadToCell(id, file) {
@@ -991,7 +1014,8 @@
       if (updated.fileKind === 'epub') { toast('EPUB 已挂上，点「阅读」即可看', 'success'); return; }
       toast('上传成功，开始 AI 解析…');
       await parseIds([id]);
-      ensureThumb(updated);
+      // 同批量上传：解析后文件可能已被改名为「标题.pdf」，用最新记录生成缩略图
+      ensureThumb(items.find((x) => x.id === id) || updated);
     } catch (e) { toast('上传失败：' + e.message, 'error'); render(); }
   }
 
@@ -1035,7 +1059,9 @@
       if (star) { setRating(star.closest('[data-rating]').dataset.rating, parseInt(star.dataset.star, 10)); return; }
       const pb = e.target.closest('[data-progress]'); if (pb) { cycleProgress(pb.dataset.progress); return; }
       const del = e.target.closest('[data-delattach]'); if (del) { e.preventDefault(); removeAttachment(del.dataset.delattach); return; }
-      if (e.target.closest('[data-pdflink]')) return;
+      // PDF 文件名 = 「去磁盘上找它」，不是「再读一遍」
+      const pdfLink = e.target.closest('[data-pdflink], [data-reveal]');
+      if (pdfLink) { e.preventDefault(); e.stopPropagation(); revealLitFile(pdfLink.dataset.reveal, 'folder'); return; }
       const up = e.target.closest('[data-upload]'); if (up) { cellUploadId = up.dataset.upload; el.cellFileInput.value = ''; el.cellFileInput.click(); return; }
       const act = e.target.closest('[data-act]');
       if (act) {
@@ -3008,8 +3034,8 @@
     $('btnEdit').addEventListener('click', openEdit);
     $('btnRead').addEventListener('click', () => openPdfReader(currentId));
     $('btnOpenPdf').addEventListener('click', () => {
-      const it = items.find((x) => x.id === currentId);
-      if (it?.filename) window.open('/uploads/' + encodeURIComponent(it.filename), '_blank');
+      // 「原 PDF」= 磁盘上那份文件：用系统默认程序打开，找不到就退回新标签
+      if (items.find((x) => x.id === currentId)?.filename) revealLitFile(currentId, 'open');
     });
     // 划词标注：选中即浮出工具条。mouseup 后用 setTimeout 让浏览器先把选区定下来，
     // 否则拿到的 range 还是上一次的（双击选词尤其明显）。
