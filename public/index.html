@@ -394,12 +394,13 @@
           </div>
           <!-- 文献搜索：全字段模糊匹配 + 相关性排序（原侧边栏搜索框迁到这里，
                因为它的作用域本来就只是当前文库，放在表格工具栏里更符合"搜这张表"的心智） -->
-          <div class="lib-search" id="libSearch">
+          <div class="lib-search" id="libSearch" title="搜索当前文库：标题、作者、关键词、摘要、研究空白、笔记……任意字段都能搜；支持拼写容错（transfromer 也能命中 transformer）">
             <svg class="ico ico-sm lib-search-ico" aria-hidden="true"><use href="#i-search"/></svg>
             <input type="search" id="libSearchInput" class="lib-search-input"
-                   placeholder="搜索文献：标题 / 作者 / 关键词 / 摘要 / 任意字段…" autocomplete="off" />
+                   placeholder="搜索文献（全字段 · 容错）" autocomplete="off" />
             <span class="lib-search-count hidden" id="libSearchCount"></span>
             <button type="button" class="lib-search-clear hidden" id="libSearchClear" aria-label="清空搜索">×</button>
+            <kbd class="lib-search-kbd">Ctrl K</kbd>
           </div>
         </div>
 

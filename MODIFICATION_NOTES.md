@@ -1,3 +1,89 @@
+## v1.33.1：修内置翻译在 Qwen3 上必现 400（thinking_budget 不能为 0）+ 搜索框做出「一眼能认出」的样子（2026-10-29）
+
+> 用户报了两个问题：
+> ① 「内置翻译模型（Qwen/Qwen3-8B）返回 400:
+>    {"code":20015,"message":"Value error, `thinking_budget` must be greater than 0."}」
+> ② 「怎么没有见到搜索框」。
+
+### 一、400 的根因：关思考时发了 `thinking_budget: 0`
+
+`src/thinkingMode.js` 里硅基流动分支原来是：
+
+```js
+on ? { enable_thinking: true, ...(hasBudget ? { thinking_budget: budget } : {}) }
+   : { enable_thinking: false, thinking_budget: 0 };
+```
+
+那个 `0` 的本意是「不限制思考长度」，但**硅基流动对 `thinking_budget` 的校验是「必须 > 0」**，
+发 0 属于非法值，整个请求被 400 拒掉。翻译恰恰是「关思考」用得最狠的地方（要快），
+所以内置翻译一调用就必然失败。
+
+→ 改成关思考**只发 `enable_thinking: false`**，`thinking_budget` 整个键都不出现
+（它只在开思考、限制思考长度时才有意义）。
+
+这一处同时修好了三条链路，因为它们都调同一个 `thinkingPayload(..., 'off')`：
+`src/translateBuiltin.js`（内置翻译）、`src/translate.js`（划词大模型翻译）、
+`src/pdfTranslate/engines.js`（整篇翻译）。
+文献解析（`src/aiExtractor.js`）本来也有同样的问题，只是 `server.js` 里那道
+「400 就摘参数重发」的兜底把它盖住了 —— 属于「症状被兜底掩盖的真 bug」。
+
+### 二、补上本该有的第二道防线：`postWithThinkingFallback`
+
+`translateBuiltin.js` 的注释一直写着「不认的话下面会重试一次」，**实际并没有这段代码**；
+`translate.js` 的注释也指向一个只在 `catch` 里处理 abort 的分支。这次把兜底真正做出来，
+放在 `thinkingMode.js` 里给三条链路共用：
+
+```js
+export async function postWithThinkingFallback(doFetch, payload)
+// → { res, payload, retried, thinkingRejected }
+```
+
+- 只有 **400 / 422 且文本点名参数**（`looksLikeThinkingParamError`）才摘；
+- 摘掉 `THINKING_KEYS` 后用**同一份内容**重发**一次**（不允许无限重试）；
+- 返回 `thinkingRejected`，调用方据此**记住这个端点以后别再发**（`translateBuiltin` 用
+  `thinkingRejectedKeys` 集合按 `baseURL::model` 记忆，避免每翻一段都白挨一次 400）。
+- 与参数无关的 400（如 `context length too long`）**不重发**，避免把真错误掩盖成"重试"。
+
+### 三、「没见到搜索框」：它一直在，但长得不像搜索框
+
+查证过程（先排除误报，再动手改）：
+- 已安装应用是 1.33.0（注册表 + 进程启动时间 02:35，晚于安装时间 02:34）；
+- 直接向**运行中的后端**（`127.0.0.1:58181`）取页面，返回 162148 字节、`libSearch` 出现 4 次
+  —— 跑的就是新 HTML，不是旧缓存；
+- 用真 Chromium 在 700 / 820 / 980 / 1100 / 1280 / 1440 / 1536 / 1600 / 1920 九种宽度下测量：
+  `#libSearch` 全部 `inViewport: true`、未被遮挡（`elementFromPoint` 命中输入框本身）。
+
+**真正的问题在观感**：`.lib-search` 原来是 `flex: 1 1 280px`，中等宽度下工具栏换行后它会
+**一路撑满整行**，变成一条紧贴表头的浅色长条 —— 看起来像表头的一部分。
+1280 宽时实测 `width: 968px`，1440 时 `1128px`。
+
+→ 改法：
+- `flex: 1 1 260px; min-width: 200px; max-width: 360px`，**宽度封顶**，就是一个搜索框的大小；
+- 占位文字改成「搜索文献（全字段 · 容错）」，`title` 里写完整说明；
+- 加 `<kbd class="lib-search-kbd">Ctrl K</kbd>`，并绑定 **Ctrl/⌘+K**：任意页面直接切到
+  文献中心并聚焦搜索框（`view !== 'library'` 时先 `switchView('library')`）。
+  聚焦或已有内容时这个提示会隐藏，把位置让给清除按钮。
+
+### 四、测试
+
+- `test/thinking-mode.test.mjs`：硅基流动关思考断言改为 `{ enable_thinking: false }`，
+  并补「budget 传 0 / 负数 / 非数字都不能变成非法值」；新增 5 条 `postWithThinkingFallback`
+  的行为用例（成功不重发 / 400 摘参数重发 / 无关 400 不重发 / 无思考键不重发 / 只重发一次）。
+- 新增 `test/translate-builtin-thinking.test.mjs`（3 条）：用假 `fetch` 钉住
+  「400 → 重发 → 成功」「被拒过的端点后续不再发」「无关 400 不重发」。
+- `verify-lib-search.mjs` 增 3 项：宽度上限 200~400px、有放大镜图标 + `Ctrl K` 提示、
+  `Ctrl+K` 能聚焦。合计 **19/19**。
+- 全量 **580/580** × Node 20.10.0 + Node 22.22.2。
+
+### 五、坑
+
+- `test/thinking-mode.test.mjs` 里那条「重发后仍失败」的用例，最初让 stub 从**第一次**就返回 429，
+  断言写的是「应重发一次」—— 但 429 不属于参数错误，压根不会触发重发。
+  这类用例必须让**第一次**是被嫌参数、**第二次**才是真错误，否则测的是别的分支。
+- `node --test` 全量偶尔会在约 333 条处卡死然后被 SIGTERM（Node 20 上遇到两次，
+  Node 22 一次）。同一份代码换后台重跑就 20 秒跑完 —— 是残留进程抢资源，不是测试本身有问题。
+  → 别急着怀疑新写的测试，先重跑一次；跑测试时别并发跑 Playwright。
+
 ## v1.33.0：阅读器可打印、AI 助读显示思考、内置免费翻译模型、三类文库字段扩充、搜索改全字段模糊（2026-10-28）
 
 > 用户一轮提了五件事 + 一个界面调整：

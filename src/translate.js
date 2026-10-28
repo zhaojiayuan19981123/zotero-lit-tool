@@ -7,7 +7,7 @@ import { getSettings } from './store.js';
 import { resolveActive, resolveProfile } from './modelCatalog.js';
 import { translateWithProvider, translateProviderLabel, __test__ as providerTest } from './translateProviders.js';
 import { translateWithBuiltin, builtinSystemPrompt } from './translateBuiltin.js';
-import { thinkingPayload } from './thinkingMode.js';
+import { thinkingPayload, stripThinking, postWithThinkingFallback } from './thinkingMode.js';
 
 /** 调用当前激活的大模型做翻译（OpenAI 兼容 chat completions）。 */
 function textFromCompletion(data) {
@@ -56,12 +56,16 @@ async function translateViaLLM(text, settings, target, profileId, opts = {}) {
     let last = '';
     for (let i = 0; i < formats.length; i += 1) {
       const format = formats[i]; const endpoint = baseURL(profile) + (format === 'responses' ? '/responses' : '/chat/completions');
-      let res = await fetch(endpoint, { method: 'POST', headers, signal: controller.signal, body: JSON.stringify(bodyFor(profile, messages, format)) });
+      const send = (payload) => fetch(endpoint, { method: 'POST', headers, signal: controller.signal, body: JSON.stringify(payload) });
+      // 思考参数被上游拒（400/422）时会自动摘掉重发一次，避免「翻译整个不可用」
+      let { res, thinkingRejected } = await postWithThinkingFallback(send, bodyFor(profile, messages, format));
       if (!res.ok && profile.systemPromptMode === 'auto') {
         const detail = await res.clone().text().catch(() => '');
         if (/system.*(?:role|message)|(?:role|message).*system|unsupported.*system/i.test(detail)) {
           const flattened = [{ role: 'user', content: '【任务要求】\n' + system + '\n\n【待翻译文本】\n' + text }];
-          res = await fetch(endpoint, { method: 'POST', headers, signal: controller.signal, body: JSON.stringify(bodyFor(profile, flattened, format)) });
+          // 已经确认这个上游不认思考参数，就别在第二次请求里又发一遍
+          const payload = bodyFor(profile, flattened, format);
+          res = await send(thinkingRejected ? stripThinking(payload) : payload);
         }
       }
       if (res.ok) { const raw = await res.text(); let data; try { data = JSON.parse(raw); } catch (_) { throw new Error('AI 翻译返回的不是有效 JSON：' + (raw.slice(0, 160) || '空响应')); } const result = textFromCompletion(data); if (!result) throw new Error('AI 翻译未返回有效内容。请在 AI 设置中重新测试该模型，或改用非流式兼容模式'); return result; }

@@ -15,7 +15,7 @@
 // 与「大模型 · 某配置」的区别只在「用哪个模型 + 关掉思考」，提示词与占位符保护
 // 完全复用 src/pdfTranslate/engines.js 那一套（术语表、公式、引用编号都原样保留）。
 
-import { thinkingPayload } from './thinkingMode.js';
+import { thinkingPayload, postWithThinkingFallback } from './thinkingMode.js';
 
 /**
  * 免费 / 低价翻译模型候选（按「翻译质量 × 速度 × 是否免费」排序）。
@@ -31,8 +31,16 @@ export const BUILTIN_MODEL_CANDIDATES = [
 // 进程内记住「这次哪个候选真的能用」，避免每次翻译都从第一个开始试错
 let chosenByKey = new Map();
 
+// 记住「这个端点 + 模型不接受思考参数」：一旦被 400 打回过，后续就别再发，
+// 免得每翻一段都白挨一次 400 再重试。
+let thinkingRejectedKeys = new Set();
+
+/** 端点 + 模型 的组合键（换模型/换 Key 都可能改变兼容性） */
+const cacheKey = (profile, model) => `${profile.baseURL}::${model}`;
+
 export function resetBuiltinCache() {
   chosenByKey = new Map();
+  thinkingRejectedKeys = new Set();
 }
 
 /** 从模型配置里找一条 siliconflow 的 Key（内置翻译复用，不需要用户再填一次） */
@@ -116,6 +124,7 @@ export async function translateWithBuiltin(text, settings, target, { glossaryHin
   let lastErr = null;
 
   for (const model of candidates) {
+    const key = cacheKey(profile, model);
     const body = {
       model,
       temperature: 0.1,
@@ -125,21 +134,27 @@ export async function translateWithBuiltin(text, settings, target, { glossaryHin
         { role: 'system', content: builtinSystemPrompt(targetLabel, { glossaryHint }) },
         { role: 'user', content: raw },
       ],
-      // 翻译不需要思考：这类参数在各家的写法见 src/thinkingMode.js，不认的话下面会重试一次
-      ...thinkingPayload({ provider: profile.provider, model }, 'off'),
+      // 翻译不需要思考：这类参数在各家的写法见 src/thinkingMode.js。
+      // 已被这个端点拒过的就干脆不发（postWithThinkingFallback 会在被拒时摘掉重发一次）。
+      ...(thinkingRejectedKeys.has(key)
+        ? {}
+        : thinkingPayload({ provider: profile.provider, model }, 'off')),
     };
+    const send = (payload) => fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${profile.apiKey}` },
+      body: JSON.stringify(payload),
+      signal,
+    });
     let res;
+    let thinkingRejected = false;
     try {
-      res = await fetch(`${base}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${profile.apiKey}` },
-        body: JSON.stringify(body),
-        signal,
-      });
+      ({ res, thinkingRejected } = await postWithThinkingFallback(send, body));
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
       throw new Error('内置翻译模型连接失败：' + (e?.message || e));
     }
+    if (thinkingRejected) thinkingRejectedKeys.add(key);
 
     if (res.ok) {
       const data = await res.json().catch(() => null);

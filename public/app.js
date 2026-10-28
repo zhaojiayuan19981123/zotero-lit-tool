@@ -2996,7 +2996,13 @@
     // "搜这张表"的心智；侧边栏那个输入框已经删掉了，别再加回来（两处会抢同一份过滤状态）。
     const libSearch = $('libSearchInput');
     const libSearchClear = $('libSearchClear');
-    const syncSearchClear = () => libSearchClear?.classList.toggle('hidden', !libSearch?.value);
+    const libSearchKbd = document.querySelector('.lib-search-kbd');
+    const syncSearchClear = () => {
+      const hasText = !!libSearch?.value;
+      libSearchClear?.classList.toggle('hidden', !hasText);
+      // 有内容时快捷键提示没意义（位置要留给"×"），直接藏掉
+      if (libSearchKbd) libSearchKbd.style.display = hasText ? 'none' : '';
+    };
     const applySearch = (value) => {
       if (el.searchInput) el.searchInput.value = value;
       if (libSearch) libSearch.value = value;
@@ -3008,6 +3014,15 @@
       libSearch.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); applySearch(''); } });
       libSearchClear?.addEventListener('click', () => { applySearch(''); libSearch.focus(); });
       syncSearchClear();
+      // Ctrl/⌘+K：不用在工具栏里找那个框，直接聚焦（不在文献中心时先切过去）
+      document.addEventListener('keydown', (e) => {
+        if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+        if (String(e.key).toLowerCase() !== 'k') return;
+        e.preventDefault();
+        if (view !== 'library') switchView('library');
+        libSearch.focus();
+        libSearch.select();
+      });
     }
     // #searchInput 已从页面移除（顶栏改显示当前页面标题）。保留兜底，避免老 DOM 下报错。
     if (el.searchInput) el.searchInput.addEventListener('input', render);

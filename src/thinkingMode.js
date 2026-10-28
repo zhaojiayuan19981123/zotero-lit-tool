@@ -58,10 +58,15 @@ export function thinkingPayload(profile, mode, opts = {}) {
 
   switch (String(profile?.provider || '')) {
     case 'siliconflow':
-      // 硅基流动：enable_thinking 对混合模型生效；thinking_budget 限制思考长度
+      // 硅基流动：enable_thinking 对混合模型生效；thinking_budget 限制思考长度。
+      // ★ 关思考时**绝对不能**带 thinking_budget —— 它的校验是「必须 > 0」，
+      //   发 0 会被直接打回：
+      //   400 {"code":20015,"message":"Value error, `thinking_budget` must be greater than 0."}
+      //   （v1.33.0 的内置翻译在 Qwen/Qwen3-8B 上就是这么挂的）。
+      //   budget 只在**开**思考时才有意义，关掉就整个键都不发。
       return on
         ? { enable_thinking: true, ...(hasBudget ? { thinking_budget: budget } : {}) }
-        : { enable_thinking: false, thinking_budget: 0 };
+        : { enable_thinking: false };
     case 'zhipu':
       // 智谱 GLM-4.5 起用 thinking.{type}；关掉就是 disabled
       return { thinking: { type: on ? 'enabled' : 'disabled' } };
@@ -107,4 +112,34 @@ export function looksLikeThinkingParamError(status, detail) {
   const text = String(detail || '');
   if (!/thinking|reasoning|budget|chat_template|extra|unknown|unexpected|invalid|unsupported/i.test(text)) return false;
   return /param|field|argument|value|key|property|unrecognized|extra/i.test(text);
+}
+
+/**
+ * 发一次请求；若因「思考参数不被接受」被 400/422 打回，摘掉这些键**用同一份内容重发一次**。
+ *
+ * 为什么必须放在调用方而不是只靠 thinkingPayload 写对：
+ *   同一个参数名在不同网关上的兼容度不一样，而且**同一个网关的不同模型**校验规则也会变
+ *   （硅基流动的 thinking_budget 就要求 > 0，写 0 直接 400）。与其穷举「谁认什么」，
+ *   不如统一加一道「被拒就摘掉再发」的兜底 —— 最坏情况只是没省下思考开销，
+ *   绝不会出现「翻译功能整个不可用」。
+ *
+ * @param {(payload:object)=>Promise<Response>} doFetch 用给定 payload 发请求
+ * @param {object} payload 已合并过思考参数的请求体
+ * @returns {Promise<{res:Response, payload:object, retried:boolean, thinkingRejected:boolean}>}
+ *   res 是**最终**那次响应；thinkingRejected 表示上游确实嫌弃思考参数（后续请求可以省掉它们）
+ */
+export async function postWithThinkingFallback(doFetch, payload) {
+  const res = await doFetch(payload);
+  if (res.ok) return { res, payload, retried: false, thinkingRejected: false };
+  if (!THINKING_KEYS.some((k) => payload && Object.prototype.hasOwnProperty.call(payload, k))) {
+    return { res, payload, retried: false, thinkingRejected: false };
+  }
+  // clone() 是为了不把响应体读掉；调用方还要拿它拼错误信息
+  const detail = await res.clone().text().catch(() => '');
+  if (!looksLikeThinkingParamError(res.status, detail)) {
+    return { res, payload, retried: false, thinkingRejected: false };
+  }
+  const stripped = stripThinking(payload);
+  const retry = await doFetch(stripped);
+  return { res: retry, payload: stripped, retried: true, thinkingRejected: true };
 }

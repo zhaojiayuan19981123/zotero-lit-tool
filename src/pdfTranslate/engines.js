@@ -20,7 +20,7 @@ import * as catalog from '../modelCatalog.js';
 import { cjkRatio } from './layout.js';
 import { translateBatchWithProvider, translateProviderLabel, NON_LLM_PROVIDERS } from '../translateProviders.js';
 import { resolveBuiltinProfile } from '../translateBuiltin.js';
-import { thinkingPayload } from '../thinkingMode.js';
+import { thinkingPayload, postWithThinkingFallback } from '../thinkingMode.js';
 
 // ==================== 目标语言 ====================
 
@@ -456,15 +456,16 @@ export function createLlmEngine({ settings, profileId, profile: profileArg, opti
         // 翻译不需要思考：推理模型默认先想几千 token，既慢又会把推理写进译文
         ...thinkingPayload({ provider: profile.provider, model: profile.model }, 'off'),
       };
-      const res = await fetch(url, {
+      // 思考参数被上游拒（400/422）时自动摘掉重发一次，否则整篇翻译会直接失败
+      const { res } = await postWithThinkingFallback((payload) => fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${profile.apiKey}`,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
         signal: combineSignals(signal, timeoutMs),
-      });
+      }), body);
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
         const e = new Error(`大模型接口返回 ${res.status}：${detail.slice(0, 300)}`);
