@@ -312,7 +312,8 @@ async function viaFree(text, settings, target) {
 
 /** 划词/全文翻译共用引擎清单（前端设置面板的数据源） */
 export const TRANSLATE_PROVIDERS = [
-  { id: 'siliconflow', label: '硅基流动 DeepSeek（用上方 API Key）', needsKey: false },
+  { id: 'builtin', label: '内置翻译模型 · 免费（学术优化，推荐）', needsKey: false },
+  { id: 'siliconflow', label: '当前激活的大模型（用上面配置的 Key）', needsKey: false },
   { id: 'deepl', label: 'DeepL（需单独 Key）', needsKey: true },
   { id: 'volcweb', label: '火山翻译 · 网页版（免密钥）（推荐）', needsKey: false },
   { id: 'youdaoweb', label: '有道翻译 · 网页版（免密钥）', needsKey: false },
@@ -327,8 +328,14 @@ export function translateProviderLabel(id) {
   return (TRANSLATE_PROVIDERS.find((p) => p.id === id) || {}).label || id || '';
 }
 
-/** 除 LLM 外全部支持的引擎 id（全文翻译 createEngine 用） */
-export const NON_LLM_PROVIDERS = new Set(TRANSLATE_PROVIDERS.map((p) => p.id).filter((id) => id !== 'siliconflow'));
+/**
+ * 除「大模型类」引擎外全部支持的 id（全文翻译 createEngine 按它分流）。
+ * builtin 虽然列在上面，但它走的是大模型路径（只是模型固定、免费），
+ * 不能当成传统翻译服务丢给 translateWithProvider —— 那会直接抛「未知翻译服务」。
+ */
+export const NON_LLM_PROVIDERS = new Set(
+  TRANSLATE_PROVIDERS.map((p) => p.id).filter((id) => id !== 'siliconflow' && id !== 'builtin'),
+);
 
 /** 单段翻译入口：providerId → 对应服务 */
 export async function translateWithProvider(providerId, text, settings, target) {
@@ -341,6 +348,7 @@ export async function translateWithProvider(providerId, text, settings, target) 
     case 'baidu': return viaBaidu(text, settings, target);
     case 'tencent': return viaTencent(text, settings, target);
     case 'free': return viaFree(text, settings, target);
+    case 'builtin': throw new Error('内置翻译模型请走 translateWithBuiltin（需要大模型调用链路，不是传统翻译服务）');
     default: throw new Error(`未知翻译服务：${providerId}`);
   }
 }

@@ -67,6 +67,7 @@
     <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9.2 3.4v5.2M14.8 3.4v5.2"/><path d="M6.4 8.6h11.2v3.2a5.6 5.6 0 0 1-11.2 0z"/><path d="M12 17.4v3.2"/></symbol>
     <symbol id="i-puzzle" viewBox="0 0 24 24"><path d="M9.6 4.2a2 2 0 0 1 4 0V6h3.2a1 1 0 0 1 1 1v3.2h1.8a2 2 0 0 1 0 4h-1.8V18a1 1 0 0 1-1 1h-3.4v-1.8a2 2 0 0 0-4 0V19H6.2a1 1 0 0 1-1-1v-3.4H7a2 2 0 0 0 0-4H5.2V7a1 1 0 0 1 1-1h3.4z"/></symbol>
     <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.2" ry="2.8"/><path d="M4.8 6v12c0 1.55 3.22 2.8 7.2 2.8s7.2-1.25 7.2-2.8V6"/><path d="M4.8 12c0 1.55 3.22 2.8 7.2 2.8s7.2-1.25 7.2-2.8"/></symbol>
+    <symbol id="i-printer" viewBox="0 0 24 24"><path d="M6.6 8.4V3.8h10.8v4.6"/><rect x="3.4" y="8.4" width="17.2" height="7.6" rx="2"/><path d="M6.6 13.4h10.8v6.8H6.6z"/><path d="M8.6 12.4h6.8v4.8H8.6z"/></symbol>
     <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.6" y="3.6" width="7" height="7" rx="1.6"/><rect x="13.4" y="3.6" width="7" height="7" rx="1.6"/><rect x="3.6" y="13.4" width="7" height="7" rx="1.6"/><rect x="13.4" y="13.4" width="7" height="7" rx="1.6"/></symbol>
     <symbol id="i-brain" viewBox="0 0 24 24"><path d="M9.4 4.2a2.6 2.6 0 0 0-2.6 2.6 2.4 2.4 0 0 0-1.4 4.3A2.6 2.6 0 0 0 6.6 15a2.6 2.6 0 0 0 2.8 3.9V4.2z"/><path d="M14.6 4.2a2.6 2.6 0 0 1 2.6 2.6 2.4 2.4 0 0 1 1.4 4.3A2.6 2.6 0 0 1 17.4 15a2.6 2.6 0 0 1-2.8 3.9V4.2z"/><path d="M12 3.8v16.4"/></symbol>
     <symbol id="i-fire" viewBox="0 0 24 24"><path d="M12 2.8s5.4 4 5.4 9.6a5.4 5.4 0 0 1-10.8 0c0-1.6.6-2.8 1.4-3.8.4 1.2 1.2 2 2.2 2.2-.6-2.6.4-5.6 1.8-8z"/></symbol>
@@ -188,12 +189,6 @@
           <span id="profileSub">完善个人资料</span>
         </div>
         <svg class="ico profile-edit" aria-hidden="true"><use href="#i-note"/></svg>
-      </div>
-
-      <div class="side-search">
-        <svg class="ico side-search-ico" aria-hidden="true"><use href="#i-search"/></svg>
-        <input type="search" id="sideSearchInput" class="side-search-input" placeholder="搜索标题 / 作者 / 关键词" autocomplete="off" />
-        <button type="button" class="side-search-clear hidden" id="sideSearchClear" aria-label="清空搜索">×</button>
       </div>
 
       <nav class="side-nav">
@@ -335,6 +330,9 @@
           <div class="lib-root-chip" data-rootlib="model">
             <span><svg class="ico" aria-hidden="true"><use href="#i-brain"/></svg></span><b>模型类文库</b><span class="side-count" data-rootcount="model"></span>
           </div>
+          <div class="lib-root-chip" data-rootlib="algorithm" title="算法类（CCF）：研究问题/科学问题、实验与消融设计、数据集与评价指标，期刊会议自动标注 CCF A/B/C">
+            <span><svg class="ico" aria-hidden="true"><use href="#i-puzzle"/></svg></span><b>算法类文库</b><span class="side-count" data-rootcount="algorithm"></span>
+          </div>
           <button class="tb-btn" id="btnAddCol">＋ 新建分类</button>
           <span class="lib-hint">拖动文献行到分类上即可归类</span>
         </div>
@@ -393,6 +391,15 @@
             <button data-rh="m" class="rh-btn active" title="标准行高">▄</button>
             <button data-rh="l" class="rh-btn" title="宽松行高">█</button>
             <button data-rh="xl" class="rh-btn" title="特大行高">▉</button>
+          </div>
+          <!-- 文献搜索：全字段模糊匹配 + 相关性排序（原侧边栏搜索框迁到这里，
+               因为它的作用域本来就只是当前文库，放在表格工具栏里更符合"搜这张表"的心智） -->
+          <div class="lib-search" id="libSearch">
+            <svg class="ico ico-sm lib-search-ico" aria-hidden="true"><use href="#i-search"/></svg>
+            <input type="search" id="libSearchInput" class="lib-search-input"
+                   placeholder="搜索文献：标题 / 作者 / 关键词 / 摘要 / 任意字段…" autocomplete="off" />
+            <span class="lib-search-count hidden" id="libSearchCount"></span>
+            <button type="button" class="lib-search-clear hidden" id="libSearchClear" aria-label="清空搜索">×</button>
           </div>
         </div>
 
@@ -1345,9 +1352,10 @@
         <p class="modal-desc" style="background:var(--primary-soft)">划词翻译（PDF 阅读器内选中文字自动翻译）。网页版火山 / 有道免密钥开箱即用；需要更高质量可配置 DeepL 或云厂商机器翻译。</p>
         <label class="field"><span>翻译提供方</span>
           <select id="setTranslateProvider" class="tb-select w100">
-            <option value="siliconflow">硅基流动 DeepSeek（用上方 API Key）</option>
+            <option value="builtin">内置翻译模型 · 免费（学术优化，推荐）</option>
+            <option value="siliconflow">当前激活的大模型（用上面配置的 Key）</option>
             <option value="deepl">DeepL（需单独 Key）</option>
-            <option value="volcweb">火山翻译 · 网页版（免密钥）（推荐）</option>
+            <option value="volcweb">火山翻译 · 网页版（免密钥）</option>
             <option value="youdaoweb">有道翻译 · 网页版（免密钥）</option>
             <option value="volcapi">火山引擎机器翻译（需 AccessKey）</option>
             <option value="youdaoapi">有道智云翻译（需 应用ID/密钥）</option>
@@ -1356,6 +1364,13 @@
             <option value="free">免费接口（MyMemory，无需密钥）</option>
           </select>
         </label>
+        <div class="field tr-field" data-tr-for="builtin" style="grid-column:1/-1">
+          <span class="hint-text" style="font-size:12px;line-height:1.7;color:var(--text-3)">
+            内置翻译模型：固定使用翻译够用的小模型（Qwen3-8B 等免费模型，自动挑选可用的一个），
+            复用你在上面模型配置里填过的硅基流动 Key，不需要再单独申请；翻译不需要消耗大模型额度，
+            速度比推理模型快一个量级。若还没配过硅基流动 Key，请先在上面添加一条模型配置。
+          </span>
+        </div>
         <label class="field tr-field" data-tr-for="deepl"><span>DeepL API Key（选 DeepL 时填写）</span><input id="setDeeplKey" class="tb-input" type="password" placeholder="DeepL 密钥，留空则不用 DeepL" /></label>
         <label class="field tr-field" data-tr-for="deepl"><span>DeepL 端点（可选，自建 DeepLX 时填）</span><input id="setDeeplEndpoint" class="tb-input" placeholder="留空 = 按 Key 自动选官方 Free / Pro 端点；自建例：http://127.0.0.1:1188/translate" /></label>
         <label class="field tr-field hidden" data-tr-for="volcapi"><span>火山引擎 AccessKey（格式：AccessKeyId#SecretAccessKey）</span><input id="setVolcKey" class="tb-input" type="password" placeholder="AK#SK，在火山引擎控制台「API 访问密钥」获取" /></label>
@@ -1577,6 +1592,7 @@
   <div id="pdfReader" class="pdf-reader hidden">
     <div class="pr-toolbar">
       <button id="prClose" class="btn pr-back"><svg class="ico" aria-hidden="true"><use href="#i-chevron-down"/></svg>返回</button>
+      <button id="prPrint" class="btn btn-ghost pr-icobtn" title="打印这篇文献：可打当前页 / 指定页码（如 1-3,5）/ 全部，调起本机打印机"><svg class="ico" aria-hidden="true"><use href="#i-printer"/></svg><span class="pr-bt-t">打印</span></button>
       <button id="prDirToggle" class="btn btn-ghost pr-icobtn" title="展开 / 收起论文目录 —— 不必先返回列表，直接跳到另一篇"><svg class="ico" aria-hidden="true"><use href="#i-layers"/></svg><span class="pr-bt-t">目录</span></button>
       <span id="prFilename" class="pr-filename"></span>
       <div class="pr-nav" id="prPdfNav">
@@ -2027,6 +2043,7 @@
           <div class="pr-chat-bar">
             <span class="pr-chat-bar-title">对话记录 <span class="pr-chat-bar-note">按文献保存，退出应用不丢</span></span>
             <span class="pr-chat-bar-actions">
+              <button id="btnPrChatThink" class="btn btn-ghost btn-sm pr-think-btn" title="思考模式：自动（跟随模型）/ 快速（不思考，出字最快）/ 开启（展示思考过程）"><svg class="ico ico" aria-hidden="true"><use href="#i-brain"/></svg><span>思考：自动</span></button>
               <button id="btnPrChatSummary" class="btn btn-ghost btn-sm" title="把当前页 / 当前章节的正文交给 AI 总结"><svg class="ico ico" aria-hidden="true"><use href="#i-note"/></svg><span id="prSummaryLabel">总结本页</span></button>
               <button id="prChatClear" class="btn btn-ghost btn-sm" disabled title="清除本篇论文的对话记录"><svg class="ico ico" aria-hidden="true"><use href="#i-trash"/></svg> 清除记录</button>
             </span>
@@ -2146,6 +2163,7 @@
   <script src="paper-note-utils.js"></script>
   <script src="doi-utils.js"></script>
   <script src="rank-utils.js"></script>
+  <script src="lib-search.js"></script>
   <script src="thesis-import-utils.js"></script>
   <script src="thesis.js"></script>
   <script src="achievements.js"></script>

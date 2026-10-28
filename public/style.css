@@ -838,6 +838,41 @@ tbody tr.row-selected:hover { background: var(--primary-soft) !important; }
 .rh-btn:last-child { border-right: none; }
 .rh-btn.active { background: var(--primary-soft); color: var(--primary); }
 
+/* ---------- 文献搜索（工具栏行末） ---------- */
+/* 从侧边栏迁来：它的作用域只是当前文库的这张表，所以长在工具栏里。
+   放在最后 + flex:1 + margin-left:auto：一行放得下时它吃掉右侧那块空白（原来空的区域），
+   放不下时整块折到下一行独占一行（而不是把筛选控件挤成半行，出现"降序 行高"孤零零一行）。 */
+.lib-search {
+  display: flex; align-items: center; gap: 6px;
+  flex: 1 1 280px; min-width: 220px;
+  margin-left: auto;
+  padding: 5px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border); border-radius: 9px;
+  transition: border-color .14s var(--ease, ease), box-shadow .14s var(--ease, ease);
+}
+.lib-search:focus-within { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.lib-search-ico { color: var(--text-3); flex-shrink: 0; }
+.lib-search:focus-within .lib-search-ico { color: var(--primary); }
+.lib-search-input {
+  flex: 1; min-width: 0; padding: 0; border: none; outline: none; background: none;
+  font-family: inherit; font-size: 13px; color: var(--text);
+}
+.lib-search-input::placeholder { color: var(--text-3); }
+/* 去掉 WebKit 自带的清除按钮，统一用 DOM 按钮（三套主题下外观才一致） */
+.lib-search-input::-webkit-search-cancel-button { display: none; }
+.lib-search-count {
+  font-size: 11px; color: var(--text-3); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.lib-search-clear {
+  border: none; background: none; cursor: pointer; padding: 0 2px; line-height: 1;
+  color: var(--text-3); font-size: 15px; border-radius: 4px;
+}
+.lib-search-clear:hover { color: var(--text); background: var(--gray-soft); }
+/* 命中词高亮（表格里只标标题/作者这类短字段，避免整段摘要刷满荧光笔） */
+mark.kw { background: var(--primary-soft); color: var(--primary); border-radius: 3px; padding: 0 1px; font-weight: 600; }
+
 /* ---------- 字段配置弹层 ---------- */
 .pop {
   position: fixed; background: var(--surface); border: 1px solid var(--border);
@@ -1064,6 +1099,10 @@ table.grid tbody td:not(.cell-check):not(.cell-num) { cursor: pointer; }
 .md ul { margin: 6px 0; padding-left: 18px; }
 .md li { margin: 4px 0; }
 .md .md-label { color: var(--text); font-weight: 600; }
+/* 解析字段是段落格式（段间空一行、每段首行缩进两格）：详情卡片里按段落排版，
+   段间距比浏览器默认的 1em 紧一点，连续段落才不像被切碎 */
+.md-annotatable p { margin: 0 0 9px; text-align: justify; }
+.md-annotatable p:last-child { margin-bottom: 0; }
 
 /* ---------- 弹窗 ---------- */
 .modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; }
@@ -2179,32 +2218,8 @@ mark.anno-c-purple { color: var(--primary); background: none; }
 .side-action-icon { width: 16px; text-align: center; font-size: 16px; line-height: 1; }
 .update-nav-badge { margin-left: auto; padding: 1px 6px; border-radius: 4px; color: var(--on-primary); background: var(--accent-coral); font-size: 10px; font-weight: 700; }
 
-/* 侧边栏搜索框：从顶栏迁来（搜索只作用于文献，放在侧栏更贴合"按范围检索"的心智） */
-.side-search {
-  display: flex; align-items: center; gap: var(--side-gap);
-  margin: 2px var(--side-pad-x) 6px; padding: 6px 10px;
-  background: var(--side-hover);
-  border: 1px solid var(--side-border); border-radius: var(--side-radius);
-  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
-}
-.side-search:focus-within {
-  border-color: var(--side-marker);
-  background: var(--side-1);
-}
-.side-search-ico { width: var(--side-icon); height: var(--side-icon); color: var(--side-muted); }
-.side-search:focus-within .side-search-ico { color: var(--side-marker); }
-.side-search-input {
-  flex: 1; min-width: 0; border: none; outline: none; background: none;
-  font-family: inherit; font-size: var(--side-font); color: var(--side-text); padding: 0;
-}
-.side-search-input::placeholder { color: var(--side-muted); }
-/* 去掉 WebKit 搜索框自带的清除按钮，改用统一的 DOM 按钮，三套主题下外观才一致 */
-.side-search-input::-webkit-search-cancel-button { display: none; }
-.side-search-clear {
-  border: none; background: none; cursor: pointer; padding: 0 2px; line-height: 1;
-  color: var(--side-muted); font-size: 15px; border-radius: 4px;
-}
-.side-search-clear:hover { color: var(--side-text); background: var(--side-active); }
+/* 侧边栏搜索框已于 1.33 迁到文献表格工具栏（见 .lib-search）：
+   搜索只作用于当前文库，跟着表格走更顺手，侧栏也因此多出一行给导航。 */
 
 /* 侧边栏页脚：进度统计 + 一排图标动作按钮 */
 .side-foot-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
@@ -3966,3 +3981,57 @@ body.pn-resizing * { cursor: col-resize !important; }
 }
 
 
+
+/* ================= AI 助读：思考过程（reasoning） =================
+   · 折叠块与正文分开：思考不混进答案，但又能看到模型在想什么；
+   · 流式阶段自动展开、出正文后收起（细节见 public/app.js 的 prThinkHtml）。 */
+.pr-think {
+  margin: 0 0 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.pr-think > summary {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 9px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-3);
+  user-select: none;
+  list-style: none;
+}
+.pr-think > summary::-webkit-details-marker { display: none; }
+.pr-think > summary:hover { color: var(--text-2); background: var(--surface); }
+.pr-think > summary .ico { width: 13px; height: 13px; opacity: .8; }
+.pr-think-t { font-weight: 600; letter-spacing: .2px; }
+.pr-think-meta { margin-left: auto; font-size: 11px; color: var(--text-3); }
+.pr-think[open] > summary { border-bottom: 1px dashed var(--border-soft); }
+.pr-think-body {
+  padding: 7px 10px 9px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-2);
+  max-height: 260px;
+  overflow: auto;
+  white-space: normal;
+  word-break: break-word;
+}
+/* 思考模式按钮的三种档位：快速=冷色、开启=主色，一眼能看出当前档位 */
+.pr-think-btn.think-off { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.pr-think-btn.think-on { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 40%, transparent); background: var(--primary-soft); }
+
+/* ================= 打印（阅读器工具条的「打印」按钮） =================
+   打印时把整个应用界面藏掉，只留 #litPrintArea 里预先渲染好的页面图片，
+   这样打出来的是干净的论文页，而不是工具栏 + 侧栏的截图。 */
+.print-area { display: none; }
+@media print {
+  body > *:not(#litPrintArea) { display: none !important; }
+  #litPrintArea { display: block !important; }
+  html, body { background: #fff !important; }
+  .print-title { font-size: 12pt; font-weight: 700; margin: 0 0 8pt; }
+  .print-page { display: block; width: 100%; height: auto; page-break-after: always; break-after: page; }
+  .print-page:last-child { page-break-after: auto; break-after: auto; }
+  .print-para { font-size: 11pt; line-height: 1.7; margin: 0 0 8pt; }
+  @page { margin: 12mm; }
+}

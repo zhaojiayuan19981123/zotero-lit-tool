@@ -6,6 +6,8 @@
 import { getSettings } from './store.js';
 import { resolveActive, resolveProfile } from './modelCatalog.js';
 import { translateWithProvider, translateProviderLabel, __test__ as providerTest } from './translateProviders.js';
+import { translateWithBuiltin, builtinSystemPrompt } from './translateBuiltin.js';
+import { thinkingPayload } from './thinkingMode.js';
 
 /** 调用当前激活的大模型做翻译（OpenAI 兼容 chat completions）。 */
 function textFromCompletion(data) {
@@ -18,13 +20,18 @@ function baseURL(profile) { return String(profile.baseURL || '').trim().replace(
 function responseInput(messages) { return messages.map((m) => ({ role: m.role, content: [{ type: 'input_text', text: String(m.content || '') }] })); }
 function bodyFor(profile, messages, format) {
   if (format === 'responses') return { model: profile.model, input: responseInput(messages), max_output_tokens: 4096, stream: false };
-  return { model: profile.model, temperature: 0.2, stream: false, messages };
+  // 翻译不需要思考：推理模型默认会先想几千 token，既慢又容易把「思考」漏进译文。
+  // 不认这些参数的上游会在下面按 400 重发一次（见 translateViaLLM 的 catch）。
+  return {
+    model: profile.model, temperature: 0.2, stream: false, messages,
+    ...thinkingPayload({ provider: profile.provider, model: profile.model }, 'off'),
+  };
 }
 function compatibleMessages(system, user, profile) {
   if (profile?.systemPromptMode === 'user') return [{ role: 'user', content: '【任务要求】\n' + system + '\n\n【待翻译文本】\n' + user }];
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
-async function translateViaLLM(text, settings, target, profileId) {
+async function translateViaLLM(text, settings, target, profileId, opts = {}) {
   // 划词面板可以指定用哪条模型配置当翻译源（llm:<profileId>）；不指定就用当前激活配置
   let profile;
   if (profileId) {
@@ -37,7 +44,9 @@ async function translateViaLLM(text, settings, target, profileId) {
   if (!profile) throw new Error('未配置可用 AI 模型：请在 AI 设置中选择模型；自定义本地服务可不填密钥，但必须填写 Base URL 和模型名');
   if (!profile.baseURL || !profile.model) throw new Error('当前 AI 模型缺少 Base URL 或模型名称，请在 AI 设置中补全');
   const targetName = target === 'en' ? '英文' : '简体中文';
-  const system = '你是一名专业的学术翻译助手。请把用户输入的文本翻译成' + targetName + '。只输出翻译结果，不要任何解释、不要引号、不要保留原文。';
+  // 提示词与「内置翻译模型」共用一套：术语一致、公式/数字/引用占位符原样保留、只输出译文。
+  // 翻译质量的大部分差异来自这里，而不是模型本身。
+  const system = builtinSystemPrompt(targetName, { glossaryHint: opts?.glossaryHint || '' });
   const messages = compatibleMessages(system, text, profile);
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 90000);
   const headers = { 'Content-Type': 'application/json' }; if (profile.authMode !== 'none' && profile.apiKey) headers.Authorization = 'Bearer ' + profile.apiKey;
@@ -72,7 +81,12 @@ export async function translate(text, settings, opts = {}) {
   const provider = opts.provider || s.translateProvider || 'siliconflow';
   // 历史字段 siliconflow 实际表示“使用当前激活的 AI 模型”，不再只读旧的 baseURL/apiKey/model，
   // 从而避免切换多模型后翻译仍悄悄走旧配置。
-  if (provider === 'siliconflow') return translateViaLLM(t, s, target, opts.profileId);
+  // 内置翻译模型：固定的免费小模型 + 学术翻译提示词，比「当前激活的大模型」更快更省，
+  // 也比网页版机器翻译准（术语、公式、引用编号都按论文规则保护）。
+  if (provider === 'builtin') {
+    return translateWithBuiltin(t, s, target, { signal: opts.signal, glossaryHint: opts.glossaryHint });
+  }
+  if (provider === 'siliconflow') return translateViaLLM(t, s, target, opts.profileId, opts);
   if (provider === 'deepl' && !s.deeplKey && !s.deeplEndpoint) {
     throw new Error('未配置 DeepL API Key，请在设置中填写');
   }

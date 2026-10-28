@@ -10,7 +10,14 @@ import katex from 'katex';
 import mammoth from 'mammoth';
 
 import { extractPdfText } from './src/pdfParser.js';
-import { extract, FIELDS, TYPE_FIELDS } from './src/aiExtractor.js';
+import {
+  normalizeThinkingMode, withThinking, looksLikeThinkingParamError, THINKING_KEYS, modelMayThink,
+} from './src/thinkingMode.js';
+import {
+  extract, FIELDS, TYPE_FIELDS,
+  normalizeDocType as normalizeDocTypeShared,
+  DOC_TYPE_LABELS as DOC_TYPE_LABEL_MAP,
+} from './src/aiExtractor.js';
 import { createParseTracker } from './src/parseProgress.js';
 import { detectDocLanguage } from './src/docLanguage.js';
 import {
@@ -248,6 +255,26 @@ function completionText(data) {
   return '';
 }
 
+// ---------- 思考过程（reasoning）的取法 ----------
+// 同一个语义各家字段名不同：DeepSeek / 硅基流动用 reasoning_content，OpenRouter 用 reasoning，
+// 有些网关用 thinking；Responses API 走的是 response.reasoning*.delta 事件。
+// 这里只负责「从一帧里把思考文字抠出来」，正文一律不碰 —— 思考与正文混在一起会让
+// 用户看到的答案里冒出「我需要先分析…」这类不该出现的推理旁白。
+function reasoningOf(data, eventType = '') {
+  const choice = data?.choices?.[0];
+  const d = (choice?.delta && typeof choice.delta === 'object') ? choice.delta : null;
+  const m = (choice?.message && typeof choice.message === 'object') ? choice.message : null;
+  const picked = d?.reasoning_content ?? d?.reasoning ?? d?.thinking
+    ?? m?.reasoning_content ?? m?.reasoning
+    ?? data?.reasoning_content ?? data?.reasoning;
+  if (typeof picked === 'string' && picked) return picked;
+  if (String(eventType || '').toLowerCase().includes('reasoning')) {
+    const v = data?.delta ?? data?.text ?? '';
+    if (typeof v === 'string' && v) return v;
+  }
+  return '';
+}
+
 function isSystemRoleError(detail) {
   return /system.*(?:role|message)|(?:role|message).*system|unsupported.*system|invalid.*system/i.test(String(detail || ''));
 }
@@ -357,6 +384,8 @@ function payloadForModel(profile, payload, format, stream, assistantStyle = RESP
     if (max_tokens != null) next.max_output_tokens = max_tokens;
     // gpt-5 系列与 responses 端点都不接受 temperature
     delete next.temperature;
+    // responses 端点也不认 chat 的思考参数（enable_thinking / thinking_budget…），一律摘掉
+    for (const k of THINKING_KEYS) delete next[k];
     return next;
   }
   return { ...payload, messages, stream };
@@ -441,7 +470,7 @@ function endpointFailureMessage(up, detail) {
  * 对**一条**配置发起调用（单供应商版本）。多供应商的故障转移由下面的 fetchModelCompletion 负责，
  * 这里只管「同一条配置内部的端点回退」（chat / responses、补 /v1、换 assistant 写法）。
  */
-async function fetchModelCompletionOnce(profile, payload, { stream = false, timeoutMs = 0 } = {}) {
+async function fetchModelCompletionOnce(profile, payload, { stream = false, timeoutMs = 0, thinking = 'auto' } = {}) {
   const budgetMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : currentRequestTimeoutMs();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), budgetMs);
@@ -450,26 +479,35 @@ async function fetchModelCompletionOnce(profile, payload, { stream = false, time
   // 返回句柄：cancel 清超时定时器；abort 主动掐断上游（路由器决定「换下一家」时要用，避免留着半开的 SSE 连接）
   const done = (up) => ({ up, cancel: () => clearTimeout(timer), abort: () => controller.abort() });
 
-  // 同一端点内的一次请求（含「服务拒绝 system role」的兜底重发）
+  // 同一端点内的一次请求（含两种兜底重发：服务拒绝 system role / 上游不认「思考」参数）
+  //
+  // 思考模式在这里落地，而不是在调用方拼 payload：所有走聊天的能力（AI 助读、论文对话、
+  // 审稿意见翻译、本地端口）都要经过这个函数，改一处就全都有；而且 400 兜底也只有
+  // 在这里才拿得到真实的上游报错。
+  let thinkMode = normalizeThinkingMode(thinking);
   const send = async (attempt) => {
     const url = modelEndpoint(profile, attempt.format, attempt.basePrefix);
-    const build = (messages) => JSON.stringify(payloadForModel(
+    const build = (messages, mode = thinkMode) => JSON.stringify(payloadForModel(
       profile,
-      messages ? { ...payload, messages } : payload,
+      withThinking(messages ? { ...payload, messages } : payload, profile, mode),
       attempt.format, stream, attempt.assistantStyle,
     ));
-    let up = await modelFetch(url, {
-      method: 'POST', headers: modelHeaders(profile), signal: controller.signal, body: build(null),
+    const post = (body) => modelFetch(url, {
+      method: 'POST', headers: modelHeaders(profile), signal: controller.signal, body,
     });
-    if (!up.ok && profile?.systemPromptMode === 'auto') {
-      const detail = await up.text().catch(() => '');
-      if (isSystemRoleError(detail)) {
-        up = await modelFetch(url, {
-          method: 'POST', headers: modelHeaders(profile), signal: controller.signal,
-          body: build(flattenSystemMessages(payload.messages)),
-        });
-      } else {
-        up._litErrorText = detail;
+    let up = await post(build(null));
+    if (!up.ok) {
+      const detail = up._litErrorText ?? await up.text().catch(() => '');
+      up._litErrorText = detail;
+      // ① 不认「思考」参数（400/422 且点明参数）：摘掉重发一次，别让加速开关把功能搞挂。
+      //    只重发一次；重发后仍失败就按原样报错，避免无谓的重复请求。
+      if (thinkMode !== 'auto' && looksLikeThinkingParamError(up.status, detail)) {
+        thinkMode = 'auto';
+        up = await post(build(null, 'auto'));
+        if (!up.ok) { up._litErrorText = up._litErrorText ?? await up.text().catch(() => ''); }
+      } else if (profile?.systemPromptMode === 'auto' && isSystemRoleError(detail)) {
+        // ② 服务拒绝 system role：把系统指令并进第一条用户消息
+        up = await post(build(flattenSystemMessages(payload.messages)));
       }
     }
     up._litFormat = attempt.format;
@@ -518,21 +556,29 @@ async function fetchModelCompletionOnce(profile, payload, { stream = false, time
   }
 }
 
-async function readLLMResponse(up, { onDelta } = {}) {
+async function readLLMResponse(up, { onDelta, onReasoning } = {}) {
   const contentType = String(up.headers?.get?.('content-type') || '').toLowerCase();
   let full = '';
+  let reasoning = '';
   const emit = (delta) => {
     if (!delta) return;
     full += delta;
     if (onDelta) onDelta(delta);
+  };
+  const emitReasoning = (delta) => {
+    if (!delta) return;
+    reasoning += delta;
+    if (onReasoning) onReasoning(delta);
   };
   if (contentType.includes('application/json')) {
     const raw = await up.text();
     let data;
     try { data = JSON.parse(raw); } catch (_) { throw new Error(`模型返回的不是有效 JSON：${raw.slice(0, 200) || '空响应'}`); }
     if (data?.error) throw new Error(typeof data.error === 'string' ? data.error : (data.error.message || '模型返回错误'));
+    // 非流式也可能带思考：DeepSeek / 硅基流动放在 message.reasoning_content
+    emitReasoning(reasoningOf(data));
     emit(completionText(data));
-    return { full, aborted: false, responseType: 'json' };
+    return { full, reasoning, aborted: false, responseType: 'json' };
   }
   const reader = up.body?.getReader?.();
   if (!reader) throw new Error('模型没有返回可读取的响应正文');
@@ -553,6 +599,8 @@ async function readLLMResponse(up, { onDelta } = {}) {
       const isCompleted = eventType.includes('response.completed') || eventType.includes('response.done');
       const isDeltaEvent = eventType.includes('delta') || eventType.includes('output_text');
       const delta = isCompleted ? '' : (data?.delta ?? data?.output_text?.delta ?? (isDeltaEvent ? completionText(data) : (eventType ? '' : completionText(data))));
+      // 思考过程（reasoning）与正文分开走两条通道：正文进 full，思考只做展示
+      if (!isCompleted) emitReasoning(reasoningOf(data, eventType, delta));
       emit(typeof delta === 'string' ? delta : '');
     } catch (e) {
       // SSE 常会把 JSON 拆块；只有明确模型错误才抛出，其他坏行等后续块。
@@ -574,19 +622,29 @@ async function readLLMResponse(up, { onDelta } = {}) {
     if (e?.name === 'AbortError' || /aborted|socket|premature/i.test(String(e?.message || ''))) aborted = true;
     else throw e;
   }
-  return { full, aborted, responseType: 'sse' };
+  return { full, reasoning, aborted, responseType: 'sse' };
 }
 
 // 把上游的 OpenAI 兼容流逐块转发给浏览器，也接受“stream=true 却返回普通 JSON”的兼容网关。
 // sink 是「往哪儿写」的抽象：本应用前端用 sseSend（自定义 {delta} 包），
 // 本地 OpenAI 兼容端口用标准 chat.completion.chunk —— 路由与故障转移逻辑两者共用。
-async function pipeLLMStream(up, sink, { onDelta } = {}) {
-  return readLLMResponse(up, { onDelta: (delta) => { sink.delta(delta); onDelta?.(delta); } });
+async function pipeLLMStream(up, sink, { onDelta, onReasoning } = {}) {
+  return readLLMResponse(up, {
+    onDelta: (delta) => { sink.delta(delta); onDelta?.(delta); },
+    onReasoning: (delta) => { sink.reasoning?.(delta); onReasoning?.(delta); },
+  });
 }
 
-/** 默认 sink：写成本应用前端认识的 SSE 格式 */
+/**
+ * 默认 sink：写成本应用前端认识的 SSE 格式。
+ * 思考过程用独立的 {reasoning} 事件，前端把它渲染在「思考过程」折叠块里，
+ * 不会混进正文气泡 —— 老前端不认识这个字段会自动忽略，不影响兼容。
+ */
 function resSink(res) {
-  return { delta: (delta) => sseSend(res, { delta }) };
+  return {
+    delta: (delta) => sseSend(res, { delta }),
+    reasoning: (delta) => sseSend(res, { reasoning: delta }),
+  };
 }
 
 // ---------- 模型路由：把「一次调用」升级成「按优先级依次尝试多条模型配置」 ----------
@@ -672,16 +730,16 @@ function withProviderNotes(request, tried) {
  * 流式：单条配置版本（含「流式失败退非流式」兜底）。
  * 多供应商的故障转移在下面的 streamModelResponse 里做 —— 它需要知道「有没有已经吐字给客户端」。
  */
-async function streamModelResponseOnce(profile, payload, sink, { onDelta } = {}) {
+async function streamModelResponseOnce(profile, payload, sink, { onDelta, onReasoning, thinking = 'auto' } = {}) {
   const preferNonStream = profile?.streamMode === 'nonstream';
-  let request = await fetchModelCompletionOnce(profile, payload, { stream: !preferNonStream });
+  let request = await fetchModelCompletionOnce(profile, payload, { stream: !preferNonStream, thinking });
   try {
     if (!request.up.ok) {
       const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
       // auto 模式：服务不支持 stream 时改为普通 JSON；强制流式模式则直接报告问题。
       if (!preferNonStream && profile?.streamMode === 'auto') {
         request.cancel();
-        request = await fetchModelCompletionOnce(profile, payload, { stream: false });
+        request = await fetchModelCompletionOnce(profile, payload, { stream: false, thinking });
       } else {
         throw new Error(endpointFailureMessage(request.up, detail));
       }
@@ -690,16 +748,17 @@ async function streamModelResponseOnce(profile, payload, sink, { onDelta } = {})
       const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
       throw new Error(endpointFailureMessage(request.up, detail));
     }
-    let result = await pipeLLMStream(request.up, sink, { onDelta });
+    let result = await pipeLLMStream(request.up, sink, { onDelta, onReasoning });
     // 非标准网关常在 stream=true 下直接断开或没有 token；auto 退回普通 JSON，前端仍能收到内容。
-    if (!result.full.trim() && !result.aborted && !preferNonStream && profile?.streamMode === 'auto') {
+    // 已经吐过思考过程的不再退回：否则同一段思考会在界面上出现两遍。
+    if (!result.full.trim() && !result.reasoning?.trim() && !result.aborted && !preferNonStream && profile?.streamMode === 'auto') {
       request.cancel();
-      request = await fetchModelCompletionOnce(profile, payload, { stream: false });
+      request = await fetchModelCompletionOnce(profile, payload, { stream: false, thinking });
       if (!request.up.ok) {
         const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
         throw new Error(`AI 流式响应为空，非流式兜底也失败（${request.up.status}）：${clip(detail, 300)}`);
       }
-      result = await pipeLLMStream(request.up, sink, { onDelta });
+      result = await pipeLLMStream(request.up, sink, { onDelta, onReasoning });
     }
     return result;
   } finally { request.cancel?.(); }
@@ -783,7 +842,7 @@ async function fetchModelCompletion(preferred, payload, opts = {}) {
  * 关键约束：**一旦已经往客户端写过 token 就不能再换供应商** —— 响应体已经开始输出，
  * 换一家会把两家的内容拼在一起。所以只在「还没吐字」时切换，其余情况如实报错。
  */
-async function streamModelResponse(preferred, payload, res, { onDelta, settings, sink } = {}) {
+async function streamModelResponse(preferred, payload, res, { onDelta, onReasoning, settings, sink, thinking = 'auto' } = {}) {
   const plan = routerPlan(preferred, settings);
   if (!plan.candidates.length) throw new Error(noModelError());
   const out = sink || resSink(res);
@@ -797,6 +856,7 @@ async function streamModelResponse(preferred, payload, res, { onDelta, settings,
       const startedAt = Date.now();
       try {
         const result = await streamModelResponseOnce(candidate, bodyForCandidate(payload, candidate, preferred), out, {
+          onReasoning, thinking,
           onDelta: (delta) => { emitted = true; onDelta?.(delta); },
         });
         const latencyMs = Date.now() - startedAt;
@@ -951,6 +1011,11 @@ function activeModel(settings) {
   return catalog.resolveActive(settings || store.getSettings());
 }
 
+/** 文库类型的中文名（实证类 / 模型类 / 算法类），提示文本统一走这里 */
+function docTypeLabel(value) {
+  return DOC_TYPE_LABEL_MAP[normalizeDocTypeShared(value)] || '实证类';
+}
+
 /**
  * 按 profileId 取模型配置，供「单个对话临时切换模型」使用。
  *
@@ -975,9 +1040,23 @@ function resolveRequestModel(profileId) {
   return { profile: catalog.resolveProfile(raw) };
 }
 
+/**
+ * 解析链路用的「扁平设置」：把当前**激活模型**摊平成 aiExtractor 认识的老字段形状。
+ *
+ * 为什么不能直接把 store.getSettings() 丢进去：那份设置里的 aiProvider / baseURL / apiKey / model
+ * 是历史遗留字段，只在「保存设置」时才与 modelProfiles 同步。用户在模型配置里换了模型或 Key、
+ * 但没触发一次保存时，解析就会按旧配置跑 —— 轻则用错模型，重则 Key 为空直接退回规则提取，
+ * 用户看到的是「AI 解析结果很敷衍」，其实根本没调用模型。
+ */
+function aiSettingsForParse(settings) {
+  const s = settings || store.getSettings();
+  const am = activeModel(s);
+  if (!am) return s;
+  return { ...s, aiProvider: am.provider, baseURL: am.baseURL, apiKey: am.apiKey, model: am.model };
+}
+
 // 构造「未配置」时的统一中文提示
-function noModelError() {
-  const s = store.getSettings();
+function noModelError() {  const s = store.getSettings();
   if (s.aiProvider === 'none') return '已设置为「不使用 AI」，请到「AI 设置」里启用一个模型';
   return '还没有可用的模型：请在「AI 设置」中添加模型并填写 API 密钥';
 }
@@ -1204,7 +1283,7 @@ export function renamePdfFileToTitle(record) {
  *   避免「界面已经标成超时失败、后台又把结果写回库里」这种鬼状态。
  */
 async function parseRecord(record, settings, docType, tracker = null, job = null) {
-  const type = docType || record.docType || 'empirical';
+  const type = normalizeDocTypeShared(docType || record.docType || 'empirical');
   const startedAtIso = new Date().toISOString();
   // 解析期间用户可能还在改「我的思考」、加高亮批注、调星级。收尾时要合并「此刻库里的记录」，
   // 而不是拿批次开始时那份快照覆盖 —— 否则一顿并发解析下来，刚写的东西全没了。
@@ -1572,8 +1651,11 @@ export function createApp({
     },
   });
 
+  // 三类文库：实证类 empirical / 模型类 model / 算法类 algorithm（CCF）。
+  // 归一化逻辑统一放在 src/aiExtractor.js（字段与提示词也在那边），这里只做转发，
+  // 免得「服务端认三种、提取器只认两种」这种对不上的情况。
   function normalizeDocType(value) {
-    return value === 'model' ? 'model' : 'empirical';
+    return normalizeDocTypeShared(value);
   }
 
   /**
@@ -1924,7 +2006,7 @@ export function createApp({
   }
 
   app.post('/api/parse', async (req, res) => {
-    const settings = store.getSettings();
+    const settings = aiSettingsForParse();
     const docType = req.body?.docType;
     // 先把上次崩溃/超时留下的「假解析中」收回来，否则它们会被下面的过滤跳过
     reclaimStaleParsing();
@@ -1967,7 +2049,7 @@ export function createApp({
     }
     // 单篇也走同一个执行器：同样有超时兜底，界面不会因为一次卡住就永远转圈
     const { jobId } = await runParseJobs([item], {
-      settings: store.getSettings(),
+      settings: aiSettingsForParse(),
       docType: req.body?.docType,
       concurrency: 1,
       label: '重新解析',
@@ -2544,7 +2626,7 @@ export function createApp({
   // 与 /api/parse 的区别：不跳过 status==='done' 的记录，强制执行一轮完整 AI 解析；
   // 也可以指定只重解析某几篇（ids）。前端「批量重新解析」按钮走这里。
   app.post('/api/literature/batch-reparse', async (req, res) => {
-    const settings = store.getSettings();
+    const settings = aiSettingsForParse();
     const docType = req.body?.docType;
     // 卡住的「假解析中」先收回来，这样才能被这次批量重跑救活
     reclaimStaleParsing();
@@ -2604,7 +2686,7 @@ export function createApp({
       if (!col) return res.status(400).json({ error: '目标分类不存在，可能已被删除' });
       const incompatible = targets.filter((item) => normalizeDocType(item.docType) !== col.docType);
       if (incompatible.length) {
-        return res.status(400).json({ error: `有 ${incompatible.length} 篇文献不属于「${col.docType === 'model' ? '模型类' : '实证类'}文库」，无法批量移动` });
+        return res.status(400).json({ error: `有 ${incompatible.length} 篇文献不属于「${docTypeLabel(col.docType)}文库」，无法批量移动` });
       }
     }
     const collectionId = target ? String(target) : null;
@@ -2617,7 +2699,7 @@ export function createApp({
 
   app.post('/api/collections', (req, res) => {
     const name = String(req.body?.name || '').trim();
-    const docType = req.body?.docType === 'model' ? 'model' : 'empirical';
+    const docType = normalizeDocType(req.body?.docType);
     if (!name) return res.status(400).json({ error: '分类名称不能为空' });
     const list = store.listCollections();
     const col = { id: store.newId(), name, docType, createdAt: new Date().toISOString() };
@@ -3469,7 +3551,7 @@ export function createApp({
 
     const litBlock = chosen.length
       ? chosen.map((it, idx) => {
-          return `【${idx + 1}】${clipText(it.title, 80) || '（无标题）'} | ${clipText(it.authors, 40) || '佚名'} | ${clipText(it.journal, 40)} ${clipText(it.year, 8)} | ${it.docType === 'model' ? '模型类' : '实证类'}`
+          return `【${idx + 1}】${clipText(it.title, 80) || '（无标题）'} | ${clipText(it.authors, 40) || '佚名'} | ${clipText(it.journal, 40)} ${clipText(it.year, 8)} | ${docTypeLabel(it.docType)}`
             + (it.summary ? `\n  总结：${clipText(it.summary, 160)}` : '')
             + (it.innovation ? `\n  创新点：${clipText(it.innovation, 120)}` : '')
             + (it.method ? `\n  方法：${clipText(it.method, 120)}` : '')
@@ -3671,7 +3753,7 @@ export function createApp({
         messages: [{ role: 'system', content: buildSystemPrompt(effectiveContent) }, ...llmMsgs],
         temperature: 0.6,
         max_tokens: 4096,
-      }, res);
+      }, res, { thinking: req.body?.thinking });
       full = r.full;
       replyComplete = !r.aborted && !!full.trim();
       if (!replyComplete && !r.aborted) sseSend(res, { error: 'AI 未返回有效内容。请到 AI 设置中重新测试此模型；本地服务可改为「仅非流式」模式。' });
@@ -3820,6 +3902,8 @@ export function createApp({
         model: {
           id: answerModel.id, label: answerModel.label, providerName: answerModel.providerName,
           model: answerModel.model, vision: answerModel.vision,
+          // 前端据此决定「思考过程」折叠块与「快速模式」开关要不要出现
+          mayThink: modelMayThink(answerModel),
         },
         directVision,
       });
@@ -3851,7 +3935,7 @@ export function createApp({
         messages: finalMessages,
         temperature: 0.3,
         max_tokens: 4096,
-      }, res);
+      }, res, { thinking: req.body?.thinking });
       if (!r.full && !r.aborted) sseSend(res, { error: 'AI 未返回有效内容。请到 AI 设置中重新测试此模型，或选择「仅非流式」兼容模式。' });
       sseEnd(res);
     } catch (e) {

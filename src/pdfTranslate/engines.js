@@ -19,6 +19,8 @@ import path from 'node:path';
 import * as catalog from '../modelCatalog.js';
 import { cjkRatio } from './layout.js';
 import { translateBatchWithProvider, translateProviderLabel, NON_LLM_PROVIDERS } from '../translateProviders.js';
+import { resolveBuiltinProfile } from '../translateBuiltin.js';
+import { thinkingPayload } from '../thinkingMode.js';
 
 // ==================== 目标语言 ====================
 
@@ -406,10 +408,11 @@ export function parseSegments(raw, expected) {
   return out.some((v) => v === null) ? null : out;
 }
 
-export function createLlmEngine({ settings, profileId, options = {}, onLog }) {
-  const profile = profileId
+export function createLlmEngine({ settings, profileId, profile: profileArg, options = {}, onLog }) {
+  // profileArg 供「内置翻译模型」这类自带 profile 的引擎直接注入，不必先落进模型配置列表
+  const profile = profileArg || (profileId
     ? catalog.resolveProfile((settings.modelProfiles || []).find((p) => p.id === profileId))
-    : catalog.resolveActive(settings);
+    : catalog.resolveActive(settings));
   if (!profile) {
     throw new Error('没有可用的大模型配置，请先在「设置 → 模型配置」中填写 Base URL 与 API Key');
   }
@@ -450,6 +453,8 @@ export function createLlmEngine({ settings, profileId, options = {}, onLog }) {
           { role: 'user', content: formatSegments(texts) },
         ],
         stream: false,
+        // 翻译不需要思考：推理模型默认先想几千 token，既慢又会把推理写进译文
+        ...thinkingPayload({ provider: profile.provider, model: profile.model }, 'off'),
       };
       const res = await fetch(url, {
         method: 'POST',
@@ -649,9 +654,15 @@ export function createEngine({ engine = 'auto', settings, options = {}, onLog })
   let kind = engine;
   if (kind === 'auto') {
     const provider = settings.translateProvider || 'siliconflow';
-    kind = NON_LLM_PROVIDERS.has(provider) ? provider : 'llm';
+    // builtin 是「大模型路径」而不是传统翻译服务，必须自己分一支出来
+    kind = provider === 'builtin' ? 'builtin' : (NON_LLM_PROVIDERS.has(provider) ? provider : 'llm');
   }
   if (kind === 'deepl') return createDeepLEngine({ settings, options, onLog });
+  if (kind === 'builtin') {
+    // 内置翻译模型：复用硅基流动的 Key，模型固定为免费小模型（拿不到时给出可操作的提示）
+    const profile = resolveBuiltinProfile(settings);
+    return createLlmEngine({ settings, profile, options, onLog });
+  }
   if (NON_LLM_PROVIDERS.has(kind)) return createProviderEngine({ provider: kind, settings, options });
   return createLlmEngine({ settings, profileId: options.profileId, options, onLog });
 }

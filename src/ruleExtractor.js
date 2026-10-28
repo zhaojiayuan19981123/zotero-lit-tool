@@ -34,6 +34,12 @@ export function extractByRules(text, pdfInfo = {}) {
     method: '',
     researchDesign: '',
     constructs: '',
+    // 实证类变量清单（规则回退时留空：这些只能靠读懂论文才能分出来，正则不可靠）
+    independentVar: '',
+    dependentVar: '',
+    moderatorVar: '',
+    mediatorVar: '',
+    controlVar: '',
     results: '',
     conclusion: '',
     criticalThinking: '',

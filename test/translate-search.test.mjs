@@ -177,11 +177,14 @@ test('密钥缺失时各服务给出格式提示错误', async () => {
   await assert.rejects(translate('x', { translateProvider: 'nosuch' }), /未知翻译服务/);
 });
 
-test('服务清单元数据：9 项、标签可查、NON_LLM 不含 LLM', () => {
-  assert.equal(TRANSLATE_PROVIDERS.length, 9);
+test('服务清单元数据：10 项、标签可查、NON_LLM 不含 LLM', () => {
+  assert.equal(TRANSLATE_PROVIDERS.length, 10);
   assert.equal(translateProviderLabel('volcweb'), '火山翻译 · 网页版（免密钥）（推荐）');
   assert.equal(translateProviderLabel('youdaoweb'), '有道翻译 · 网页版（免密钥）');
+  assert.equal(translateProviderLabel('builtin'), '内置翻译模型 · 免费（学术优化，推荐）');
+  // builtin 是「模型固定 + 免费」的大模型引擎，不是传统翻译服务，不能走 NON_LLM 路径
   assert.ok(!NON_LLM_PROVIDERS.has('siliconflow'));
+  assert.ok(!NON_LLM_PROVIDERS.has('builtin'));
   for (const id of ['deepl', 'volcweb', 'youdaoweb', 'volcapi', 'youdaoapi', 'baidu', 'tencent', 'free']) {
     assert.ok(NON_LLM_PROVIDERS.has(id), id + ' 应在 NON_LLM_PROVIDERS 中');
   }

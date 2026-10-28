@@ -20,16 +20,29 @@
     abstract: { key: 'abstract', label: '摘要(中文)', type: 'md', ai: true, w: 240 },
     // —— 实证类深度解析字段（顺序与 src/aiExtractor.js 的 TYPE_FIELDS.empirical 一致）——
     researchQuestion: { key: 'researchQuestion', label: '研究问题', type: 'md', ai: true, w: 280 },
+    scienceQuestion: { key: 'scienceQuestion', label: '科学问题', type: 'md', ai: true, w: 280 },
     researchObject: { key: 'researchObject', label: '研究对象（样本）', type: 'md', ai: true, w: 260 },
     coreFindings: { key: 'coreFindings', label: '核心结论', type: 'md', ai: true, w: 300 },
     mechanism: { key: 'mechanism', label: '作用机制（为什么）', type: 'md', ai: true, w: 280 },
     boundaryConditions: { key: 'boundaryConditions', label: '边界条件/异质性', type: 'md', ai: true, w: 260 },
     method: { key: 'method', label: '研究方法', type: 'md', ai: true, w: 200 },
     researchDesign: { key: 'researchDesign', label: '研究设计', type: 'md', ai: true, w: 260 },
-    constructs: { key: 'constructs', label: '构念', type: 'md', ai: true, w: 240 },
+    constructs: { key: 'constructs', label: '构念（测量/操作化）', type: 'md', ai: true, w: 240 },
+    // 变量清单：五个字段各自独立，AI 只给干净的变量名（一个变量一段）
+    independentVar: { key: 'independentVar', label: '自变量', type: 'md', ai: true, w: 180 },
+    dependentVar: { key: 'dependentVar', label: '因变量', type: 'md', ai: true, w: 180 },
+    moderatorVar: { key: 'moderatorVar', label: '调节变量', type: 'md', ai: true, w: 170 },
+    mediatorVar: { key: 'mediatorVar', label: '中介变量', type: 'md', ai: true, w: 170 },
+    controlVar: { key: 'controlVar', label: '控制变量', type: 'md', ai: true, w: 190 },
     criticalThinking: { key: 'criticalThinking', label: '批判性思考', type: 'md', ai: true, w: 260 },
     reviewUse: { key: 'reviewUse', label: '对文献综述有什么用', type: 'md', ai: true, w: 280 },
     researchGap: { key: 'researchGap', label: '研究空白', type: 'md', ai: true, w: 260 },
+    // —— 算法类（CCF）专属 ——
+    experimentalDesign: { key: 'experimentalDesign', label: '实验设计', type: 'md', ai: true, w: 280 },
+    ablationDesign: { key: 'ablationDesign', label: '消融实验设计', type: 'md', ai: true, w: 260 },
+    dataset: { key: 'dataset', label: '数据集', type: 'md', ai: true, w: 200 },
+    metrics: { key: 'metrics', label: '评价指标', type: 'md', ai: true, w: 200 },
+    researchField: { key: 'researchField', label: '研究领域', type: 'text', ai: true, w: 160 },
     // 我的思考：用户手写，AI 解析不会写入（服务端字段集里本来就没有这个 key）
     thoughts: { key: 'thoughts', label: '我的思考', type: 'md', w: 220 },
     // —— 旧版字段：实证类界面已不再展示，但模型类与历史记录仍在用，定义保留 ——
@@ -44,18 +57,44 @@
   };
   // 两个文库各自的字段排布（界面分开，不一致）
   // 实证类：导入时间 → 书目 → 摘要 → 研究问题/对象/结论/机制/边界 → 方法/设计/构念 →
-  //        批判性思考 → 我的思考（手写） → 对文献综述的用处 → 研究空白
+  //        自变量/因变量/调节/中介/控制 → 批判性思考 → 我的思考（手写） → 对文献综述的用处 → 研究空白
   const TYPE_ORDER = {
     empirical: ['importedAt', 'title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract',
-      'researchQuestion', 'researchObject', 'coreFindings', 'mechanism', 'boundaryConditions',
-      'method', 'researchDesign', 'constructs', 'criticalThinking', 'thoughts', 'reviewUse', 'researchGap'],
-    model: ['importedAt', 'title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract', 'background',
-      'model', 'method', 'paramDiscussion', 'results', 'thoughts', 'summary', 'innovation'],
+      'researchQuestion', 'scienceQuestion', 'researchObject', 'coreFindings', 'mechanism', 'boundaryConditions',
+      'method', 'researchDesign', 'constructs',
+      'independentVar', 'dependentVar', 'moderatorVar', 'mediatorVar', 'controlVar',
+      'criticalThinking', 'thoughts', 'reviewUse', 'researchGap'],
+    // 模型类：用户要求把「研究问题/科学问题/核心结论/边界条件/研究设计/对综述有什么用/作用机制」
+    // 也配进来，与原有的 背景—模型—求解—参数—结果—总结—创新 并存；分析性字段在前（读论文时先看这些），
+    // 建模细节在后。
+    model: ['importedAt', 'title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract',
+      'researchQuestion', 'scienceQuestion', 'coreFindings', 'mechanism', 'boundaryConditions',
+      'researchDesign', 'reviewUse', 'background', 'model', 'method', 'paramDiscussion', 'results',
+      'thoughts', 'summary', 'innovation'],
+    // 算法类（CCF）：书目 → 问题与结论 → 评价 → 实验证据 → 用户笔记 → 空白 → 领域
+    algorithm: ['importedAt', 'title', 'authors', 'journal', 'year', 'doi', 'keywords', 'abstract',
+      'researchQuestion', 'scienceQuestion', 'coreFindings', 'researchDesign', 'criticalThinking',
+      'reviewUse', 'experimentalDesign', 'ablationDesign', 'thoughts', 'researchGap',
+      'dataset', 'metrics', 'researchField'],
   };
   const LIB_META = {
     empirical: { label: '实证类文库', icon: 'flask' },
     model: { label: '模型类文库', icon: 'chart' },
+    algorithm: { label: '算法类文库', icon: 'puzzle' },
   };
+  const LIB_TYPES = ['empirical', 'model', 'algorithm'];
+  /**
+   * 列标题。少数几列在不同文库下语义不同：
+   *   · 模型类的 method 是「求解方法」（怎么解这个模型），实证类才是「研究方法」；
+   *   · 算法类的 journal 要额外提示「CCF + A/B/C 分级」（AI 解析时已按这个格式产出）。
+   */
+  const colLabel = (key, type) => {
+    if (key === 'method' && type === 'model') return '求解方法';
+    if (key === 'journal' && type === 'algorithm') return '期刊/会议（CCF）';
+    return CONTENT_COLS[key]?.label || key;
+  };
+  /** 文档类型的中文名（三类文库统一从这里取，别在各处写三元表达式） */
+  const docTypeLabel = (t) => (LIB_META[t] ? LIB_META[t].label.replace('文库', '') : '实证类');
 
   const STATUS_LABEL = { done: '已完成', parsing: '解析中', pending: '待解析', error: '解析失败' };
   const PROGRESS_LIST = ['未阅读', '阅读中', '已阅读'];
@@ -498,7 +537,7 @@
 
   // ============ 文献中心：文库切换条 ============
   function renderLibBar() {
-    for (const type of ['empirical', 'model']) {
+    for (const type of LIB_TYPES) {
       const root = document.querySelector(`[data-rootlib="${type}"]`);
       if (root) {
         root.classList.toggle('active', lib.type === type);
@@ -646,7 +685,7 @@
     const type = types[0];
     const cols = collections.filter((c) => c.docType === type);
     $('classTarget').innerHTML = '<option value="">未分类</option>' + cols.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
-    $('classModalHint').textContent = `将 ${classMoveIds.length} 篇${type === 'model' ? '模型类' : '实证类'}文献移动到：`;
+    $('classModalHint').textContent = `将 ${classMoveIds.length} 篇${docTypeLabel(type)}文献移动到：`;
     $('classModal').classList.remove('hidden');
   }
 
@@ -664,12 +703,29 @@
     for (const key of TYPE_ORDER[lib.type]) {
       if (!visible.has(key)) continue;
       const c = CONTENT_COLS[key];
-      const label = (key === 'method' && lib.type === 'model') ? '求解方法' : c.label;
-      cols.push({ ...c, label });
+      cols.push({ ...c, label: colLabel(key, lib.type) });
     }
     cols.push({ key: 'status', label: '解析状态', type: 'status', w: 92 });
     cols.push({ key: 'actions', label: '操作', type: 'actions', w: 122 });
     return cols.map((c) => ({ ...c, w: colWidths[c.key] || c.w }));
+  }
+
+  // ============ 文献搜索：全字段 + 模糊 + 相关性 ============
+  //
+  // 匹配与打分的纯逻辑在 public/lib-search.js（无 DOM 依赖，可单测）；
+  // 这里只负责「读输入框 → 交给它 → 拿回排好序的数组」。
+  // 放在工具栏右侧是因为搜索的作用域只是当前文库的这张表（1.33 从侧边栏迁来）。
+  const Search = window.LibSearch;
+
+  function searchQuery() {
+    return (($('libSearchInput') || el.searchInput)?.value || '').trim();
+  }
+
+  // 当前生效的关键词（供表格高亮用；filteredItems 每次都会刷新）
+  let activeTokens = [];
+  /** 转义 + 命中词包 <mark>，只用于标题/短文本字段 */
+  function highlight(text) {
+    return Search.highlight(text, activeTokens, esc);
   }
 
   // ============ 渲染 ============
@@ -680,17 +736,17 @@
     if (tab !== 'all') list = list.filter((i) => (i.readingProgress || '未阅读') === tab);
     const st = el.statusFilter.value;
     if (st !== 'all') list = list.filter((i) => i.status === st);
-    // 搜索关键字来源：侧边栏输入框（顶栏那个已随重构移除），兜底回落到旧 #searchInput
-    const q = (($('sideSearchInput') || el.searchInput)?.value || '').trim().toLowerCase();
-    if (q) list = list.filter((i) => Object.values(CONTENT_COLS).map((c) => i[c.key] || '').join(' ').toLowerCase().includes(q));
+    const q = searchQuery();
+    activeTokens = Search.tokens(q);
     const f = el.sortField.value;
-    list.sort((a, b) => {
+    // 有搜索词时相关性是主序，这个 cmp 只在同分时决定次序；没搜索词时它就是唯一的排序规则
+    const cmp = (a, b) => {
       let va = a[f] ?? '', vb = b[f] ?? '';
       if (f === 'year' || f === 'rating') { va = parseFloat(va) || 0; vb = parseFloat(vb) || 0; return sortOrder === 'asc' ? va - vb : vb - va; }
       va = String(va).toLowerCase(); vb = String(vb).toLowerCase();
       return sortOrder === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
-    });
-    return list;
+    };
+    return Search.rank(list, q, cmp);
   }
 
   function render() {
@@ -701,6 +757,13 @@
       ? collections.find((c) => c.id === lib.collectionId)?.name || '分类'
       : LIB_META[lib.type].label;
     el.statBadge.textContent = `${libName} · ${scope.length} 条 · 已完成 ${done}`;
+    // 搜索框内的命中计数：搜索时给个即时反馈，别让用户盯着表格数行
+    const countBadge = $('libSearchCount');
+    if (countBadge) {
+      const searching = !!searchQuery();
+      countBadge.classList.toggle('hidden', !searching);
+      if (searching) countBadge.textContent = `${scope.length} 篇`;
+    }
   }
 
   // ============ 批量选择 ============
@@ -764,6 +827,16 @@
     const cols = buildColumns();
     el.tbody.innerHTML = '';
     el.emptyState.classList.toggle('hidden', list.length > 0);
+    // 搜索无结果 ≠ 文库是空的，两种空状态要说不一样的话，否则用户会以为文献丢了
+    const searching = !!searchQuery();
+    const emptyTitle = el.emptyState?.querySelector('p');
+    const emptyHint = el.emptyState?.querySelector('.empty-hint');
+    if (emptyTitle) emptyTitle.textContent = searching ? '没有匹配的文献' : '当前文库暂无文献';
+    if (emptyHint) {
+      emptyHint.textContent = searching
+        ? '搜索覆盖标题、作者、关键词、摘要以及该文库的全部字段，且支持模糊匹配；试试更短的词或清空搜索框'
+        : '点击「批量上传 PDF」或把 PDF 直接拖入窗口；也可拖动行到上方分类进行归类';
+    }
     if (!list.length) return;
     list.forEach((it, idx) => {
       const tr = document.createElement('tr');
@@ -796,7 +869,7 @@
       }
       case 'title': {
         const v = it.title || '';
-        return `<div class="clamp cell-title" data-open="${it.id}" data-field="title" title="点击查看全文解析">${esc(v) || '<span class="cell-empty">（未命名）</span>'}</div>`;
+        return `<div class="clamp cell-title" data-open="${it.id}" data-field="title" title="点击查看全文解析">${highlight(v) || '<span class="cell-empty">（未命名）</span>'}</div>`;
       }
       case 'attach': return attachCell(it);
       case 'progress': {
@@ -842,7 +915,8 @@
       default: {
         const v = it[c.key] || '';
         if (!v) return '<span class="cell-empty">—</span>';
-        return `<div class="clamp cell-text" title="${esc(v)}">${esc(v)}</div>`;
+        // title 属性保留纯文本（转义），正文里把命中的关键词标出来
+        return `<div class="clamp cell-text" title="${esc(v)}">${highlight(v)}</div>`;
       }
     }
   }
@@ -878,7 +952,11 @@
     }
   }
 
-  function mdLines(v) { return String(v).split('\n').map((l) => l.trim()).filter(Boolean); }
+  // 解析字段从 1.33 起是段落格式：段与段之间空一行、每段开头空两格（两个全角空格 U+3000）。
+  // 所以这里**只去掉行尾空白**，不能 trim 行首 —— 否则首行缩进会被当成空白抹掉（用户明确要求要缩进）。
+  function mdLines(v) {
+    return String(v).split('\n').map((l) => l.replace(/[\s\u3000]+$/, '')).filter((l) => l.trim().length);
+  }
   function mdInline(v) {
     return renderMarkdown(v);
   }
@@ -1387,7 +1465,7 @@
       <div class="drawer-meta">
         ${chip('导入时间', importText, 'importedAt')} ${chip('作者', it.authors, 'authors')} ${chip('期刊/会议', it.journal, 'journal')} ${chip('年份', it.year, 'year')} ${chip('DOI', it.doi, 'doi')} ${chip('关键词', it.keywords, 'keywords')}
         ${col ? `<span class="meta-chip"><b>分类：</b>${esc(col.name)}</span>` : ''}
-        <span class="badge badge-source">${it.docType === 'model' ? '模型类' : '实证类'}</span>
+        <span class="badge badge-source">${docTypeLabel(it.docType || 'empirical')}</span>
         <button class="progress-badge progress-${it.readingProgress || '未阅读'}" data-dprogress>◔ ${it.readingProgress || '未阅读'}</button>
         <span class="stars" data-drating>${[1, 2, 3, 4, 5].map((n) => `<button class="star ${n <= Math.round(it.rating || 0) ? 'on' : ''}" data-dstar="${n}">★</button>`).join('')}</span>
         ${it.status !== 'done' ? `<span class="badge badge-${it.status}" data-field-anchor="status" title="${esc(it.error || '')}">${STATUS_LABEL[it.status]}</span>` : ''}
@@ -1402,7 +1480,7 @@
         <section style="margin-bottom:18px" data-field-anchor="journalRank"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>期刊等级<span class="col-ai">easyScholar</span></h4>
         <div style="display:flex;flex-wrap:wrap;gap:8px">${rankChips(it.journalRankDetail)}</div></section>` : ''}
       ${sections.map((k) => it[k] ? `
-        <section style="margin-bottom:18px" data-field-anchor="${k}"><h4 style="margin:0 0 6px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>${CONTENT_COLS[k] ? (k === 'method' && it.docType === 'model' ? '求解方法' : CONTENT_COLS[k].label) : k}</h4>
+        <section style="margin-bottom:18px" data-field-anchor="${k}"><h4 style="margin:0 0 6px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>${colLabel(k, it.docType || lib.type)}</h4>
         <div class="md md-annotatable" data-field="${k}">${mdFull(it[k])}</div></section>` : '').join('')}`;
 
     // 把已存的高亮 / 字色批注画回正文（DOM 刚重建，标记需要重新贴）
@@ -1614,7 +1692,7 @@
   // ============ 字段配置 ============
   function renderFieldsPop() {
     el.fieldsPop.innerHTML = TYPE_ORDER[lib.type].map((k) => `
-      <label><input type="checkbox" data-col="${k}" ${visible.has(k) ? 'checked' : ''} /> ${esc(k === 'method' && lib.type === 'model' ? '求解方法' : CONTENT_COLS[k].label)}</label>`).join('');
+      <label><input type="checkbox" data-col="${k}" ${visible.has(k) ? 'checked' : ''} /> ${esc(colLabel(k, lib.type))}</label>`).join('');
     el.fieldsPop.classList.toggle('hidden');
     const rect = $('btnFields').getBoundingClientRect();
     const z = uiZoom(); // 字号缩放时坐标换算
@@ -1627,7 +1705,7 @@
     const it = items.find((x) => x.id === currentId); if (!it) return;
     // importedAt 为系统字段，不在编辑表单中出现
     const fields = TYPE_ORDER[it.docType || lib.type].filter((k) => k !== 'importedAt')
-      .map((k) => [k, k === 'method' && it.docType === 'model' ? '求解方法' : CONTENT_COLS[k].label]);
+      .map((k) => [k, colLabel(k, it.docType || lib.type)]);
     el.editBody.innerHTML = fields.map(([key, label]) => `
       <label class="field"><span>${label}</span><textarea data-key="${key}" rows="3">${esc(it[key] || '')}</textarea></label>`).join('');
     el.editModal.classList.remove('hidden');
@@ -2913,22 +2991,22 @@
       if (!el.fieldsPop.classList.contains('hidden') && !el.fieldsPop.contains(e.target) && e.target !== $('btnFields')) el.fieldsPop.classList.add('hidden');
     });
 
-    // 搜索框已从顶栏迁到侧边栏（见 index.html 的 .side-search）：
-    // 侧边栏那个 #sideSearchInput 才是用户能看到的输入框，这里让它驱动
-    // 同一份过滤状态（filterText），两处口径完全一致。
-    const sideSearch = $('sideSearchInput');
-    const sideSearchClear = $('sideSearchClear');
-    const syncSearchClear = () => sideSearchClear?.classList.toggle('hidden', !sideSearch?.value);
+    // 文献搜索框（工具栏右侧 #libSearchInput）：全字段模糊匹配 + 相关性排序。
+    // 1.33 起从侧边栏搬进工具栏 —— 搜索只作用于当前文库的这张表，放在表格上方更贴合
+    // "搜这张表"的心智；侧边栏那个输入框已经删掉了，别再加回来（两处会抢同一份过滤状态）。
+    const libSearch = $('libSearchInput');
+    const libSearchClear = $('libSearchClear');
+    const syncSearchClear = () => libSearchClear?.classList.toggle('hidden', !libSearch?.value);
     const applySearch = (value) => {
       if (el.searchInput) el.searchInput.value = value;
-      if (sideSearch) sideSearch.value = value;
+      if (libSearch) libSearch.value = value;
       syncSearchClear();
       render();
     };
-    if (sideSearch) {
-      sideSearch.addEventListener('input', () => applySearch(sideSearch.value));
-      sideSearch.addEventListener('keydown', (e) => { if (e.key === 'Escape') applySearch(''); });
-      sideSearchClear?.addEventListener('click', () => { applySearch(''); sideSearch.focus(); });
+    if (libSearch) {
+      libSearch.addEventListener('input', () => { syncSearchClear(); render(); });
+      libSearch.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); applySearch(''); } });
+      libSearchClear?.addEventListener('click', () => { applySearch(''); libSearch.focus(); });
       syncSearchClear();
     }
     // #searchInput 已从页面移除（顶栏改显示当前页面标题）。保留兜底，避免老 DOM 下报错。
@@ -3242,6 +3320,9 @@
     dirOpen: false,      // 左侧「论文目录」抽屉是否展开（只在文献来源下可用）
     fileKind: 'pdf',     // 当前文档格式：'pdf'（PDF.js 内核）| 'epub'（epub.js 内核）
     citePool: [],        // AI 引用池：[{id, text, label}]。划词时点「引用」累积多段原文，提问时一起交给 AI
+    // 思考模式：'auto' 跟随模型 / 'off' 快速（不思考，最快出字）/ 'on' 强制思考（展示过程）
+    thinkMode: 'auto',
+    modelMayThink: false, // 当前模型是否属于「默认会思考」的推理模型（后端随 model 事件告知）
     notesFilter: { type: 'all', color: 'all', tag: 'all', q: '' }, // 笔记与高亮的筛选条件
     notesHit: -1,        // 「上一处 / 下一处」跳到的批注下标（用于高亮当前条目）
     // 当前阅读来源。两种：
@@ -4709,6 +4790,22 @@
   // 并把「当前论文的解析结果」作为强上下文，把用户上传的图片按 OpenAI 多模态
   // content 数组格式一并提交，从而支持「文字 + 图片」混合提问。
   // 对话按文献持久化到 paper-chats.json：退出应用后重进仍能看到历史记录。
+  /**
+   * 「思考过程」折叠块。
+   * 流式阶段默认展开、正文一出字就收起 —— 用户既能看到模型在想什么（等待不再是一片空白），
+   * 又不会让推理旁白挤掉真正的答案。已经结束的消息只显示字数，点开才看内容。
+   */
+  function prThinkHtml(m, { streaming = false } = {}) {
+    const text = String(m.reasoning || '');
+    if (!text.trim()) return '';
+    const open = streaming && !String(m.content || '').trim();
+    const meta = streaming ? '思考中…' : `${text.length} 字`;
+    return `<details class="pr-think"${open ? ' open' : ''}>
+      <summary>${ico('brain')}<span class="pr-think-t">思考过程</span><span class="pr-think-meta">${meta}</span></summary>
+      <div class="pr-think-body">${esc(text).replace(/\n/g, '<br />')}</div>
+    </details>`;
+  }
+
   function prChatMessageHtml(m, index) {
     const imgs = (m.images || []).length
       ? `<div class="pr-msg-attach">${m.images.map((u) => `<img src="${u}" alt="附图" />`).join('')}</div>`
@@ -4727,6 +4824,7 @@
         <div class="pr-msg-role">${m.role === 'user' ? '我' : 'AI 助手'}</div>
         ${imgs}
         ${vnote}
+        ${m.role === 'assistant' ? prThinkHtml(m) : ''}
         <div class="pr-msg-bubble">${body}</div>
         <div class="pr-msg-actions">
           ${m.role === 'assistant' && !m.pending && String(m.content || '').trim()
@@ -5135,7 +5233,9 @@
 
   const PR_CTX_CACHE_LIMIT = 30000;  // 全文缓存上限（字符）
   const PR_CTX_INJECT_MAX = 16000;   // 单轮注入正文上限（服务端单条消息截断在 20000，留余量）
-  const PR_CTX_SEGMENT_MAX = 9000;   // 检索命中片段合计上限
+  // 单轮注入上限（2026-10 收紧）：原来是 9000 字符，实测这 3k 字对首字延迟的影响远比
+  // 命中率明显 —— 论文问答真正用得上的是 3~5 段相关原文，剩下的只是让模型「读得更久」。
+  const PR_CTX_SEGMENT_MAX = 6000;   // 检索命中片段合计上限
 
   const prSplitSegments = (text) => pdfReaderUtils.splitContextSegments(text);
   const prNeedsWholePaper = (query) => pdfReaderUtils.needsWholePaper(query);
@@ -5165,7 +5265,9 @@
       it.doi ? `DOI：${it.doi}` : ''].filter(Boolean);
     for (const c of cols) {
       const v = String(it[c.key] || '').trim();
-      if (v) lines.push(`${c.label}：${v.length > 900 ? v.slice(0, 900) + '…' : v}`);
+      // 解析字段单条截 600 字：核心结论/研究设计这类长字段本来就有分点，
+      // 再长对回答几乎没增益，却要在每一轮里重复发送
+      if (v) lines.push(`${c.label}：${v.length > 600 ? v.slice(0, 600) + '…' : v}`);
     }
     if (String(it.thoughts || '').trim()) lines.push(`我的思考：${String(it.thoughts).slice(0, 400)}`);
 
@@ -5301,23 +5403,31 @@
       const bubbles = box?.querySelectorAll('.pr-msg.ai .pr-msg-bubble');
       const last = bubbles?.[bubbles.length - 1];
       if (!last) return;
+      // 思考过程单独一栏（折叠块），正文一起放进气泡：先出思考、再出答案，等待全程有反馈
+      const think = prThinkHtml(holder, { streaming: true });
       // 「看图」阶段还没有正文：显示一行进度提示，让等待可见
       if (holder.stage === 'vision') {
         last.innerHTML = `<span class="pr-vision-stage"><span class="pr-vision-spin"></span>`
           + `正在用「${esc(holder.visionLabel || '视觉模型')}」识别 ${holder.visionCount || ''} 张图片…</span>`;
       } else if (holder.content) {
-        last.innerHTML = mdInline(holder.content) + '<span class="pr-caret"></span>';
+        last.innerHTML = think + mdInline(holder.content) + '<span class="pr-caret"></span>';
+      } else if (think) {
+        // 只有思考、还没出正文：光标式打字动画放在思考块下面，告诉用户「还在写」
+        last.innerHTML = think + '<span class="pr-typing"><i></i><i></i><i></i></span>';
       }
-      if (holder.stage === 'vision' || holder.content) {
+      if (holder.stage === 'vision' || holder.content || think) {
         if (box.scrollHeight - box.scrollTop - box.clientHeight < 120) box.scrollTop = box.scrollHeight;
       }
     };
 
     pr.chatAbort = new AbortController();
     const r = await streamSSE('/api/paper-chat', withProfileId({
+      // 思考模式：auto 跟随模型 / off 快速（最快出字）/ on 强制思考并展示过程
+      thinking: pr.thinkMode,
       messages: [
         { role: 'system', content: sys },
-        ...pr.chat.filter((m) => !m.pending && m !== userMessage && !m.error).slice(-8).map((m) => ({ role: m.role, content: m.content })),
+        // 只带最近 6 条：更早的内容对「这一问」几乎没有信息增益，却会让首字延迟线性变差
+        ...pr.chat.filter((m) => !m.pending && m !== userMessage && !m.error).slice(-6).map((m) => ({ role: m.role, content: m.content })),
         { role: 'user', content: userContent },
       ],
     }, 'paperchat'), {
@@ -5326,6 +5436,14 @@
         if (o.model) {
           holder.modelLabel = `${o.model.providerName} · ${o.model.model}`;
           holder.modelVision = o.model.vision;
+          // 这个模型会不会思考，决定「思考」按钮要不要高亮提示
+          pr.modelMayThink = !!o.model.mayThink;
+          renderPrThinkBtn();
+        }
+        // 思考过程（reasoning_content）：与正文分开收，渲染进折叠块，不污染答案
+        if (o.reasoning) {
+          holder.reasoning = (holder.reasoning || '') + o.reasoning;
+          paint(false);
         }
         // 第一段：视觉模型正在看图 —— 在气泡里显示进度，用户知道为什么还没出字
         if (o.stage === 'vision') {
@@ -5381,6 +5499,22 @@
     savePrChat();
   }
 
+  // ---------- 思考模式按钮（自动 / 快速 / 思考） ----------
+  const PR_THINK_KEY = 'sci_pr_think_mode';
+  function renderPrThinkBtn() {
+    const btn = $('btnPrChatThink');
+    if (!btn) return;
+    const meta = {
+      auto: { t: '思考：自动', tip: '跟随模型默认行为。推理模型会先想再答，思考过程会展示在回答上方', cls: '' },
+      off: { t: '思考：快速', tip: '关闭思考，最快出字（结构化抽取类回答够用）', cls: 'think-off' },
+      on: { t: '思考：开启', tip: '强制思考并展示过程，答案更稳但更慢', cls: 'think-on' },
+    }[pr.thinkMode] || {};
+    btn.innerHTML = `${ico('brain')}<span>${meta.t || '思考：自动'}</span>`;
+    btn.title = meta.tip || '';
+    btn.classList.toggle('think-off', pr.thinkMode === 'off');
+    btn.classList.toggle('think-on', pr.thinkMode === 'on');
+  }
+
   // 生成中把「发送」按钮变成「停止」，让用户能中断长回答
   function setPrChatBusyUI(busy) {
     const btn = $('btnPrChatSend');
@@ -5402,6 +5536,7 @@
       .slice(-200)
       .map((m) => {
         const out = { role: m.role, content: m.content || '' };
+        if (m.reasoning) out.reasoning = m.reasoning;
         if (m.images?.length) out.images = m.images;
         if (m.error) out.error = true;
         if (m.stopped) out.stopped = true;
@@ -5749,7 +5884,7 @@
 
   // ---------- 阅读器里的「论文目录」：直接跳到另一篇，不必先返回列表 ----------
   // 只列「有 PDF 的文献」——没有附件的条目点开也读不了，放进来只会让人白点一下。
-  const PR_DIR_LIB_ORDER = ['empirical', 'model'];
+  const PR_DIR_LIB_ORDER = ['empirical', 'model', 'algorithm'];
 
   /** 按文库分组 + 关键词过滤后的目录条目 */
   function prDirEntries() {
@@ -5824,6 +5959,8 @@
 
   function bindPrDir() {
     $('prDirToggle')?.addEventListener('click', () => setPrDir(!pr.dirOpen));
+    // 打印：可打当前页 / 指定页码 / 全部，交给本机打印机
+    $('prPrint')?.addEventListener('click', () => openPrintDialog());
     $('prDirSearch')?.addEventListener('input', renderPrDir);
     $('prDirList')?.addEventListener('click', async (e) => {
       const row = e.target.closest('[data-prdir-id]');
@@ -6789,6 +6926,8 @@
       const src = cmpEl('cmpEngine');
       if (src && !src.options.length) {
         const opts = ['<option value="auto">跟随「划词翻译」设置</option>'];
+        // 内置翻译模型（免费小模型）排在第一位：整篇翻译量大，最需要「便宜 + 术语一致」
+        opts.push('<option value="builtin">内置翻译模型 · 免费（学术优化）</option>');
         for (const p of meta.engine?.profiles || []) {
           opts.push(`<option value="llm:${esc(p.id)}">大模型 · ${esc(p.label || p.model)}${p.hasKey ? '' : '（未填 Key）'}</option>`);
         }
@@ -8731,6 +8870,116 @@
   }
   function hidePopover() { $('prPopover').classList.add('hidden'); }
 
+  // ==================== 打印（调本机打印机） ====================
+  //
+  // 为什么不直接 window.print()：阅读器里的页面是 pdf.js 画出来的 canvas，
+  // 打印时要么打不出内容、要么分辨率糊成一团，而且整屏界面（工具栏、侧栏）会一起被印上去。
+  // 所以这里先把要打的页**重新渲染成高清图片**，塞进一个只在打印时显示的容器，
+  // 再用 @media print 把应用界面整个藏掉 —— 用户拿到的就是干净的论文页，
+  // 走的仍是系统打印对话框（可选任意已安装的打印机、份数、双面等）。
+  function printArea() {
+    let box = $('litPrintArea');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'litPrintArea';
+      box.className = 'print-area';
+      document.body.appendChild(box);
+      // 打印完就把图片清掉：一整篇的高清位图很占内存
+      window.addEventListener('afterprint', () => { box.innerHTML = ''; });
+    }
+    return box;
+  }
+
+  /** 解析用户填的页码范围：支持 "3"、"1-5"、"1-3,6,9-10"，返回升序去重后的页码数组 */
+  function parsePageRange(text, total) {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+    const out = new Set();
+    for (const part of raw.split(/[,，\s]+/)) {
+      if (!part) continue;
+      const m = part.match(/^(\d+)(?:[-~－—](\d+))?$/);
+      if (!m) return null;
+      let a = parseInt(m[1], 10);
+      let b = m[2] ? parseInt(m[2], 10) : a;
+      if (a > b) [a, b] = [b, a];
+      if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+      for (let p = a; p <= b; p += 1) if (p >= 1 && p <= total) out.add(p);
+    }
+    return out.size ? [...out].sort((x, y) => x - y) : null;
+  }
+
+  /** 把「文献标题 + 页码」印在首页顶部，便于打印件归档 */
+  function printHeader(title) {
+    const t = String(title || '').trim();
+    return t ? `<div class="print-title">${esc(t)}</div>` : '';
+  }
+
+  async function printPdfPages(pages) {
+    const box = printArea();
+    const it = paperRecord(pr.recordId);
+    box.innerHTML = printHeader(it?.title || $('prFilename')?.textContent || '');
+    for (let i = 0; i < pages.length; i += 1) {
+      // 每页渲染完让出一帧：几十页的文档不至于把界面卡死，也让进度提示看得见
+      const { canvas } = await renderFullPageCanvas(pages[i]);
+      const img = document.createElement('img');
+      img.className = 'print-page';
+      // JPEG 比 PNG 小一个数量级，打印质量没有肉眼差别，内存占用却低很多
+      img.src = canvas.toDataURL('image/jpeg', 0.92);
+      box.appendChild(img);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    // 交给系统：Electron / 浏览器都会弹出打印对话框（可选打印机、份数、页码范围）
+    window.print();
+  }
+
+  /** EPUB 没有「页」，打印当前章节正文（纯文字，省时省纸） */
+  function printEpubChapter() {
+    const box = printArea();
+    const text = String(window.EpubReader?.currentChapterText?.() || '').trim();
+    if (!text) { toast('没能取到本章正文，打印已取消', 'error'); return; }
+    const title = (items.find((x) => x.id === pr.recordId)?.title) || $('prFilename')?.textContent || '';
+    box.innerHTML = printHeader(title)
+      + text.split(/\n{2,}/).map((p) => `<p class="print-para">${esc(p.trim())}</p>`).join('');
+    window.print();
+  }
+
+  function openPrintDialog() {
+    if (pr.fileKind === 'epub') { printEpubChapter(); return; }
+    if (!pr.doc) { toast('还没有打开文档', 'error'); return; }
+    const total = pr.totalPages || 1;
+    const cur = pr.pageNum || 1;
+    const btn = $('prPrint');
+    const rect = btn?.getBoundingClientRect?.();
+    showPopover($('prPopover'), '打印这篇文献', `
+      <div style="margin-bottom:8px">共 <b>${total}</b> 页。页码支持「1-3,5,9-10」这种写法；打印会调起系统打印对话框，可在那里选打印机、份数与双面。</div>
+      <label class="field" style="display:block">
+        <span>页码（留空 = 当前第 ${cur} 页）</span>
+        <input id="printRangeInput" class="tb-input" placeholder="例如 1-3,5" value="${cur}" />
+      </label>`,
+      [
+        { text: '取消', cls: '', onClick: () => {} },
+        { text: `全部 ${total} 页`, cls: '', onClick: () => {
+          runPrint(Array.from({ length: total }, (_, i) => i + 1), total);
+        } },
+        { text: '打印', cls: 'btn-primary', onClick: async () => {
+          const raw = $('printRangeInput')?.value || String(cur);
+          const pages = parsePageRange(raw, total);
+          if (!pages) { toast('页码写法看不懂，请用「1-3,5」这种格式', 'error'); return; }
+          runPrint(pages, total);
+        } },
+      ],
+      { left: rect ? rect.left : 200, top: rect ? rect.bottom + 8 : 160 });
+  }
+
+  async function runPrint(pages, total) {
+    try {
+      if (pages.length > 6) toast(`正在渲染 ${pages.length} 页，稍等一下就弹出打印窗口…`, 'success');
+      await printPdfPages(pages);
+    } catch (e) {
+      toast('打印准备失败：' + (e?.message || e), 'error');
+    }
+  }
+
   function fitWidth() {
     if (!pr.doc) return;
     const pages = $('prPages');
@@ -8823,6 +9072,20 @@
     });
     // 清除本篇论文的对话记录
     $('prChatClear')?.addEventListener('click', () => { clearPrChat(); });
+    // 思考模式：自动 → 快速 → 思考，循环切换（选择记在本地，下次打开还是这个档位）
+    try {
+      const saved = localStorage.getItem(PR_THINK_KEY);
+      if (['auto', 'off', 'on'].includes(saved)) pr.thinkMode = saved;
+    } catch (_) { /* 隐私模式下拿不到 localStorage 就用默认值 */ }
+    renderPrThinkBtn();
+    $('btnPrChatThink')?.addEventListener('click', () => {
+      const order = ['auto', 'off', 'on'];
+      pr.thinkMode = order[(order.indexOf(pr.thinkMode) + 1) % order.length];
+      try { localStorage.setItem(PR_THINK_KEY, pr.thinkMode); } catch (_) { /* ignore */ }
+      renderPrThinkBtn();
+      const tip = { auto: '思考模式：自动（跟随模型）', off: '快速模式：已关闭思考，出字最快', on: '已开启思考，过程会显示在回答上方' }[pr.thinkMode];
+      toast(tip, 'success');
+    });
     $('prChatInput').addEventListener('input', () => {
       const n = $('prChatInput');
       n.style.height = 'auto';
@@ -11348,7 +11611,7 @@
     box.innerHTML = summaryHint + chatMsgs.map((m, index) =>
       `<div class="chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}${m.error ? ' error' : ''}">${m.role === 'user'
         ? esc(m.content).replace(/\n/g, '<br />')
-        : `<div class="md md-render">${m.content ? chatMd(m.content) : ''}${m.pending ? '<span class="chat-cursor"></span>' : ''}</div>${(m.content && !m.pending) ? `<div class="chat-bubble-actions"><button class="pr-msg-act" data-chat-to-note="${index}" title="把这段回答导入 Markdown 笔记（可新建一篇，或追加到已有笔记）">${ico('download')}导入笔记</button></div>` : ''}${m.error ? `<button class="btn btn-sm md-retry" data-chat-retry="${index}">重试回答</button>` : ''}`}</div>`).join('');
+        : `${prThinkHtml(m, { streaming: !!m.pending })}<div class="md md-render">${m.content ? chatMd(m.content) : ''}${m.pending ? '<span class="chat-cursor"></span>' : ''}</div>${(m.content && !m.pending) ? `<div class="chat-bubble-actions"><button class="pr-msg-act" data-chat-to-note="${index}" title="把这段回答导入 Markdown 笔记（可新建一篇，或追加到已有笔记）">${ico('download')}导入笔记</button></div>` : ''}${m.error ? `<button class="btn btn-sm md-retry" data-chat-retry="${index}">重试回答</button>` : ''}`}</div>`).join('');
     box.scrollTop = box.scrollHeight;
   }
   async function sendChat(text, { retry = false } = {}) {
@@ -11374,6 +11637,12 @@
       onEvent(event) {
         if (event.error) errMsg = event.error;
         if (event.compressed) compressed = true;
+        // 思考过程：和正文分开收，渲染成折叠块（与阅读器里的 AI 助读同一套样式）
+        if (event.reasoning) {
+          holder.reasoning = (holder.reasoning || '') + event.reasoning;
+          const now = performance.now();
+          if (now - lastPaint > 80) { lastPaint = now; renderChatMsgs(); }
+        }
         if (event.delta) {
           full += event.delta;
           holder.content = full;
