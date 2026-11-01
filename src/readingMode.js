@@ -791,24 +791,51 @@ export function readCachedDoc(filePath) {
   }
 }
 
-function writeCachedDoc(filePath, doc) {
-  const key = cacheKey(filePath);
-  if (!key) return;
+function writeCacheFile(file, doc) {
   try {
     fs.mkdirSync(readingCacheDir(), { recursive: true });
-    const file = cachePath(key);
     fs.writeFileSync(file + '.part', JSON.stringify(doc), 'utf8');
     fs.renameSync(file + '.part', file);
   } catch (_) { /* 缓存写不进去不影响本次阅读 */ }
+}
+
+/** 按「页区间」切出来的那份结构树，单独存一个文件（不覆盖整篇缓存） */
+function partCachePath(key, from, to) {
+  return path.join(readingCacheDir(), `${key}--p${from}-${to || 'end'}.json`);
 }
 
 /** 同一篇正在分析时复用同一个 Promise，避免用户连点两下跑两遍 */
 const running = new Map();
 
 /**
+ * 正在分析的进度：cacheKey → { page, total, percent, startedAt }。
+ * 前端在等待期间轮询它，把「转圈」换成「正在排版 37/84 页」——
+ * 能不能秒开是缓存决定的，但等待期间有没有真实反馈，取决于这里。
+ */
+const progress = new Map();
+
+/** 查询某篇的分析进度；没有在跑就返回 null（前端据此判断能不能显示进度条） */
+export function getReadingProgress(filePath) {
+  const key = cacheKey(filePath);
+  if (!key) return null;
+  const p = progress.get(key);
+  if (!p) return null;
+  return { page: p.page, total: p.total, percent: p.percent, elapsedMs: Date.now() - p.startedAt };
+}
+
+/**
  * 生成（或读缓存）某篇 PDF 的阅读模式文档树。
+ *
+ * 支持「只算一段页」：`{ fromPage, toPage }`。这是首屏速度的关键 ——
+ * 一篇 84 页的论文整篇分析要 1.7 秒，而前 12 页只要 ~0.25 秒。
+ * 前端因此可以先拿到前 12 页立刻显示，剩下的在后台接着补（见 app.js 的续拉逻辑）。
+ *
+ * 缓存分两层：
+ *   · 整篇缓存（<key>.json）：一次整篇分析之后，之后无论要整篇还是要分段都直接命中；
+ *   · 分段缓存（<key>--p1-12.json）：只算过一段时存这里，第二次打开同一段仍是秒开。
+ *
  * @param {string} filePath PDF 绝对路径
- * @param {{force?:boolean}} [opts]
+ * @param {{force?:boolean, fromPage?:number, toPage?:number}} [opts]
  */
 export async function buildReadingDoc(filePath, opts = {}) {
   if (!filePath || !fs.existsSync(filePath)) {
@@ -816,33 +843,68 @@ export async function buildReadingDoc(filePath, opts = {}) {
     e.code = 'ENOENT_PDF';
     throw e;
   }
+  // 整篇缓存优先级最高：有了它，分段请求也直接给整篇（前端会一次拿全，不再续拉）
   if (!opts.force) {
     const cached = readCachedDoc(filePath);
     if (cached) return { doc: cached, cached: true };
   }
+  const from = Math.max(1, Math.floor(Number(opts.fromPage) || 1));
+  const to = Math.max(0, Math.floor(Number(opts.toPage) || 0));
+  const partial = to > 0 || from > 1;
   const key = cacheKey(filePath) || path.resolve(filePath);
-  if (running.has(key)) {
-    const doc = await running.get(key);
+  const slot = partial ? `${key}--p${from}-${to || 'end'}` : key;
+
+  if (running.has(slot)) {
+    const doc = await running.get(slot);
     return { doc, cached: true };
   }
+  if (partial && !opts.force) {
+    try {
+      const data = JSON.parse(fs.readFileSync(partCachePath(key, from, to), 'utf8'));
+      if (data?.v === READING_SCHEMA && Array.isArray(data.blocks)) return { doc: data, cached: true };
+    } catch (_) { /* 没缓存就算一遍 */ }
+  }
+
   const task = (async () => {
-    const bytes = await fs.promises.readFile(filePath);
-    const analysis = await analyzePdf(bytes, {});
-    const doc = toReadingDoc(analysis);
-    doc.source = {
-      name: path.basename(filePath),
-      bytes: bytes.byteLength,
-      generatedAt: new Date().toISOString(),
-    };
-    writeCachedDoc(filePath, doc);
-    return doc;
+    progress.set(key, { page: partial ? from - 1 : 0, total: 0, percent: 0, startedAt: Date.now() });
+    try {
+      const bytes = await fs.promises.readFile(filePath);
+      const analysis = await analyzePdf(bytes, {
+        ...(partial ? { fromPage: from, toPage: to } : {}),
+        onProgress: (p) => {
+          const cur = progress.get(key);
+          if (!cur) return;
+          cur.page = p?.page || 0;
+          cur.total = p?.total || 0;
+          cur.percent = p?.percent || 0;
+        },
+      });
+      const doc = toReadingDoc(analysis);
+      doc.source = {
+        name: path.basename(filePath),
+        bytes: bytes.byteLength,
+        generatedAt: new Date().toISOString(),
+      };
+      if (partial) {
+        const pages = Array.isArray(analysis.pages) ? analysis.pages : [];
+        const firstPage = pages[0]?.index || from;
+        const lastPage = pages[pages.length - 1]?.index || to || analysis.totalPages;
+        doc.part = { from: firstPage, to: lastPage, total: analysis.totalPages };
+      }
+      const whole = !doc.part || (doc.part.from <= 1 && doc.part.to >= doc.part.total);
+      if (whole) writeCacheFile(cachePath(key), doc);
+      else writeCacheFile(partCachePath(key, from, to), doc);
+      return doc;
+    } finally {
+      progress.delete(key);
+    }
   })();
-  running.set(key, task);
+  running.set(slot, task);
   try {
     const doc = await task;
     return { doc, cached: false };
   } finally {
-    running.delete(key);
+    running.delete(slot);
   }
 }
 
@@ -852,6 +914,9 @@ export function dropCachedDoc(filePath) {
   if (!key) return false;
   try { fs.rmSync(cachePath(key), { force: true }); return true; } catch (_) { return false; }
 }
+
+/** 首屏先算多少页。12 页足够铺满几屏，也足够让页眉页脚的「跨页重复」判定有样本 */
+export const FIRST_PAGES = 12;
 
 // ==================== HTTP 接口 ====================
 
@@ -896,7 +961,12 @@ export function registerReadingRoutes(app, deps) {
     if (!/\.pdf$/i.test(found.path)) return res.status(400).json({ error: '阅读模式目前只支持 PDF' });
     const started = Date.now();
     try {
-      const { doc, cached } = await buildReadingDoc(found.path, { force: !!req.body?.force });
+      const fromPage = Number(req.body?.fromPage) || 0;
+      const toPage = Number(req.body?.toPage) || 0;
+      const { doc, cached } = await buildReadingDoc(found.path, {
+        force: !!req.body?.force,
+        ...(fromPage || toPage ? { fromPage: fromPage || 1, toPage } : {}),
+      });
       // 整篇都没有文字层（纯扫描件）：明确告诉前端「这个模式救不了」，别让它显示空白
       if (!doc.blocks.length) {
         return res.status(422).json({
@@ -905,10 +975,42 @@ export function registerReadingRoutes(app, deps) {
           doc,
         });
       }
-      res.json({ doc, cached, elapsedMs: Date.now() - started, name: found.name });
+      // more=true 时前端会接着拉下一页段（第一段已经能读了，不必等整篇）
+      const more = !!(doc.part && doc.part.to < doc.part.total);
+      res.json({
+        doc, cached, more,
+        part: doc.part || null,
+        totalPages: doc.part?.total || doc.pages || null,
+        elapsedMs: Date.now() - started,
+        name: found.name,
+      });
     } catch (e) {
       res.status(500).json({ error: '阅读模式分析失败：' + (e?.message || e) });
     }
+  });
+
+  /**
+   * 预热：打开 PDF 后调用一次。
+   * 只算**首屏那一段**（12 页，约 0.25 秒）——整篇要 1.7 秒，预热若算整篇会跟 PDF 渲染
+   * 抢 CPU、还赶不上用户点按钮；算首段则几乎必定赶得上，剩下的由点击后的续拉补完。
+   */
+  app.post('/api/reading/warm', async (req, res) => {
+    const found = resolve(req.body);
+    if (found.error || !/\.pdf$/i.test(found.path)) return res.json({ ok: false });
+    try {
+      const { doc, cached } = await buildReadingDoc(found.path, { force: false, fromPage: 1, toPage: FIRST_PAGES });
+      res.json({ ok: true, cached, blocks: doc.blocks.length });
+    } catch (e) {
+      res.json({ ok: false, error: String(e?.message || e) });
+    }
+  });
+
+  /** 分析进度：前端在等待 /api/reading/doc 期间轮询，用来显示「正在排版 x/N 页」 */
+  app.post('/api/reading/progress', (req, res) => {
+    const found = resolve(req.body);
+    if (found.error) return res.json({ running: false });
+    const p = getReadingProgress(found.path);
+    res.json(p ? { running: true, ...p } : { running: false });
   });
 
   app.post('/api/reading/drop', (req, res) => {

@@ -38,6 +38,10 @@
     blockByEl: new WeakMap(),
     cropObserver: null,
     cropDone: new Set(),
+    renderIndex: 0,      // 已装配到第几块（分帧渲染的游标）
+    rendering: false,
+    renderRaf: 0,
+    pendingScrollPage: null, // 渲染未完成时请求跳页 → 补完再跳
     scrollRaf: 0,
     page: 1,
     noteSeq: 0,
@@ -218,25 +222,96 @@
     if (pos < text.length) el.appendChild(document.createTextNode(text.slice(pos)));
   }
 
+  /**
+   * 分帧装配：先铺满第一屏，剩下的每帧补一批。
+   *
+   * 为什么不一次插完：一篇 80 页的论文有 1800+ 块，一次性创建 + 插入会让主线程
+   * 独占几百毫秒（这段时间滚动、点击都不响应，观感就是「卡住/加载不出来」）。
+   * 首帧只铺够 2 屏的文字（用户马上能读），其余用 rAF 续上，插入期间界面始终可交互。
+   */
+  const FIRST_CHUNK = 90;
+  const NEXT_CHUNK = 240;
+
+  function cancelChunks() {
+    if (state.renderRaf) { cancelAnimationFrame(state.renderRaf); state.renderRaf = 0; }
+    state.rendering = false;
+  }
+
+  /** 把 [state.renderIndex, +n) 的块建好并插入；返回插入的裁图 figure */
+  function pumpBlocks(n) {
+    const blocks = state.blocks;
+    const end = Math.min(blocks.length, state.renderIndex + n);
+    if (end <= state.renderIndex) return [];
+    const frag = document.createDocumentFragment();
+    const figs = [];
+    for (let i = state.renderIndex; i < end; i += 1) {
+      const block = blocks[i];
+      const el = block.t === 'text' ? blockElement(block) : cropElement(block);
+      frag.appendChild(el);
+      state.byId.set(block.id, el);
+      state.blockByEl.set(el, block);
+      if (block.t !== 'text') figs.push(el);
+    }
+    state.renderIndex = end;
+    state.column.appendChild(frag);
+    return figs;
+  }
+
+  /** 首屏之后逐帧补齐；补完再处理「挂载时就想跳页」的请求 */
+  function scheduleNextChunks() {
+    if (state.renderIndex >= state.blocks.length) {
+      state.rendering = false;
+      state.renderRaf = 0;
+      state.hooks.onRenderProgress?.(state.blocks.length, state.blocks.length);
+      if (state.pendingScrollPage != null) {
+        const target = state.pendingScrollPage;
+        state.pendingScrollPage = null;
+        scrollToPage(target);
+      }
+      return;
+    }
+    state.renderRaf = requestAnimationFrame(() => {
+      state.renderRaf = 0;
+      const figs = pumpBlocks(NEXT_CHUNK);
+      observeCrops(figs);
+      state.hooks.onRenderProgress?.(state.renderIndex, state.blocks.length);
+      scheduleNextChunks();
+    });
+  }
+
   function render(options = {}) {
     if (!state.column || !state.doc) return;
     const scroll = state.host;
     const keep = options.keepScroll ? (scroll ? scroll.scrollTop : 0) : null;
+    cancelChunks();
     disconnectCrops();
     state.column.textContent = '';
     state.byId.clear();
     state.blockByEl = new WeakMap();
     state.cropDone.clear();
-    const frag = document.createDocumentFragment();
-    for (const block of state.blocks) {
-      const el = blockElement(block);
-      frag.appendChild(el);
-      state.byId.set(block.id, el);
-      state.blockByEl.set(el, block);
-    }
-    state.column.appendChild(frag);
+    state.renderIndex = 0;
+    state.rendering = true;
+    // 第一屏同步铺好，保证「点开就能读」
+    const figs = pumpBlocks(FIRST_CHUNK);
+    observeCrops(figs);
     if (keep != null) scroll.scrollTop = keep;
-    observeCrops();
+    scheduleNextChunks();
+  }
+
+  /**
+   * 追加一段新块（首屏之后续拉回来的后 70 页走这里）。
+   * 分帧泵会自动把新加进来的块铺完 —— 它每帧都重新读 state.blocks.length。
+   */
+  function appendBlocks(blocks) {
+    if (!Array.isArray(blocks) || !blocks.length || !state.column) return 0;
+    for (const b of blocks) {
+      state.blocks.push(b.t === 'text' ? assemble({ ...b }) : { ...b });
+    }
+    if (!state.rendering) {
+      state.rendering = true;
+      if (!state.renderRaf) scheduleNextChunks();
+    }
+    return blocks.length;
   }
 
   function applyTypography() {
@@ -284,16 +359,25 @@
     if (state.cropObserver) { state.cropObserver.disconnect(); state.cropObserver = null; }
   }
 
-  function observeCrops() {
-    const figs = [...state.column.querySelectorAll('.rm-crop')];
-    if (!figs.length) return;
-    state.cropObserver = new IntersectionObserver((entries) => {
-      for (const en of entries) {
-        if (!en.isIntersecting) continue;
-        paintCrop(en.target).catch(() => { /* 单张失败不影响正文 */ });
-      }
-    }, { root: state.host, rootMargin: '800px 0px' });
-    figs.forEach((f) => state.cropObserver.observe(f));
+  /**
+   * 给裁图挂懒加载观察。
+   * 分帧渲染下它是**分批调用**的，所以观察器只建一个、后续增量 observe；
+   * 每次都新建会 disconnect 掉上一批，导致已经露头的图永远画不出来。
+   */
+  function observeCrops(figs) {
+    const list = Array.isArray(figs)
+      ? figs
+      : (state.column ? [...state.column.querySelectorAll('.rm-crop')] : []);
+    if (!list.length) return;
+    if (!state.cropObserver) {
+      state.cropObserver = new IntersectionObserver((entries) => {
+        for (const en of entries) {
+          if (!en.isIntersecting) continue;
+          paintCrop(en.target).catch(() => { /* 单张失败不影响正文 */ });
+        }
+      }, { root: state.host, rootMargin: '800px 0px' });
+    }
+    for (const f of list) state.cropObserver.observe(f);
   }
 
   /**
@@ -591,7 +675,7 @@
   /** 跳到某一页（找这一页的第一个块；跨页块按行判断） */
   function scrollToPage(page) {
     if (!state.column) return false;
-    const blocks = [...state.column.querySelectorAll('.rm-block')];
+    const blocks = [...state.column.querySelectorAll('.rm-block, .rm-crop')];
     for (const el of blocks) {
       const block = state.blockByEl.get(el);
       if (!block) continue;
@@ -600,6 +684,8 @@
         : block.lines.some((l) => l.p === page);
       if (hit) { scrollToEl(el); return true; }
     }
+    // 分帧渲染还没铺到这一页：记下来，补完再跳（否则「打开就停在原来读到的地方」会失效）
+    if (state.rendering) { state.pendingScrollPage = page; return false; }
     return false;
   }
 
@@ -653,6 +739,8 @@
   }
 
   function unmount() {
+    cancelChunks();
+    state.pendingScrollPage = null;
     disconnectCrops();
     if (state.host) state.host.scrollTop = 0;
     if (state.column) {
@@ -720,6 +808,7 @@
     mount,
     unmount,
     render,
+    appendBlocks,
     refreshHighlights,
     applyTypography,
     selection,
@@ -735,6 +824,8 @@
       crops: state.blocks.filter((b) => b.t === 'crop').length,
       chars: state.blocks.reduce((n, b) => n + (b._text ? b._text.length : 0), 0),
       page: state.page,
+      rendered: state.renderIndex,
+      rendering: state.rendering,
     }),
   };
 })();

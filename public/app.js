@@ -3353,7 +3353,7 @@
     layoutAbort: null,   // 版面进度流的中断句柄
     // 阅读模式（Reading Mode）：把 PDF 重排成文本流。doc 是结构树，forKey 防串台，
     // anchor 记住退出时的位置（切回原页要落到同一段）。
-    reading: { on: false, doc: null, forKey: null, busy: false, anchor: null },
+    reading: { on: false, doc: null, forKey: null, busy: false, anchor: null, more: null, restorePage: null, loadMs: 0, cached: false },
     fullTextLoading: false,
     meta: null,          // 打开阅读器时缓存的文献记录快照（列表过期时兜底）
     dirOpen: false,      // 左侧「论文目录」抽屉是否展开（只在文献来源下可用）
@@ -6030,6 +6030,8 @@
     pr.reading.doc = null;
     pr.reading.forKey = null;
     pr.reading.anchor = null;
+    pr.reading.more = null;
+    pr.reading.restorePage = null;
     // 文献来源才记 recordId；成果附件没有文献库记录（相关面板会被隐藏）
     pr.recordId = source?.kind === 'literature' ? source.id : null;
     // 成果附件是从「详情抽屉」（z-index 860）里点进来的，阅读器默认 90 会被抽屉盖住，
@@ -8092,17 +8094,120 @@
     return `l:${pr.recordId || pr.docUrl || ''}`;
   }
 
+  /**
+   * 等待期间的进度反馈。
+   *
+   * 为什么要有：首次打开一篇没缓存过的论文，服务端要把整篇版面过一遍（21 页约 1 秒，
+   * 80 页约 3 秒）。此前这段时间只有一个转圈 —— 用户完全看不出是在干活还是卡死了，
+   * 观感就是「加载不出来」。这里把服务端的逐页进度接出来，至少让等待是**可解释**的。
+   */
+  function startReadingProgress(body, startedAt) {
+    let alive = true;
+    let timer = 0;
+    const title = $('rmLoadingTitle');
+    const hint = $('rmLoadingHint');
+    const paint = (t) => { if (title && alive) title.textContent = t; };
+    paint('正在分析版面…');
+    if (hint) hint.textContent = '第一次打开这一篇需要几秒：切分文字块、判断分栏、剔除页眉页脚。分析结果会缓存，下次打开就是秒开。';
+    const tick = async () => {
+      if (!alive) return;
+      try {
+        const p = await api('/api/reading/progress', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        if (!alive) return;
+        if (p?.running && p.total) {
+          paint(`正在排版 ${p.page || 1} / ${p.total} 页`);
+        } else {
+          paint(`正在分析版面… 已用 ${((Date.now() - startedAt) / 1000).toFixed(0)} 秒`);
+        }
+      } catch (_) { /* 进度查不到不影响主请求 */ }
+      if (alive) timer = setTimeout(tick, 350);
+    };
+    timer = setTimeout(tick, 200);
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+      if (title) title.textContent = '正在分析版面…';
+    };
+  }
+
+  /** 首屏先取多少页（与后端 FIRST_PAGES 对齐）：12 页约 0.25 秒，够铺几屏 */
+  const READING_FIRST_PAGES = 12;
+
   async function loadReadingDoc(force) {
     const key = readingKey();
     if (!force && pr.reading.doc && pr.reading.forKey === key) return pr.reading.doc;
     const body = readingSourceBody(force);
     if (!body) throw new Error('当前文档没有可用于重排的 PDF');
-    const data = await api('/api/reading/doc', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-    pr.reading.doc = data.doc;
-    pr.reading.forKey = key;
-    return data.doc;
+    const startedAt = Date.now();
+    const stopProgress = startReadingProgress(body, startedAt);
+    try {
+      // 只要前 12 页：整篇 84 页要 1.7 秒，首屏不该等整篇 —— 剩下的用 continueReadingDoc 续
+      const data = await api('/api/reading/doc', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...body, toPage: READING_FIRST_PAGES }),
+      });
+      pr.reading.doc = data.doc;
+      pr.reading.forKey = key;
+      pr.reading.loadMs = Date.now() - startedAt;
+      pr.reading.cached = !!data.cached;
+      pr.reading.more = data.more ? { from: (data.part?.to || READING_FIRST_PAGES) + 1, key } : null;
+      return data.doc;
+    } finally {
+      stopProgress();
+    }
+  }
+
+  /**
+   * 首屏出来后，把剩下的页悄悄续拉回来并追加到文末。
+   * 用户这时候已经能读了，所以这段不占任何「等待」；失败也只是少了后面的页，
+   * 已显示的正文照常可用。
+   */
+  async function continueReadingDoc() {
+    const pending = pr.reading.more;
+    if (!pending) return;
+    pr.reading.more = null;
+    const body = readingSourceBody(false);
+    if (!body) return;
+    try {
+      const data = await api('/api/reading/doc', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...body, fromPage: pending.from }),
+      });
+      if (!pr.reading.on || pr.reading.forKey !== pending.key) return;
+      const blocks = data.doc?.blocks || [];
+      if (blocks.length) window.PrReading?.appendBlocks?.(blocks);
+      // 打开时想回到「上次读到的那一页」，而那页不在首段里 → 补完再定位
+      const restore = pr.reading.restorePage;
+      pr.reading.restorePage = null;
+      if (restore) window.PrReading?.scrollToPage?.(restore);
+    } catch (_) { /* 续拉失败不影响已显示的部分 */ }
+  }
+
+  /**
+   * 静默预热：PDF 一打开就在后台把重排结果算好。
+   *
+   * 「快」的本质不是算得快，而是**在用户点之前就算完**。用户从打开 PDF 到点「阅读模式」
+   * 通常要几秒（找位置、看摘要），这段时间足够算完；等缓存落地后点按钮就是 0 延迟。
+   * 刻意延后 900ms 并让出主线程：先保证 PDF 首屏画出来，别和它抢 CPU。
+   */
+  let warmTimer = 0;
+  function scheduleReadingWarmup() {
+    if (warmTimer) { clearTimeout(warmTimer); warmTimer = 0; }
+    if (pr.fileKind !== 'pdf') return;
+    const key = readingKey();
+    warmTimer = setTimeout(() => {
+      warmTimer = 0;
+      if (!pr.open || pr.fileKind !== 'pdf' || readingKey() !== key) return; // 已换篇
+      if (pr.reading.doc && pr.reading.forKey === key) return;              // 已经有结果
+      const body = readingSourceBody(false);
+      if (!body) return;
+      // 失败一律静默：预热只是优化，退回「点按钮时现算」即可
+      api('/api/reading/warm', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      }).catch(() => { /* ignore */ });
+    }, 900);
   }
 
   function updateReadingHint() {
@@ -8154,7 +8259,10 @@
   }
 
   async function enterReadingMode() {
-    if (pr.fileKind !== 'pdf' || !pr.doc) return;
+    // 点在什么上面、为什么没反应，都要说清楚 —— 静默 return 在用户眼里就是「坏了」
+    if (pr.fileKind === 'epub') { toast('阅读模式目前只支持 PDF；EPUB 直接就是重排视图', 'info'); return; }
+    if (pr.fileKind !== 'pdf') return;
+    if (!pr.doc) { toast('PDF 还没加载完，稍等一下再点', 'info'); return; }
     if (pr.reading.on) return;
     if (!window.PrReading) { toast('阅读模式组件未加载，请重新安装或刷新', 'error'); return; }
     const pane = $('prReading');
@@ -8173,8 +8281,12 @@
       window.PrReading.setDoc(doc);
       window.PrReading.mount();
       pr.reading.on = true;
-      window.PrReading.scrollToPage(pr.pageNum || 1);
+      // 首段就铺到了目标页就直接定位；目标页在后面的段里，等续拉回来再定位
+      const restore = pr.pageNum || 1;
+      pr.reading.restorePage = window.PrReading.scrollToPage(restore) ? null : restore;
       updateReadingHint();
+      // 首屏已经能读了，剩下的页在后台续（不阻塞、不弹提示）
+      continueReadingDoc();
       $('prReadingBtn')?.classList.add('reading');
       const warn = (doc.warnings || [])[0];
       if (warn) toast(warn, 'info');
@@ -8199,6 +8311,12 @@
     pane?.classList.add('hidden');
     pages?.classList.remove('hidden');
     pr.reading.on = false;
+    // 分段加载下结构树可能只拿到首段，退出时一并丢掉，下次进来重新按「首段 + 续拉」走一遍
+    // （都有磁盘缓存，重进是几十毫秒，但能保证不会只剩前 12 页）
+    pr.reading.doc = null;
+    pr.reading.forKey = null;
+    pr.reading.more = null;
+    pr.reading.restorePage = null;
     $('prReadingBtn')?.classList.remove('reading', 'busy');
     $('rmLoading')?.classList.add('hidden');
     // 切回原页时落到同一段：重排视图里读到哪里，原页就回到哪里
@@ -8217,6 +8335,8 @@
     pr.reading.doc = null;
     pr.reading.forKey = null;
     pr.reading.anchor = null;
+    pr.reading.more = null;
+    pr.reading.restorePage = null;
     // 真要销毁：PDFDocumentProxy 持有 worker 侧的文档与页缓存，只置 null 不会释放
     destroyPdfDoc();
     pr.source = null;
@@ -8282,6 +8402,8 @@
       pr.pageSizes = await fetchPageSizes(doc);
       buildPlaceholders();
       renderNotesList();
+      // 版面就位后静默预热阅读模式（用户点按钮时通常已经算完）
+      scheduleReadingWarmup();
     } catch (e) { toast('PDF 加载失败：' + e.message, 'error'); }
   }
 

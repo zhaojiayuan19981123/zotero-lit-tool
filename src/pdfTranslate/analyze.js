@@ -67,6 +67,9 @@ export async function analyzePdf(bytes, options = {}) {
   const {
     maxPages = 0, pageNumbers = null, signal, onProgress,
     keepFormulas = true, keepTables = true, translateReferences = false,
+    // 页区间：阅读模式靠它做「先出前 12 页，剩下的后台再补」——
+    // 只影响分析哪些页，不影响单页内部逻辑。
+    fromPage = 1, toPage = 0,
   } = options;
 
   const { getDocumentProxy } = await import('unpdf');
@@ -74,9 +77,12 @@ export async function analyzePdf(bytes, options = {}) {
   const data = toUint8Array(bytes, { copy: true });
   const doc = await getDocumentProxy(data);
   const totalPages = doc.numPages;
+  const lo = Math.max(1, Math.floor(Number(fromPage) || 1));
+  const hi = Number(toPage) > 0 ? Math.min(Math.floor(Number(toPage)), totalPages) : totalPages;
+  const end = maxPages > 0 ? Math.min(lo + maxPages - 1, hi) : hi;
   const targets = Array.isArray(pageNumbers) && pageNumbers.length
     ? pageNumbers.filter((n) => n >= 1 && n <= totalPages)
-    : Array.from({ length: maxPages > 0 ? Math.min(maxPages, totalPages) : totalPages }, (_, i) => i + 1);
+    : Array.from({ length: Math.max(0, end - lo + 1) }, (_, i) => lo + i);
 
   const pdfjs = await loadPdfJs();
   const names = pdfjs?.OPS ? opNameMap(pdfjs.OPS) : null;
