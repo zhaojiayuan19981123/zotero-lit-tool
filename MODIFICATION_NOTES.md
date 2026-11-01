@@ -1,3 +1,109 @@
+## v1.33.2：PDF 阅读器改成「窗口化渲染」，内存降一个数量级、滚动不再掉帧（2026-11-01）
+
+> 用户报：「现在这个软件在读文献的时候，太卡了，内存消耗太大，
+> 导致滑动 pdf 阅读的时候根本划不动，优化一下」。
+
+### 一、先量，再改
+
+造了一份 60 页、文字密集的测试 PDF（每页 46 行、按词切分成独立 text item，
+与真实 LaTeX 论文的文本层规模相当），用真 Chromium 打开阅读器、整篇滚一遍，
+实测**改之前**：
+
+| 指标 | 改动前 |
+|---|---|
+| 已渲染页留下 canvas | **60 个** |
+| canvas 位图总量 | **5700 万像素 ≈ 217MB** |
+| 文本层 `<span>` | **67 982 个** |
+| DOM 节点 | **71 252 个**（CDP 计 144 950） |
+| 滚回顶部时最长帧 | 89.1 ms，>50ms 的帧 8 个 |
+
+根因只有一个：**`pr.rendered` 只增不减**。页一旦进入过视口（rootMargin 600px），
+它的 canvas、上千个文本层 span、高亮层就永久留在 DOM 里。而且 canvas 是按
+`devicePixelRatio` 画的，一页 950 万像素、8.5MB 位图，读一篇几十页的论文就是
+几百 MB 常驻 —— 越读越卡、越读越吃内存，完全是这个模型的必然结果。
+
+### 二、改成窗口化渲染 + 主动回收
+
+- 两个 `IntersectionObserver`：一个「近了就画」（`PR_RENDER_MARGIN` = 600px），
+  一个「远了就收」（`PR_RELEASE_MARGIN` = 2400px）。回收窗口远大于渲染窗口，
+  所以「往下读一点再往上翻」这种小幅来回不会触发重画。
+- `releasePage()` 回收一页时做三件事：
+  ① canvas **宽高置 0**（Chromium 立刻交还位图，不用等 GC，只 `removeChild` 要等）；
+  ② 清掉文本层/高亮层那一坨 DOM，换回占位符（wrap 宽高不变，滚动位置不跳）；
+  ③ 调 `page.cleanup()` 释放 pdf.js 的算子列表 —— 否则等于把整篇解析结果攒在内存里。
+- 并发闸门：一次大跳转（点页码跳 30 页）会让途经的每页都触发渲染。开画前先回收
+  远处的页腾位置；仍排不下就 `setTimeout` 稍后自愈重试（不会漏画），并把
+  `PR_MAX_RENDERED` 兜在个位数。`getPage` 是异步的，回来时再判一次距离 ——
+  人已经翻走就干脆别画。
+- 兜底 `repairViewportPages()`：滚动停下 140ms 后，把视口内还没画的页按
+  「离视口中心近」补上。**这条是必须的**：快速甩动时一页刚开画人已翻走，
+  渲染被中途放弃并从 `rendered` 移除，而 IntersectionObserver 只在相交状态
+  **变化**时回调 —— 该页之后一直停在视口里也不会再触发，就永久卡在占位符上。
+
+### 三、画布分辨率加预算，避免「放大就爆」
+
+原来 `dpr = window.devicePixelRatio` 直接用。4K 屏 + Ctrl 滚轮放到 400% 时，
+单页 CSS 尺寸约 2448×3168，乘 dpr² 后是 3000 万像素、**单页 120MB 显存**。
+现在 `dpr = min(devicePixelRatio, 2, sqrt(PR_CANVAS_PIXEL_BUDGET / 页面面积))`，
+单页像素封顶 900 万（≈36MB）。放大时降到 1x 也看不出差别，但内存不再无上限。
+
+### 四、连带修掉的三个「只置 null 不释放」
+
+1. `closePdfReader()` 原来只写 `pr.doc = null`。`PDFDocumentProxy` 持有 worker 侧
+   文档与页缓存，读十几篇后内存一路涨。→ 新增 `destroyPdfDoc()` 真正 `doc.destroy()`，
+   关阅读器与换篇都走它。
+2. `loadPdfDocument()` 原来 `for (i=1..n) await doc.getPage(i)` **串行**取每页尺寸，
+   200 页的 PDF 光这一步就要好几秒。→ `fetchPageSizes()` 8 路并发，取完就 `cleanup()`。
+3. 打印「全部 N 页」时每页都 `renderFullPageCanvas` 出一张高分辨率画布，
+   转完 JPEG 却没释放，几十张十几 MB 的画布一起攒着。→ 转完立刻把宽高置 0。
+
+### 五、滚动定位不再每帧强制回流
+
+`updateCurrentPage` 原来每次 scroll 都 `querySelectorAll('.pr-page-wrap')` 再逐页读
+`offsetTop` 做线性扫描。现在：滚动回调只打一个 rAF 标记 → 一帧合并处理一次 →
+用 `cachePageOffsets()` 预先量好的偏移做**二分查找**。滚动回调里不再有 DOM 遍历。
+顺带 `.pr-page-wrap` 加 `contain: layout style`（每页尺寸固定，重画不该连累整条
+60 页长列表重排），`.pr-pages` 加 `overscroll-behavior: contain`。
+**刻意不加 `contain: paint`** —— 块高亮徽标要压在页边线上，paint 会把它裁掉。
+
+### 六、版面解析不再「打开就抢跑」
+
+`autoCmpPipeline` 原来是「打开英文文献 → 立刻自动解析版面 → 立刻自动整篇翻译」。
+版面解析是 67MB ONNX 模型、单页约 1.6 秒推理、**峰值内存约 800MB** 的重活
+（见 `src/layout.js` 头注释），还同一时刻只允许一个作业。它正好撞上
+「第一屏渲染 + 用户开始拖动」，一进阅读器就卡。
+→ 新增 `waitReaderIdle()`：连续 4 秒没有滚动才开工，最多等 15 秒
+（有人一直在翻也不能永远不解析）。功能不变，只是把重活挪到阅读区安静之后。
+
+### 七、改完的实测对比（同一份 60 页 PDF、同一台机器）
+
+| 指标 | 改动前 | 改动后 |
+|---|---|---|
+| 已渲染页留下 canvas | 60 | **3** |
+| canvas 位图总量 | 217 MB | **10.9 MB** |
+| 文本层 `<span>` | 67 982 | **3 393** |
+| DOM 节点 | 71 252 | **6 549** |
+| 滚回顶部最长帧 | 89.1 ms | **34.7 ms** |
+| >50ms 的帧 | 8 个 | **0 个** |
+
+逐帧统计「视口中线那页是否已画」：**正常阅读速度（120px/帧，约 7200px/s）下
+白屏帧 0%**，上下滚都一样；只有极端甩动（400px/帧，约 24000px/s）才会看到占位符，
+而且**停下 600ms 内必然补齐**。
+
+### 八、坑
+
+- `wrap.dataset.rendering` 这个「正在渲染」标记必须在 `finally` 里清，
+  否则一次异常就把这页永久锁死、再也不回收。
+- 回收时**不能**只 `wrap.innerHTML = ''`：不把 canvas 宽高置 0，位图会跟着
+  已脱离文档的元素一起等 GC，内存曲线是缓慢锯齿状上去的。
+- `contain: paint` 会裁掉 `.pr-block-badge`（悬停时压在块左上角外侧的那个类型徽标）。
+- 页码定位别用 `offsetTop` 相减：`.pr-page-wrap` 加了 `contain: layout` 之后
+  `offsetParent` 不一定是滚动容器，得用 `getBoundingClientRect` 的差值。
+- 单测里没法跑真渲染，所以 `test/reader-window.test.mjs` 做的是**源码级不变量断言**
+  （回收要置 0 宽高、要 cleanup、dpr 要封顶、滚动回调不能有 querySelectorAll…）；
+  真浏览器行为由 `zotero-lit-e2e/verify-reader-window.mjs` 覆盖（9 条，含白屏帧与
+  反复滚动不累积）。
+
 ## v1.33.1：修内置翻译在 Qwen3 上必现 400（thinking_budget 不能为 0）+ 搜索框做出「一眼能认出」的样子（2026-10-29）
 
 > 用户报了两个问题：

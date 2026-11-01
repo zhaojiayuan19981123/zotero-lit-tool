@@ -1727,8 +1727,16 @@ mark.anno-c-purple { color: var(--primary); background: none; }
 .pr-pages {
   flex: 1; overflow-y: auto; overflow-x: auto; padding: 24px;
   display: flex; flex-direction: column; align-items: center; gap: 20px;
+  /* 滚动容器自己成层：滚动时不必和阅读器外层一起重算 */
+  overscroll-behavior: contain;
 }
-.pr-page-wrap { position: relative; background: var(--on-primary); box-shadow: 0 2px 12px rgba(30,40,60,.18); border-radius: 3px; flex-shrink: 0; }
+/* 每页都是尺寸固定的独立盒子，用 contain 把布局/样式重算圈在页内 ——
+   否则一页的 canvas 重画会连累整条 60 页的长列表一起重排，滚动就掉帧。
+   刻意不加 paint 隔离：块高亮徽标要压在页边线上，paint 会把它裁掉。 */
+.pr-page-wrap {
+  position: relative; background: var(--on-primary); box-shadow: 0 2px 12px rgba(30,40,60,.18);
+  border-radius: 3px; flex-shrink: 0; contain: layout style;
+}
 .pr-page-wrap canvas { display: block; }
 .pr-placeholder {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;

@@ -158,10 +158,21 @@
 
   // ---------- 事件 ----------
 
+  /**
+   * 是否有文字选区。
+   * 不用 getSelection().toString()——它要把整个选区序列化成字符串，
+   * 而这里在指针移动时每帧都会问一次，选区一大就是白烧 CPU。
+   * isCollapsed 是 O(1)，判断「有没有选中东西」等价且便宜。
+   */
+  function hasSelection() {
+    const sel = window.getSelection();
+    return !!sel && sel.rangeCount > 0 && !sel.isCollapsed;
+  }
+
   function handleMove(event) {
     if (!state.enabled || !state.manifest) return;
     // 正在划词或拖着鼠标：让路给选区，不显示块高亮
-    if (event.buttons || (window.getSelection()?.toString().trim())) {
+    if (event.buttons || hasSelection()) {
       if (state.activeId) hideHover();
       return;
     }
@@ -203,7 +214,7 @@
     // 点在链接 / 按钮 / 输入框上时不抢事件
     if (event.target?.closest?.('a, button, input, textarea, select, [role="button"]')) return;
     // 刚划完词（有选区）说明用户不是想点块 —— 划词永远优先
-    if (window.getSelection()?.toString().trim()) return;
+    if (hasSelection()) return;
     const host = $('prPages');
     const wrap = event.target?.closest?.('.pr-page-wrap');
     if (!host || !wrap || !host.contains(wrap)) return;

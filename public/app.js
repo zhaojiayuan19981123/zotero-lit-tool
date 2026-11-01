@@ -3312,6 +3312,21 @@
   const pdfReaderUtils = window.PdfReaderUtils;
   if (!pdfReaderUtils) throw new Error('PDF 阅读器工具加载失败');
 
+  // ---------- 阅读器渲染窗口 ----------
+  // PDF 页一旦渲染出来就是「一张 canvas + 上千个文本层 span」，几十页全留着的代价极高
+  // （实测 60 页文字论文：5700 万像素位图 ≈ 217MB，文本层 6.8 万个节点）。
+  // 所以采取「看得见的画、走远了就收」：
+  //   RENDER_MARGIN  进入视口前后这么多像素就开始渲染（提前量，滚动才不白屏）
+  //   RELEASE_MARGIN 超出这么多像素就把页面退回占位符并释放位图（回收窗口比渲染窗口大得多，
+  //                  来回小幅滚动不会反复重画）
+  //   MAX_RENDERED   兜底上限：极端情况下（页很矮 / 缩放很小）也不让同时存在的页数失控
+  const PR_RENDER_MARGIN = 600;
+  const PR_RELEASE_MARGIN = 2400;
+  const PR_MAX_RENDERED = 8;
+  // 单页画布的像素预算（CSS 像素 × dpr²）。放大到 400% 时一页能到 3000 万像素、
+  // 单页就吃掉 120MB 显存，这里封顶后按预算反推可用 dpr。
+  const PR_CANVAS_PIXEL_BUDGET = 9e6;
+
   const pr = {
     open: false, doc: null, docUrl: null, scale: 1.4, pageNum: 1, totalPages: 1,
     recordId: null, highlightColor: 'yellow', currentSelection: null,
@@ -3320,6 +3335,12 @@
     lastJoinedSelectionKey: '',
     rendered: new Set(), // 已渲染页码
     observer: null,
+    releaseObserver: null, // 「离得太远就回收」观察器（见 releasePage）
+    pageOffsets: null,     // [{page,top,h}] 缓存的页偏移，供滚动定位二分查找
+    scrollRaf: 0,          // 滚动定位的 rAF 句柄（节流用）
+    settleTimer: 0,        // 滚动停下后的「补齐视口页」定时器
+    lastScrollAt: 0,       // 最近一次滚动的时间戳（自动管线据此等读者安静下来）
+    pageCache: new Map(),  // page -> PDFPageProxy，回收时调 cleanup() 释放算子列表
     tab: 'translate',    // 当前右侧面板页签
     md: null,            // Markdown 译文查看器状态 {url,name,visible,loaded,text}
     chat: [],            // 本篇论文的 AI 对话消息 [{role,content,images:[dataURL]}]
@@ -7904,6 +7925,24 @@
 
   // ---------- 自动对照管线：打开文献 → 版面识别 → 整篇翻译 → 完成后自动进对照精读 ----------
 
+  /**
+   * 等阅读区安静下来再干重活。
+   * 判定标准：最近一次滚动距今超过 quietMs；再久也不会超过 capMs（避免用户一直在翻时永远不解析）。
+   */
+  function waitReaderIdle(quietMs = 4000, capMs = 15000) {
+    const started = Date.now();
+    // 打开时 lastScrollAt 还是上一次阅读留下的，先归零；没有滚动就按「从打开算起」计时
+    pr.lastScrollAt = 0;
+    return new Promise((resolve) => {
+      const tick = () => {
+        const last = pr.lastScrollAt || started;
+        if (Date.now() - last >= quietMs || Date.now() - started >= capMs) { resolve(); return; }
+        setTimeout(tick, 400);
+      };
+      setTimeout(tick, 400);
+    });
+  }
+
   /** 工具条上的管线状态徽标。state: undefined=收起 | 'busy' | 'done' | 'fail' */
   function setCmpAutoChip(state, text) {
     const chip = $('cmpAutoChip');
@@ -7982,6 +8021,12 @@
     }
     // ③ 缺版面 → 自动解析（解析中工具条的「版面」按钮本来就会显示进度）
     if (pr.layoutFor !== recordId && !pr.layoutBusy) {
+      // 版面解析是真正的资源大户：67MB 模型 + 单页 ~1.6s 推理、峰值内存约 800MB，
+      // 且同一时刻只允许一个作业。刚打开就抢跑，正好撞上「第一屏渲染 + 用户开始拖动」，
+      // 表现为一进阅读器就卡。这里先等阅读区安静下来（连续 4 秒没有滚动）再开工，
+      // 最多等 15 秒 —— 有人一直在翻也不能永远不解析。
+      await waitReaderIdle();
+      if (pr.recordId !== recordId) return;
       setCmpAutoChip('busy', '正在解析版面…');
       try {
         await startLayoutParse();
@@ -8008,16 +8053,21 @@
 
   function closePdfReader() {
     pr.open = false;
-    pr.doc = null;
+    // 真要销毁：PDFDocumentProxy 持有 worker 侧的文档与页缓存，只置 null 不会释放
+    destroyPdfDoc();
     pr.source = null;
     pr.currentSelection = null;
     document.body.classList.remove('ac-reading');
     pr.lastJoinedSelectionKey = '';
     pr.pageRotations.clear();
     pr.rendered.clear();
+    pr.pageOffsets = null;
+    if (pr.scrollRaf) { cancelAnimationFrame(pr.scrollRaf); pr.scrollRaf = 0; }
+    if (pr.settleTimer) { clearTimeout(pr.settleTimer); pr.settleTimer = 0; }
     closeMdTranslation();
     hideSelTrans();
     if (pr.observer) { pr.observer.disconnect(); pr.observer = null; }
+    if (pr.releaseObserver) { pr.releaseObserver.disconnect(); pr.releaseObserver = null; }
     // 自动管线：本轮阅读结束。正在跑的翻译作业留在服务端继续（下次打开这篇会接上），
     // 本地只清掉轮询与状态位，下次打开同一篇重新走一遍判定。
     if (cmp.autoTimer) { clearInterval(cmp.autoTimer); cmp.autoTimer = null; }
@@ -8048,6 +8098,9 @@
   async function loadPdfDocument(url) {
     try {
       const lib2 = await loadPdfJs();
+      // 换篇时先把上一份文档彻底销毁：PDFDocumentProxy 持有 worker 侧文档与页缓存，
+      // 只把 pr.doc 置 null 是收不回来的（读十几篇后内存会一路涨）。
+      destroyPdfDoc();
       const doc = await lib2.getDocument({ url }).promise;
       pr.doc = doc;
       pr.docUrl = url;
@@ -8056,26 +8109,58 @@
       pr.pageRotations.clear();
       pr.lastJoinedSelectionKey = '';
       pr.rendered.clear();
+      pr.pageCache.clear();
       updateRotationLabel();
       $('prPageTotal').textContent = doc.numPages;
       $('prPageInput').max = doc.numPages;
       $('prPageInput').value = 1;
-      // 预取每页尺寸，建立占位
-      pr.pageSizes = [];
-      for (let i = 1; i <= doc.numPages; i++) {
-        const p = await doc.getPage(i);
-        const v = p.getViewport({ scale: 1 });
-        pr.pageSizes.push({ w: v.width, h: v.height, rotation: Number(p.rotate) || 0 });
-      }
+      // 预取每页尺寸，建立占位。必须并发：串行 await 一份 200 页的 PDF 光这一步就要好几秒。
+      pr.pageSizes = await fetchPageSizes(doc);
       buildPlaceholders();
       renderNotesList();
     } catch (e) { toast('PDF 加载失败：' + e.message, 'error'); }
   }
 
+  /** 销毁当前 PDF 文档（worker 侧文档 + 页缓存一起释放），可重复调用 */
+  function destroyPdfDoc() {
+    const doc = pr.doc;
+    pr.doc = null;
+    pr.pageCache.clear();
+    if (!doc) return;
+    try { Promise.resolve(doc.destroy()).catch(() => {}); } catch (_) { /* 已被销毁 */ }
+  }
+
+  /**
+   * 并发取每页尺寸（scale=1 的 viewport）。
+   * 并发度刻意压到 8：pdf.js 的 getPage 会触发页树解析，开太大反而抢 worker。
+   */
+  async function fetchPageSizes(doc) {
+    const sizes = new Array(doc.numPages);
+    let next = 1;
+    const worker = async () => {
+      while (next <= doc.numPages) {
+        const i = next++;
+        try {
+          const p = await doc.getPage(i);
+          const v = p.getViewport({ scale: 1 });
+          sizes[i - 1] = { w: v.width, h: v.height, rotation: Number(p.rotate) || 0 };
+          // 只取尺寸不留引用，算子列表当场释放（否则等于把整篇解析结果攒在内存里）
+          try { p.cleanup(); } catch (_) { /* ignore */ }
+        } catch (_) {
+          sizes[i - 1] = { w: 612, h: 792, rotation: 0 };
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, doc.numPages) }, worker));
+    return sizes;
+  }
+
   function buildPlaceholders() {
     const container = $('prPages');
     container.innerHTML = '';
-    if (pr.observer) pr.observer.disconnect();
+    if (pr.observer) { pr.observer.disconnect(); pr.observer = null; }
+    if (pr.releaseObserver) { pr.releaseObserver.disconnect(); pr.releaseObserver = null; }
+    pr.pageOffsets = null; // 容器整个重建，缓存的偏移作废
     for (let i = 1; i <= pr.totalPages; i++) {
       const size = getPageDisplaySize(i);
       const wrap = document.createElement('div');
@@ -8097,44 +8182,209 @@
           if (!pr.rendered.has(pageNum)) renderPageInto(en.target, pageNum);
         }
       }
-    }, { root: $('prPages'), rootMargin: '600px 0px' });
-    container.querySelectorAll('.pr-page-wrap').forEach((w) => pr.observer.observe(w));
+    }, { root: container, rootMargin: `${PR_RENDER_MARGIN}px 0px` });
+    // 回收窗口：离开视口这么远还没回来的页，退回占位符并释放位图与文本层。
+    // 窗口比渲染窗口大得多，所以「滚下去再滚回来」这一两个屏的动作不会触发重画。
+    pr.releaseObserver = new IntersectionObserver((entries) => {
+      for (const en of entries) {
+        if (!en.isIntersecting) releasePage(en.target, parseInt(en.target.dataset.page, 10));
+      }
+    }, { root: container, rootMargin: `${PR_RELEASE_MARGIN}px 0px` });
+    container.querySelectorAll('.pr-page-wrap').forEach((w) => {
+      pr.observer.observe(w);
+      pr.releaseObserver.observe(w);
+    });
     // 当前页码高亮跟踪。加守卫：buildPlaceholders 每次缩放 / 换模式都会重跑，
     // 无脑 addEventListener 会把同一个处理器叠上很多份。
     if (container.dataset.pageTrackBound !== '1') {
       container.dataset.pageTrackBound = '1';
       container.addEventListener('scroll', updateCurrentPage, { passive: true });
     }
+    cachePageOffsets();
     // 页容器整个重建了，对照精读画在页面上的「选中块」方框要补回来
     cmpRepaintPdfPick();
   }
 
-  function updateCurrentPage() {
+  /**
+   * 缓存每页在滚动内容里的纵向偏移，供 updateCurrentPage 二分查找。
+   * 必须用一次 getBoundingClientRect 批量读（布局已确定时是纯读，不触发回流），
+   * 否则每滚一帧都要对几十上百个 wrap 逐个取 offsetTop。
+   */
+  function cachePageOffsets() {
     const container = $('prPages');
-    const mid = container.scrollTop + container.clientHeight / 3;
-    let cur = 1;
-    container.querySelectorAll('.pr-page-wrap').forEach((w) => {
-      if (w.offsetTop <= mid) cur = parseInt(w.dataset.page, 10);
+    if (!container) { pr.pageOffsets = null; return; }
+    const wraps = [...container.querySelectorAll('.pr-page-wrap')];
+    if (!wraps.length) { pr.pageOffsets = null; return; }
+    const cRect = container.getBoundingClientRect();
+    const base = cRect.top - container.scrollTop;
+    pr.pageOffsets = wraps.map((w) => {
+      const r = w.getBoundingClientRect();
+      return { page: parseInt(w.dataset.page, 10), top: r.top - base, h: r.height };
     });
-    if (cur !== pr.pageNum) {
-      pr.pageNum = cur;
-      $('prPageInput').value = cur;
-      updateRotationLabel();
+  }
+
+  function updateCurrentPage() {
+    // 滚动事件每帧可能来好几次，且处理里要读布局；统一合并到一帧里做一次。
+    if (pr.scrollRaf) return;
+    pr.scrollRaf = requestAnimationFrame(() => {
+      pr.scrollRaf = 0;
+      const container = $('prPages');
+      if (!container || !pr.open) return;
+      pr.lastScrollAt = Date.now();
+      // 换篇 / 缩放后偏移会变；这里惰性补算，避免在渲染高峰抢布局
+      if (!pr.pageOffsets) cachePageOffsets();
+      const offs = pr.pageOffsets;
+      if (!offs || !offs.length) return;
+      const mid = container.scrollTop + container.clientHeight / 3;
+      // 二分：最后一个 top <= mid 的页
+      let lo = 0, hi = offs.length - 1, cur = offs[0].page;
+      while (lo <= hi) {
+        const m = (lo + hi) >> 1;
+        if (offs[m].top <= mid) { cur = offs[m].page; lo = m + 1; } else hi = m - 1;
+      }
+      if (cur !== pr.pageNum) {
+        pr.pageNum = cur;
+        $('prPageInput').value = cur;
+        updateRotationLabel();
+      }
+      scheduleViewportRepair();
+    });
+  }
+
+  /**
+   * 滚动停下后补齐视口内的页。
+   *
+   * 为什么必须有：快速甩动时，一页刚进入 600px 渲染区就开始画，等 getPage 回来人已经翻走，
+   * 渲染被「走远了就放弃」的守卫中止并移出 rendered —— 而 IntersectionObserver 只在
+   * 相交状态**变化**时才回调，这一页之后一直停在视口里也不会再触发渲染，
+   * 于是卡在占位符上。这里在滚动结束后兜一次底：按「离视口中心近」优先补画。
+   */
+  function scheduleViewportRepair() {
+    if (pr.settleTimer) clearTimeout(pr.settleTimer);
+    pr.settleTimer = setTimeout(repairViewportPages, 140);
+  }
+
+  function repairViewportPages() {
+    pr.settleTimer = 0;
+    if (!pr.open || !pr.doc) return;
+    const container = $('prPages');
+    if (!container) return;
+    const cr = container.getBoundingClientRect();
+    if (!cr.height) return;
+    const cMid = cr.top + cr.height / 2;
+    const todo = [];
+    for (const w of container.querySelectorAll('.pr-page-wrap')) {
+      const pageNum = parseInt(w.dataset.page, 10);
+      if (pr.rendered.has(pageNum)) continue;
+      const r = w.getBoundingClientRect();
+      // 视口上下各多留半屏，避免刚补完又因为一点点滚动而空着
+      if (r.bottom < cr.top - cr.height * 0.5 || r.top > cr.bottom + cr.height * 0.5) continue;
+      todo.push({ w, pageNum, d: Math.abs((r.top + r.bottom) / 2 - cMid) });
     }
+    // 离视口中心最近的先画，最多补 3 页（再多也没意义，剩下的等用户真滚到）
+    todo.sort((a, b) => a.d - b.d);
+    todo.slice(0, 3).forEach((it) => renderPageInto(it.w, it.pageNum));
+  }
+
+  /** 页面中心与滚动视口中心的纵向距离（像素）；用于判断「走远了」 */
+  function pageDistanceFromViewport(wrap) {
+    const container = $('prPages');
+    if (!container) return 0;
+    const cr = container.getBoundingClientRect();
+    const r = wrap.getBoundingClientRect();
+    const viewMid = cr.top + cr.height / 2;
+    const pageMid = r.top + r.height / 2;
+    const d = Math.abs(pageMid - viewMid) - (cr.height / 2 + r.height / 2);
+    return d > 0 ? d : 0;
+  }
+
+  /**
+   * 把一页退回占位符并释放它占的资源：
+   *   ① canvas 位图（先把宽高置 0，Chromium 会立刻交还显存，不必等 GC）
+   *   ② 文本层 / 高亮层那一坨 DOM（一页上千个 span）
+   *   ③ pdf.js 的 PDFPageProxy（cleanup 掉算子列表，别攒着整篇解析结果）
+   * 占位符的宽度高度不变，所以回收不会让滚动位置跳动。
+   */
+  function releasePage(wrap, pageNum) {
+    if (!wrap || !pr.rendered.has(pageNum)) return;
+    // 正在渲染的页不能动：canvas 还没画完，清掉会让这次渲染把结果写进一个空壳
+    if (wrap.dataset.rendering === '1') return;
+    pr.rendered.delete(pageNum);
+    wrap.querySelectorAll('canvas').forEach((c) => { c.width = 0; c.height = 0; });
+    wrap.innerHTML = '';
+    const ph = document.createElement('div');
+    ph.className = 'pr-placeholder';
+    ph.textContent = pageNum;
+    wrap.appendChild(ph);
+    const page = pr.pageCache.get(pageNum);
+    pr.pageCache.delete(pageNum);
+    if (page) { try { page.cleanup(); } catch (_) { /* ignore */ } }
+  }
+
+  /** 回收所有「离视口太远」以及超出上限的页，保留离视口最近的若干页 */
+  function pruneRenderedPages() {
+    if (!pr.rendered.size) return;
+    const container = $('prPages');
+    if (!container) return;
+    const wraps = [...container.querySelectorAll('.pr-page-wrap')];
+    const alive = [];
+    for (const wrap of wraps) {
+      const pageNum = parseInt(wrap.dataset.page, 10);
+      if (!pr.rendered.has(pageNum)) continue;
+      alive.push({ wrap, pageNum, d: pageDistanceFromViewport(wrap) });
+    }
+    if (!alive.length) return;
+    // 近的优先留：按距离升序，超过上限的、以及超出回收边界的全部退回占位符
+    alive.sort((a, b) => a.d - b.d);
+    alive.forEach((it, idx) => {
+      if (idx >= PR_MAX_RENDERED || it.d > PR_RELEASE_MARGIN + 200) releasePage(it.wrap, it.pageNum);
+    });
+  }
+
+  /**
+   * 收尾用的轻量回收：只看刚渲染完的这一页走没走远。
+   * 全文遍历（pruneRenderedPages）只在页数超过上限时才做，避免每次渲染都量一遍所有页。
+   */
+  function releaseIfFar(wrap, pageNum) {
+    if (!pr.rendered.has(pageNum)) return;
+    if (pr.rendered.size > PR_MAX_RENDERED) { pruneRenderedPages(); return; }
+    if (pageDistanceFromViewport(wrap) > PR_RELEASE_MARGIN + 200) releasePage(wrap, pageNum);
   }
 
   async function renderPageInto(wrap, pageNum) {
     if (!pr.doc || pr.rendered.has(pageNum)) return;
+    // 一次大的跳跃（点页码跳 30 页）会让途经的每一页都触发渲染，
+    // 十几页同时开始画 = 内存尖峰 + 主线程被 canvas 绘制挤满。
+    // 这里先回收远处的页腾出位置；还是排不下就稍后重试（自愈，不会漏画）。
+    if (pr.rendered.size >= PR_MAX_RENDERED) pruneRenderedPages();
+    if (pr.rendered.size >= PR_MAX_RENDERED + 4) {
+      clearTimeout(wrap._renderRetry);
+      wrap._renderRetry = setTimeout(() => renderPageInto(wrap, pageNum), 150);
+      return;
+    }
     pr.rendered.add(pageNum);
     // 旋转、缩放或切换文献时，旧的异步渲染可能晚到；令旧结果失效，避免覆盖新方向的页面。
     const token = `${pageNum}:${getPageExtraRotation(pageNum)}:${pr.scale}:${Date.now()}:${Math.random()}`;
     wrap.dataset.renderToken = token;
+    wrap.dataset.rendering = '1';
     const isCurrentRender = () => pr.open && pr.doc && wrap.dataset.renderToken === token;
     try {
       const page = await pr.doc.getPage(pageNum);
       if (!isCurrentRender()) return;
+      // getPage 也是异步的：等它回来的这段时间用户可能已经翻出很远。
+      // 已经走远就别画了（画完立刻又要被回收，纯属白占一块位图）。
+      if (pageDistanceFromViewport(wrap) > PR_RELEASE_MARGIN) {
+        pr.rendered.delete(pageNum);
+        return;
+      }
+      pr.pageCache.set(pageNum, page);
       const viewport = getPageViewport(page, pageNum);
-      const dpr = window.devicePixelRatio || 1;
+
+      // 画布分辨率：先用设备像素比，再受「单页像素预算」约束。
+      // 放很大时（人眼也分辨不出更多像素了）宁可降到 1x，也不要一页吃掉上百 MB 显存。
+      const cssArea = Math.max(1, viewport.width * viewport.height);
+      const dprCap = Math.sqrt(PR_CANVAS_PIXEL_BUDGET / cssArea);
+      const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2, dprCap));
 
       // 页面内容重建会把块高亮框一并清掉，先主动收起，避免留下悬空的高亮
       if (window.PrBlocks) window.PrBlocks.hideHover();
@@ -8142,7 +8392,6 @@
       wrap.style.width = viewport.width + 'px';
       wrap.style.height = viewport.height + 'px';
 
-      // 高清画布（按 devicePixelRatio 渲染）
       const canvas = document.createElement('canvas');
       canvas.width = Math.floor(viewport.width * dpr);
       canvas.height = Math.floor(viewport.height * dpr);
@@ -8174,7 +8423,12 @@
       cmpRepaintPdfPick();
     } catch (e) {
       if (isCurrentRender()) pr.rendered.delete(pageNum);
+    } finally {
+      wrap.dataset.rendering = '';
     }
+    // 渲染期间用户可能已经翻走了（此时回收观察器那次回调被 rendering 挡掉了），
+    // 这里补一次：走远了就立刻退回占位符，不让「没被观察到的页」白占一块位图。
+    if (wrap.dataset.renderToken === token) releaseIfFar(wrap, pageNum);
   }
 
   async function buildTextLayer(page, viewport, layerDiv) {
@@ -8220,6 +8474,7 @@
     if (!container) return;
     const wraps = container.querySelectorAll('.pr-page-wrap');
     if (!wraps.length) { buildPlaceholders(); return; }
+    pr.pageOffsets = null; // 尺度变了，偏移全部作废，滚动后会惰性重算
     wraps.forEach((wrap) => {
       const pageNum = parseInt(wrap.dataset.page, 10);
       const size = getPageDisplaySize(pageNum);
@@ -8228,6 +8483,10 @@
       wrap.style.height = (size.h * pr.scale) + 'px';
       if (pr.rendered.has(pageNum)) {
         pr.rendered.delete(pageNum);
+        const page = pr.pageCache.get(pageNum);
+        pr.pageCache.delete(pageNum);
+        if (page) { try { page.cleanup(); } catch (_) { /* ignore */ } }
+        wrap.querySelectorAll('canvas').forEach((c) => { c.width = 0; c.height = 0; });
         wrap.innerHTML = '';
         const ph = document.createElement('div');
         ph.className = 'pr-placeholder';
@@ -8240,7 +8499,7 @@
     // 视口外的页仍靠懒渲染在滚过去时才渲染。
     requestAnimationFrame(() => {
       const cr = container.getBoundingClientRect();
-      const margin = 600; // 与 buildPlaceholders 的 rootMargin 对齐
+      const margin = PR_RENDER_MARGIN;
       wraps.forEach((wrap) => {
         const pageNum = parseInt(wrap.dataset.page, 10);
         if (pr.rendered.has(pageNum)) return;
@@ -8255,6 +8514,8 @@
   function rebuildAllPages() {
     if (!pr.doc) return;
     pr.rendered.clear();
+    // 占位符整个重建会丢掉所有页对象，顺手把它们从缓存里摘掉（cleanup 由 doc 销毁统一处理）
+    pr.pageCache.clear();
     buildPlaceholders();
   }
 
@@ -8941,6 +9202,10 @@
       // JPEG 比 PNG 小一个数量级，打印质量没有肉眼差别，内存占用却低很多
       img.src = canvas.toDataURL('image/jpeg', 0.92);
       box.appendChild(img);
+      // 转成 JPEG 之后位图就没用了。这里显式置 0：否则「全部打印」会攒下
+      // 几十张高分辨率画布（每张十几 MB），GC 跟不上就先把内存顶爆。
+      canvas.width = 0;
+      canvas.height = 0;
       await new Promise((r) => setTimeout(r, 0));
     }
     // 交给系统：Electron / 浏览器都会弹出打印对话框（可选打印机、份数、页码范围）
