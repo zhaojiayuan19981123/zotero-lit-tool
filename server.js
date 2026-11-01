@@ -34,6 +34,7 @@ import { translate } from './src/translate.js';
 import { TRANSLATE_PROVIDERS } from './src/translateProviders.js';
 import { registerMailRoutes } from './src/mailRoutes.js';
 import { registerPdfTranslateRoutes } from './src/pdfTranslate/routes.js';
+import { registerReadingRoutes } from './src/readingMode.js';
 import { registerThesisRoutes } from './src/thesisRoutes.js';
 import { registerAchievementRoutes } from './src/achievementRoutes.js';
 import * as achievementStore from './src/achievementStore.js';
@@ -4385,6 +4386,15 @@ export function createApp({
     defaultOptions: DEFAULT_PDF_TRANSLATE_OPTIONS,
     visionComplete,
     visionInfo,
+    resolveAchievementFile,
+  });
+
+  // 阅读模式（Reading Mode）：把 PDF 还原成可重排的语义结构树。
+  // 与全文翻译共用同一条版面分析链路（src/pdfTranslate/analyze.js），
+  // 差别只在于它保留「行 + 片段」的几何，用来做重排视图 ↔ 原页坐标的双向映射。
+  registerReadingRoutes(app, {
+    store,
+    getUploadDir: () => currentUploadDir,
     resolveAchievementFile,
   });
 

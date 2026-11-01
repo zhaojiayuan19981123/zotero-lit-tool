@@ -1617,6 +1617,7 @@
         <button id="prToggleNote" class="btn btn-ghost pr-icobtn" title="笔记模式：左侧原文 / 中间划词翻译 / 右侧笔记（Markdown + 思维导图）"><svg class="ico" aria-hidden="true"><use href="#i-note"/></svg><span class="pr-bt-t">笔记模式</span></button>
         <button id="prToggleCmp" class="btn btn-ghost pr-icobtn" title="对照精读：左大纲 ｜ 中左原文 ｜ 中右译文 ｜ 右 AI 助读。先识别版面，再逐段对照翻译，点原文译文同步定位"><svg class="ico" aria-hidden="true"><use href="#i-grid"/></svg><span class="pr-bt-t">对照精读</span></button>
         <button id="prLayoutBtn" class="btn btn-ghost pr-icobtn" title="版面解析：识别图表 / 表格 / 公式区域，悬停看类型、点击放大或送 AI 解释"><svg class="ico" aria-hidden="true"><use href="#i-puzzle"/></svg><span class="plb-text">版面</span></button>
+        <button id="prReadingBtn" class="btn btn-ghost pr-icobtn" title="阅读模式：把 PDF 重排成干净的文本流（双栏变单栏、字号行距可调、页眉页脚剔除、图表公式原样保留），与原页标注双向同步"><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg><span class="pr-bt-t">阅读模式</span></button>
         <!-- 自动对照管线状态：打开文献 → 自动版面识别 → 自动整篇翻译 → 自动进对照精读 -->
         <span id="cmpAutoChip" class="cmp-auto-chip hidden"></span>
       </div>
@@ -1957,6 +1958,51 @@
           <div id="prMdContent" class="pr-md-content"></div>
         </div>
         <div id="prPages" class="pr-pages"></div>
+        <!-- 阅读模式（Reading Mode）：把 PDF 重排成干净的文本流。与原页视图互斥显示。
+             图表 / 表格 / 公式在原位上按 bbox 裁图保留，文字由阅读器重新排版。 -->
+        <div id="prReading" class="pr-reading hidden">
+          <div class="rm-bar">
+            <span class="rm-bar-title"><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg>阅读模式</span>
+            <label class="rm-field">字体
+              <select id="rmFont" class="tb-select rm-select" title="重排视图使用的字体族；「跟随原文」按原文正文自动判断衬线 / 无衬线">
+                <option value="auto">跟随原文</option>
+                <option value="serif">宋体 / 衬线</option>
+                <option value="sans">黑体 / 无衬线</option>
+              </select>
+            </label>
+            <span class="rm-stepgroup" title="字号（这个模式里没有「缩放」概念，改的就是文字大小）">
+              <button id="rmSizeMinus" class="rm-step" type="button">A−</button>
+              <span id="rmSizeLabel" class="rm-step-val">18</span>
+              <button id="rmSizePlus" class="rm-step rm-step-lg" type="button">A+</button>
+            </span>
+            <span class="rm-stepgroup" title="行距">
+              <button id="rmLhMinus" class="rm-step" type="button">行距−</button>
+              <span id="rmLhLabel" class="rm-step-val">1.75</span>
+              <button id="rmLhPlus" class="rm-step" type="button">行距+</button>
+            </span>
+            <label class="rm-field">页宽
+              <select id="rmWidth" class="tb-select rm-select" title="版心宽度：窄一点更好扫读，宽一点信息密度高">
+                <option value="600">窄</option>
+                <option value="720">适中</option>
+                <option value="900">宽</option>
+                <option value="1200">满宽</option>
+              </select>
+            </label>
+            <span class="rm-spacer"></span>
+            <span id="rmPageHint" class="rm-page-hint"></span>
+            <button id="rmBackToPdf" class="btn btn-ghost btn-sm" type="button" title="切回原始 PDF 视图，阅读位置保持不变">回到原页</button>
+          </div>
+          <div id="rmScroll" class="rm-scroll">
+            <div id="rmColumn" class="rm-column" role="document"></div>
+          </div>
+          <div id="rmLoading" class="rm-loading hidden">
+            <div class="rm-loading-card">
+              <div class="rm-spinner" aria-hidden="true"></div>
+              <div class="rm-loading-title">正在分析版面…</div>
+              <div class="rm-loading-hint">第一次打开这一篇需要几秒：切分文字块、判断分栏、剔除页眉页脚。分析结果会缓存，下次打开就是秒开。</div>
+            </div>
+          </div>
+        </div>
         <!-- EPUB 正文宿主：与 #prPages 互斥显示（同一个阅读器外壳，两种渲染内核） -->
         <div id="prEpubHost" class="pr-epub-host hidden"></div>
       </div>
@@ -2161,6 +2207,7 @@
   <script src="pdf-reader-utils.js"></script>
   <script src="epub-reader.js"></script>
   <script src="reader-blocks.js"></script>
+  <script src="reader-mode.js"></script>
   <script src="paper-note-utils.js"></script>
   <script src="doi-utils.js"></script>
   <script src="rank-utils.js"></script>

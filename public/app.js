@@ -3351,6 +3351,9 @@
     layoutFor: null,     // 已装载版面结果对应的文献 id（防止切篇时串台）
     layoutBusy: false,   // 版面解析是否正在进行（含等待）
     layoutAbort: null,   // 版面进度流的中断句柄
+    // 阅读模式（Reading Mode）：把 PDF 重排成文本流。doc 是结构树，forKey 防串台，
+    // anchor 记住退出时的位置（切回原页要落到同一段）。
+    reading: { on: false, doc: null, forKey: null, busy: false, anchor: null },
     fullTextLoading: false,
     meta: null,          // 打开阅读器时缓存的文献记录快照（列表过期时兜底）
     dirOpen: false,      // 左侧「论文目录」抽屉是否展开（只在文献来源下可用）
@@ -6022,6 +6025,11 @@
     if (ep.on) destroyEpub();
     pr.source = source;
     pr.fileKind = fileKind === 'epub' ? 'epub' : 'pdf';
+    // 换篇时阅读模式必须整个重置：结构树是按文档缓存的，串台会读到上一篇的正文
+    exitReadingMode({ silent: true });
+    pr.reading.doc = null;
+    pr.reading.forKey = null;
+    pr.reading.anchor = null;
     // 文献来源才记 recordId；成果附件没有文献库记录（相关面板会被隐藏）
     pr.recordId = source?.kind === 'literature' ? source.id : null;
     // 成果附件是从「详情抽屉」（z-index 860）里点进来的，阅读器默认 90 会被抽屉盖住，
@@ -6121,6 +6129,9 @@
     show($('prToggleMd'), !epub);
     // 版面解析针对 PDF 版式，而且结果要写进文献记录（成果附件没有记录）→ 两处都要满足
     show($('prLayoutBtn'), lit && !epub);
+    // 阅读模式对「文献」和「成果附件」都可用（都不依赖文献记录），只排除 EPUB
+    show($('prReadingBtn'), !epub);
+    if (epub && pr.reading.on) exitReadingMode({ silent: true });
     show($('prTabAnalysis'), lit && !epub);
     // 停在 EPUB 不支持的页签上（解析结果读的是 PDF 版面）要退回到「笔记」
     if (epub && pr.tab === 'analysis') pr.tab = 'notes';
@@ -8051,8 +8062,161 @@
     }
   }
 
+  // ============ 阅读模式（Reading Mode） ============
+  // 把 PDF 重排成普通 HTML 文本流：双栏变单栏、字号行距可调、页眉页脚剔除、
+  // 图表公式按原始 bbox 裁图保留。结构树由 src/readingMode.js 产出（复用全文翻译
+  // 的版面分析链路），渲染与坐标映射在 public/reader-mode.js。
+  //
+  // 与原页视图的关系：两套视图**共用同一份批注数据**（annotations 里的 PDF 坐标），
+  // 所以在阅读模式里划的高亮，切回原页立刻能看到；原页画的标注，重排视图里也按
+  // 字符区间还原。这是「阅读模式」和「另存一份重排文档」的本质区别。
+
+  /** 请求体：阅读模式要读哪份 PDF（文献 / 成果附件 / 上传文件名三种来源） */
+  function readingSourceBody(force) {
+    const src = pr.source;
+    if (src?.kind === 'achievement' && src.achievementId && src.fileId) {
+      return { achievementId: src.achievementId, fileId: src.fileId, force: !!force };
+    }
+    if (src?.kind === 'literature' && pr.recordId) {
+      return { literatureId: pr.recordId, force: !!force };
+    }
+    const m = /\/uploads\/(.+)$/.exec(String(pr.docUrl || ''));
+    if (m) return { fileName: decodeURIComponent(m[1]), force: !!force };
+    return null;
+  }
+
+  /** 当前文档的标识：切篇 / 换附件后必须重新拉结构树，不能拿上一篇的 */
+  function readingKey() {
+    const src = pr.source;
+    if (src?.kind === 'achievement') return `a:${src.achievementId}:${src.fileId}`;
+    return `l:${pr.recordId || pr.docUrl || ''}`;
+  }
+
+  async function loadReadingDoc(force) {
+    const key = readingKey();
+    if (!force && pr.reading.doc && pr.reading.forKey === key) return pr.reading.doc;
+    const body = readingSourceBody(force);
+    if (!body) throw new Error('当前文档没有可用于重排的 PDF');
+    const data = await api('/api/reading/doc', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    pr.reading.doc = data.doc;
+    pr.reading.forKey = key;
+    return data.doc;
+  }
+
+  function updateReadingHint() {
+    const hint = $('rmPageHint');
+    if (!hint || !pr.reading.on) return;
+    const page = window.PrReading?.currentPage?.() || pr.pageNum || 1;
+    hint.textContent = `第 ${page} / ${pr.totalPages} 页`;
+  }
+
+  function installReadingHooks() {
+    if (!window.PrReading) return;
+    window.PrReading.configure({
+      getDoc: () => pr.doc,
+      pageSize: (p) => pr.pageSizes[p - 1],
+      getAnnotations: () => currentAnnotations(),
+      onPageChange: (page) => {
+        pr.pageNum = page;
+        const input = $('prPageInput');
+        if (input) input.value = page;
+        updateReadingHint();
+      },
+      onScroll: updateReadingHint,
+      // 点重排视图里的高亮 / 笔记图标 → 跳到侧栏「笔记与高亮」里那一条
+      onAnnotationClick: (id) => {
+        const anns = currentAnnotations();
+        const idx = anns.findIndex((a) => a.id === id);
+        if (idx < 0) return;
+        pr.notesHit = idx;
+        if (pr.tab !== 'notes') switchPrTab('notes');
+        renderNotesList();
+        setTimeout(() => $('prNotesList')?.querySelector(`[data-note-row="${idx}"]`)?.scrollIntoView({ block: 'nearest' }), 40);
+      },
+    });
+  }
+
+  /** 把原页滚到「某页 + 页内某个纵向位置」（y 为自上而下的 pt） */
+  function scrollPdfToPosition(page, yTopDown) {
+    const container = $('prPages');
+    const wrap = container?.querySelector(`.pr-page-wrap[data-page="${page}"]`);
+    if (!container || !wrap) return;
+    const cr = container.getBoundingClientRect();
+    const wr = wrap.getBoundingClientRect();
+    const offset = Math.max(0, Number(yTopDown) || 0) * pr.scale;
+    container.scrollTop = Math.max(0, container.scrollTop + (wr.top - cr.top) + offset - 12);
+    pr.pageNum = page;
+    const input = $('prPageInput');
+    if (input) input.value = page;
+    pr.pageOffsets = null; // 手工改了滚动位置，缓存的页偏移可能过期
+  }
+
+  async function enterReadingMode() {
+    if (pr.fileKind !== 'pdf' || !pr.doc) return;
+    if (pr.reading.on) return;
+    if (!window.PrReading) { toast('阅读模式组件未加载，请重新安装或刷新', 'error'); return; }
+    const pane = $('prReading');
+    const pages = $('prPages');
+    if (!pane || !pages) return;
+    pr.reading.busy = true;
+    $('prReadingBtn')?.classList.add('busy');
+    pane.classList.remove('hidden');
+    pages.classList.add('hidden');
+    $('rmLoading')?.classList.remove('hidden');
+    try {
+      const doc = await loadReadingDoc(false);
+      // 分析要几秒，期间用户可能已经换篇 / 关了阅读器
+      if (!pr.open || pr.fileKind !== 'pdf') return;
+      installReadingHooks();
+      window.PrReading.setDoc(doc);
+      window.PrReading.mount();
+      pr.reading.on = true;
+      window.PrReading.scrollToPage(pr.pageNum || 1);
+      updateReadingHint();
+      $('prReadingBtn')?.classList.add('reading');
+      const warn = (doc.warnings || [])[0];
+      if (warn) toast(warn, 'info');
+    } catch (e) {
+      exitReadingMode({ silent: true });
+      toast(e.message || '阅读模式打开失败', 'error');
+    } finally {
+      pr.reading.busy = false;
+      $('prReadingBtn')?.classList.remove('busy');
+      $('rmLoading')?.classList.add('hidden');
+    }
+  }
+
+  /** 退出阅读模式。silent = 不出提示、不还原滚动（换篇 / 关阅读器时用） */
+  function exitReadingMode({ silent = false } = {}) {
+    const pane = $('prReading');
+    const pages = $('prPages');
+    const wasOn = pr.reading.on;
+    const anchor = wasOn ? window.PrReading?.anchor?.() : null;
+    if (wasOn) pr.reading.anchor = anchor || null;
+    try { window.PrReading?.unmount?.(); } catch (_) { /* 组件可能还没装 */ }
+    pane?.classList.add('hidden');
+    pages?.classList.remove('hidden');
+    pr.reading.on = false;
+    $('prReadingBtn')?.classList.remove('reading', 'busy');
+    $('rmLoading')?.classList.add('hidden');
+    // 切回原页时落到同一段：重排视图里读到哪里，原页就回到哪里
+    if (wasOn && !silent && anchor) scrollPdfToPosition(anchor.page, anchor.y);
+  }
+
+  function toggleReadingMode() {
+    if (pr.reading.on) exitReadingMode();
+    else enterReadingMode();
+  }
+
   function closePdfReader() {
     pr.open = false;
+    // 阅读模式先把重排视图收干净（它持有 DOM 与裁图 canvas），再销毁 PDF
+    exitReadingMode({ silent: true });
+    pr.reading.doc = null;
+    pr.reading.forKey = null;
+    pr.reading.anchor = null;
     // 真要销毁：PDFDocumentProxy 持有 worker 侧的文档与页缓存，只置 null 不会释放
     destroyPdfDoc();
     pr.source = null;
@@ -8528,16 +8692,23 @@
     for (const a of anns) {
       const rect = a.rect || [0, 0, 0, 0];
       if (a.type === 'highlight') {
-        const r = displayRect(rect);
-        const div = document.createElement('div');
-        div.style.position = 'absolute';
-        div.style.left = (r.x1 * scale) + 'px';
-        div.style.top = (r.y1 * scale) + 'px';
-        div.style.width = ((r.x2 - r.x1) * scale) + 'px';
-        div.style.height = ((r.y2 - r.y1) * scale) + 'px';
-        div.style.background = HIGHLIGHT_COLORS[a.color] || '#ffe08a';
-        div.style.opacity = '0.45';
-        layer.appendChild(div);
+        // 逐行矩形优先：阅读模式里画的标注、以及下划线，存的都是逐行 rects。
+        // 只有外包矩形时（老数据 / PDF 选区）就退回单块绘制，行为与之前一致。
+        const list = Array.isArray(a.rects) && a.rects.length
+          ? a.rects.map((r) => (Array.isArray(r) ? r : [r.x1, r.y1, r.x2, r.y2]))
+          : [rect];
+        for (const raw of list) {
+          const r = displayRect(raw);
+          const div = document.createElement('div');
+          div.style.position = 'absolute';
+          div.style.left = (r.x1 * scale) + 'px';
+          div.style.top = (r.y1 * scale) + 'px';
+          div.style.width = ((r.x2 - r.x1) * scale) + 'px';
+          div.style.height = ((r.y2 - r.y1) * scale) + 'px';
+          div.style.background = HIGHLIGHT_COLORS[a.color] || '#ffe08a';
+          div.style.opacity = '0.45';
+          layer.appendChild(div);
+        }
       } else if (a.type === 'underline') {
         const lineH = Math.max(1.5, 1.4 * scale);
         for (const raw of (a.rects || [])) {
@@ -8711,11 +8882,12 @@
     }));
   }
 
-  /** 跳到某一处批注（EPUB 用 CFI，PDF 滚到那一页） */
+  /** 跳到某一处批注（EPUB 用 CFI，PDF 滚到那一页；阅读模式则滚到重排文本里的那一段） */
   function locateAnnotation(a) {
     if (!a) return;
     if (a.cfi) { window.EpubReader?.goTo(a.cfi); return; }
     if (!a.page) return;
+    if (pr.reading.on && window.PrReading?.scrollToPage?.(a.page)) return;
     const target = $('prPages')?.querySelector(`.pr-page-wrap[data-page="${a.page}"]`);
     if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
@@ -8824,6 +8996,8 @@
     });
     const idx = items.findIndex((x) => x.id === litId);
     if (idx >= 0) items[idx] = updated;
+    // 批注是 PDF 视图与阅读模式共用的唯一数据源：写入后两边都要重新呈现
+    if (pr.reading.on) window.PrReading?.refreshHighlights?.();
   }
 
   /**
@@ -8847,6 +9021,12 @@
     if (!sel || sel.isCollapsed) return null;
     const text = selectionText(sel);
     if (!text) return null;
+    // 阅读模式：选区在重排视图里，由它按「行 + 片段」的几何反推原始坐标。
+    // 注意这里必须排在 .pr-page-wrap 判定之前 —— 重排视图里根本没有页容器。
+    if (pr.reading.on) {
+      const rm = window.PrReading?.selection?.();
+      if (rm) return rm;
+    }
     const wrap = findPageWrap(sel.anchorNode);
     if (!wrap) return null;
     const pageNum = parseInt(wrap.dataset.page, 10);
@@ -9059,14 +9239,45 @@
     }
   }
 
+  /**
+   * 选区 → 批注数组。
+   * 一条批注只能挂一页（annotations 的历史结构如此），所以跨页选区会拆成多条，
+   * 每条都带逐行矩形 rects —— 下划线要逐行画，重排视图也要靠它反推字符区间。
+   */
+  function annotationsFromSelection(type, sel, note = '') {
+    const parts = Array.isArray(sel.parts) && sel.parts.length ? sel.parts : [{ page: sel.pageNum, rects: sel.rects }];
+    const now = new Date().toISOString();
+    const base = Date.now();
+    return parts.map((part, i) => {
+      const rects = (part.rects || [])
+        .map((r) => ({ x1: +r.x1, y1: +r.y1, x2: +r.x2, y2: +r.y2 }))
+        .filter((r) => Number.isFinite(r.x1) && Number.isFinite(r.y2));
+      if (!rects.length) return null;
+      const x1 = Math.min(...rects.map((r) => r.x1));
+      const y1 = Math.min(...rects.map((r) => r.y1));
+      const x2 = Math.max(...rects.map((r) => r.x2));
+      const y2 = Math.max(...rects.map((r) => r.y2));
+      return {
+        id: 'a' + base + (i ? '-' + i : ''),
+        page: part.page,
+        type,
+        color: type === 'note' ? '' : pr.highlightColor,
+        rect: [x1, y1, x2, y2],
+        rects,
+        text: sel.text,
+        note,
+        createdAt: now,
+        ...(sel.fromReading ? { fromReading: true } : {}),
+      };
+    }).filter(Boolean);
+  }
+
   function doHighlight() {
     const sel = pr.currentSelection;
     if (!sel) return;
     // EPUB 没有页面坐标，改用 CFI 定位（两种定位最终存进同一条 annotations 记录）
     if (sel.kind === 'epub') { addEpubAnnotation('highlight', sel); return; }
-    const x1 = Math.min(...sel.rects.map((r) => r.x1)), y1 = Math.min(...sel.rects.map((r) => r.y1));
-    const x2 = Math.max(...sel.rects.map((r) => r.x2)), y2 = Math.max(...sel.rects.map((r) => r.y2));
-    addAnnotation({ id: 'a' + Date.now(), page: sel.pageNum, type: 'highlight', color: pr.highlightColor, rect: [x1, y1, x2, y2], text: sel.text, note: '', createdAt: new Date().toISOString() });
+    addAnnotations(annotationsFromSelection('highlight', sel));
   }
 
   // 下划线：按选区的逐行矩形，在每行文字底部画一条线（跨行选中会得到多条下划线）
@@ -9074,7 +9285,7 @@
     const sel = pr.currentSelection;
     if (!sel) return;
     if (sel.kind === 'epub') { addEpubAnnotation('underline', sel); return; }
-    addAnnotation({ id: 'a' + Date.now(), page: sel.pageNum, type: 'underline', color: pr.highlightColor, rects: sel.rects, text: sel.text, note: '', createdAt: new Date().toISOString() });
+    addAnnotations(annotationsFromSelection('underline', sel));
   }
 
   function doNote() {
@@ -9086,9 +9297,7 @@
         const note = $('prNoteText').value.trim();
         if (!note) { toast('笔记内容为空', 'error'); return; }
         if (sel.kind === 'epub') { addEpubAnnotation('note', sel, note); return; }
-        const x1 = Math.min(...sel.rects.map((r) => r.x1)), y1 = Math.min(...sel.rects.map((r) => r.y1));
-        const x2 = Math.max(...sel.rects.map((r) => r.x2)), y2 = Math.max(...sel.rects.map((r) => r.y2));
-        addAnnotation({ id: 'a' + Date.now(), page: sel.pageNum, type: 'note', color: '', rect: [x1, y1, x2, y2], text: sel.text, note, createdAt: new Date().toISOString() });
+        addAnnotations(annotationsFromSelection('note', sel, note));
       } },
     ]);
   }
@@ -9107,20 +9316,32 @@
     return addAnnotation(ann);
   }
 
-  async function addAnnotation(ann) {
+  async function addAnnotation(ann) { return addAnnotations([ann]); }
+
+  /**
+   * 一次写入多条批注（跨页选区会拆成多条）。只 PATCH 一次 ——
+   * 逐条调用 addAnnotation 会互相覆盖：每次都是「读旧数组 + 追加 + 整体覆盖」。
+   */
+  async function addAnnotations(list) {
+    const anns = (list || []).filter(Boolean);
+    if (!anns.length) return;
     const it = items.find((x) => x.id === pr.recordId);
-    const anns = [...(it?.annotations || []), ann];
-    await saveAnnotations(anns);
+    const next = [...(it?.annotations || []), ...anns];
+    await saveAnnotations(next);
     hideSelectionToolbar();
     hidePopover();
-    if (ann.cfi) {
-      // EPUB：交给 epub.js 把批注画进正文（重排版后由 rendition 自动重建）
-      window.EpubReader?.attachAnnotation(ann);
-    } else {
-      rerenderVisiblePage(ann.page);
+    for (const ann of anns) {
+      if (ann.cfi) {
+        // EPUB：交给 epub.js 把批注画进正文（重排版后由 rendition 自动重建）
+        window.EpubReader?.attachAnnotation(ann);
+      } else {
+        rerenderVisiblePage(ann.page);
+      }
     }
+    // 重排视图与 PDF 视图共用同一份批注：写完立刻在阅读模式里补上高亮
+    if (pr.reading.on) window.PrReading?.refreshHighlights?.();
     renderNotesList();
-    toast('已保存', 'success');
+    toast(anns.length > 1 ? `已保存 ${anns.length} 条（跨页选区按页拆分）` : '已保存', 'success');
   }
 
   function showNotePopover(a, x, y) {
@@ -9304,6 +9525,20 @@
       startLayoutParse();
     });
 
+    // 阅读模式：重排视图 ↔ 原页视图
+    $('prReadingBtn')?.addEventListener('click', () => { toggleReadingMode(); });
+    $('rmBackToPdf')?.addEventListener('click', () => { exitReadingMode(); });
+    // Ctrl/⌘ + 滚轮改字号（重排视图里「缩放」就是改字号，与 PDF 视图的缩放语义不同）
+    $('rmScroll')?.addEventListener('wheel', (e) => {
+      if (!pr.reading.on || !(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      const t = window.PrReading?.typography;
+      if (!t) return;
+      t.size = Math.min(30, Math.max(12, t.size + (e.deltaY > 0 ? -1 : 1)));
+      window.PrReading.applyTypography();
+      try { localStorage.setItem('prReadingTypo', JSON.stringify(t)); } catch (_) { /* ignore */ }
+    }, { passive: false });
+
     // 笔记模式（三栏）：绑定分隔条、页签与导图工具栏
     initPnNoteMode();
 
@@ -9404,6 +9639,8 @@
     $('prPageInput').addEventListener('change', () => {
       const n = parseInt($('prPageInput').value, 10);
       if (n >= 1 && n <= pr.totalPages) {
+        // 阅读模式打开时，页码输入框跳的是重排文本里的位置（同一页的对应段落）
+        if (pr.reading.on) { if (window.PrReading?.scrollToPage(n)) return; }
         const target = $('prPages').querySelector(`.pr-page-wrap[data-page="${n}"]`);
         if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }

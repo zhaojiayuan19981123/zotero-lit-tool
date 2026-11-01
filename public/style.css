@@ -1730,6 +1730,101 @@ mark.anno-c-purple { color: var(--primary); background: none; }
   /* 滚动容器自己成层：滚动时不必和阅读器外层一起重算 */
   overscroll-behavior: contain;
 }
+/* ==================== 阅读模式（Reading Mode） ====================
+   把 PDF 重排成普通 HTML 文本流后的阅读界面。版心宽度、字号、行距全部由
+   三个 CSS 变量驱动（--rm-width / --rm-size / --rm-lh），顶部控件只改变量，
+   浏览器自己重排 —— 这正是重排模式里没有「缩放」概念的原因。 */
+.pr-reading {
+  flex: 1; min-width: 0; position: relative;
+  display: flex; flex-direction: column; background: var(--bg);
+  --rm-size: 18px; --rm-lh: 1.75; --rm-width: 720px;
+  --rm-font: Georgia, "Times New Roman", "Songti SC", "Source Han Serif SC", SimSun, serif;
+}
+.pr-reading.hidden { display: none; }
+.rm-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 7px 14px; background: var(--surface); border-bottom: 1px solid var(--border-soft);
+}
+.rm-bar-title { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--text-2); }
+.rm-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); }
+.rm-select { height: 28px; padding: 0 6px; font-size: 12px; }
+.rm-stepgroup {
+  display: inline-flex; align-items: center; gap: 2px; padding: 2px;
+  background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: 999px;
+}
+.rm-step {
+  border: 0; background: transparent; color: var(--text-2); cursor: pointer;
+  font-size: 12px; line-height: 1; padding: 5px 9px; border-radius: 999px;
+}
+.rm-step:hover { background: var(--primary-soft); color: var(--primary); }
+.rm-step-lg { font-weight: 700; }
+.rm-step-val { min-width: 32px; text-align: center; font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
+.rm-spacer { flex: 1; }
+.rm-page-hint { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.rm-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding: 30px 16px 88px; }
+.rm-column {
+  max-width: var(--rm-width); margin: 0 auto; padding: 42px 48px;
+  background: var(--surface); border-radius: 10px; box-shadow: 0 2px 18px rgba(30, 40, 60, .10);
+  font-family: var(--rm-font); font-size: var(--rm-size); line-height: var(--rm-lh);
+  color: var(--text); text-align: justify; hyphens: auto; overflow-wrap: break-word;
+}
+.rm-column > * + * { margin-top: .62em; }
+.rm-block { margin: 0; }
+.rm-block.rm-center { text-align: center; }
+.rm-column h1, .rm-column h2, .rm-column h3, .rm-column h4, .rm-column h5 {
+  font-weight: 700; line-height: 1.35; text-align: left;
+}
+.rm-column h1 { font-size: 1.46em; margin-top: 1.5em; }
+.rm-column h2 { font-size: 1.2em; margin-top: 1.5em; }
+.rm-column h3 { font-size: 1.06em; margin-top: 1.3em; }
+.rm-column h4, .rm-column h5 { font-size: 1em; margin-top: 1.15em; }
+.rm-column > h1:first-child, .rm-column > h2:first-child { margin-top: 0; }
+.rm-block[data-kind="caption"] { text-align: center; font-size: .86em; color: var(--text-2); }
+.rm-block.rm-ref {
+  font-size: .92em; color: var(--text-2); text-align: left;
+  padding-left: 1.5em; text-indent: -1.5em;
+}
+/* 图表 / 表格 / 公式：按原始 bbox 裁图，等比缩放，永远是「原样」 */
+.rm-crop { margin: 1.15em 0; }
+.rm-crop-box {
+  position: relative; display: flex; align-items: center; justify-content: center;
+  min-height: 54px; background: var(--surface-2);
+  border: 1px solid var(--border-soft); border-radius: 8px; overflow: hidden;
+}
+.rm-crop-table .rm-crop-box { background: var(--surface); }
+.rm-crop-canvas { display: block; width: 100%; height: auto; }
+.rm-crop-ph { font-size: 12px; letter-spacing: .1em; color: var(--text-3); }
+.rm-crop figcaption { margin-top: 7px; font-size: .82em; line-height: 1.55; color: var(--text-2); text-align: center; }
+/* 高亮 / 下划线 / 笔记：与 PDF 视图共用同一份批注数据，这里只是另一种呈现 */
+.rm-hl { border-radius: 2px; cursor: pointer; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.rm-underline {
+  background: transparent !important; cursor: pointer;
+  text-decoration: underline; text-decoration-color: #e8a213;
+  text-decoration-thickness: 2px; text-underline-offset: 3px;
+}
+.rm-note { margin-left: 2px; font-size: .72em; color: var(--accent-gold); cursor: pointer; }
+/* 首次分析时的进度遮罩 */
+.rm-loading {
+  position: absolute; inset: 0; z-index: 6; display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--bg) 84%, transparent); backdrop-filter: blur(2px);
+}
+.rm-loading.hidden { display: none; }
+.rm-loading-card {
+  max-width: 400px; padding: 22px 26px; text-align: center;
+  background: var(--surface); border-radius: 14px; box-shadow: 0 12px 32px rgba(20, 30, 60, .16);
+}
+.rm-spinner {
+  width: 26px; height: 26px; margin: 0 auto 12px; border-radius: 50%;
+  border: 3px solid var(--border); border-top-color: var(--primary);
+  animation: rm-spin .8s linear infinite;
+}
+@keyframes rm-spin { to { transform: rotate(360deg); } }
+.rm-loading-title { font-weight: 600; margin-bottom: 6px; }
+.rm-loading-hint { font-size: 12.5px; line-height: 1.7; color: var(--text-3); }
+@media (max-width: 760px) {
+  .rm-column { padding: 26px 18px; }
+  .rm-bar { gap: 6px; }
+}
 /* 每页都是尺寸固定的独立盒子，用 contain 把布局/样式重算圈在页内 ——
    否则一页的 canvas 重画会连累整条 60 页的长列表一起重排，滚动就掉帧。
    刻意不加 paint 隔离：块高亮徽标要压在页边线上，paint 会把它裁掉。 */
