@@ -1,7 +1,10 @@
 ## 安装包说明
 
 - Windows x64：`zotero-lit-tool-setup-<version>.exe`
-- macOS：**本版本暂不提供安装包**（构建机在分配阶段被平台取消，与代码无关，见文末说明）
+- Apple Silicon Mac：`zotero-lit-tool-<version>-macos-arm64.dmg`
+- Intel Mac：`zotero-lit-tool-<version>-macos-x64.dmg`
+
+（上一版 macOS 构建机在分配阶段被平台取消，这次恢复正常，两个架构都已附上。）
 
 Windows 客户端自动更新还需要本 Release 中的同名 `.blockmap` 和 `latest.yml`，请勿重命名这些文件。
 
@@ -75,7 +78,9 @@ Windows 客户端自动更新还需要本 Release 中的同名 `.blockmap` 和 `
 - 重排结构的版本号变了（旧的缓存不再兼容），**升级后第一次打开某篇论文会重新分析一次**，
   之后都是秒开。
 - 你不需要做任何事，覆盖安装即可；已有的批注、笔记、阅读位置都在。
-- macOS 安装包本版本仍未提供，原因与上一版相同（构建机在分配阶段被平台取消，与代码无关）。
+- macOS 两个架构的安装包这次都构建成功了（上一版是构建机在分配阶段被平台取消，与代码无关）。
+  macOS 包没有 Apple Developer ID 签名和公证，首次打开若被 Gatekeeper 拦住，
+  请到「系统设置 → 隐私与安全性」里允许打开。
 
 ---
 
