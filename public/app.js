@@ -228,7 +228,13 @@
   async function api(path, opts = {}) {
     const res = await fetch(path, opts);
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `请求失败 (${res.status})`);
+    if (!res.ok) {
+      const err = new Error(data.error || `请求失败 (${res.status})`);
+      // 带上服务端的错误码：调用方要按 code 分支（例如 NO_MODEL 要引导去设置里选模型）
+      if (data && data.code) err.code = data.code;
+      err.status = res.status;
+      throw err;
+    }
     return data;
   }
   function isAbortError(e) { return e && (e.name === 'AbortError' || e.code === 20); }
@@ -3353,7 +3359,11 @@
     layoutAbort: null,   // 版面进度流的中断句柄
     // 阅读模式（Reading Mode）：把 PDF 重排成文本流。doc 是结构树，forKey 防串台，
     // anchor 记住退出时的位置（切回原页要落到同一段）。
-    reading: { on: false, doc: null, forKey: null, busy: false, anchor: null, more: null, restorePage: null, loadMs: 0, cached: false },
+    reading: {
+      on: false, doc: null, forKey: null, busy: false, anchor: null, more: null, restorePage: null,
+      loadMs: 0, cached: false,
+      refining: false, aiAbort: null, // 「AI 精修」进行中 / 中断句柄（再点一次 = 取消）
+    },
     fullTextLoading: false,
     meta: null,          // 打开阅读器时缓存的文献记录快照（列表过期时兜底）
     dirOpen: false,      // 左侧「论文目录」抽屉是否展开（只在文献来源下可用）
@@ -6747,6 +6757,11 @@
     applyCmpRatios();
     adoptCmpAssist();
     adoptCmpPdfHost();
+    // 已经开着阅读模式进来的：原文栏直接装重排面板，别让用户以为「重排被关掉了」
+    if (pr.reading.on) {
+      adoptCmpReadingPane();
+      $('prPages')?.classList.add('hidden');
+    }
     // PDF 换了容器，上一份悬停高亮（绝对定位在页面里）没有意义了
     window.PrBlocks?.hideHover?.();
     // 让 PDF 上的版面块点击改走「命中块 → 译文定位」，而不是「只有图表块能点开预览」
@@ -6773,6 +6788,8 @@
 
   async function closeCmpMode() {
     cmp.on = false;
+    // 先退阅读模式：重排面板要搬回 .pr-main，PDF 页也要重新显示出来
+    if (pr.reading.on || $('prReading')?.parentElement?.id === 'cmpPdfHost') exitReadingMode({ silent: true });
     closeCmpStream();
     clearPdfPick();
     uninstallCmpPdfHooks();
@@ -6836,6 +6853,31 @@
     const body = document.querySelector('.pr-main');
     if (!pages || !body) return;
     if (pages.parentElement !== body) body.appendChild(pages);
+    // 重排面板跟着一起搬回去（正常情况下 closeCmpMode 已经先退出了阅读模式，
+    // 这里只是兜底：万一有别的路径把面板留在了 #cmpPdfHost 里也能自愈）
+    const pane = $('prReading');
+    if (pane && pane.parentElement?.id === 'cmpPdfHost') body.appendChild(pane);
+  }
+
+  /**
+   * 把阅读模式面板（#prReading）搬进对照精读的原文栏。
+   *
+   * 用户此前在对照精读里点「阅读模式」是没反应的 —— 面板确实打开了，但它住在
+   * .pr-main 里，而对照精读把 .pr-body 整个藏了，于是「点了没动静」。
+   * 与 #prPages 同一手法：搬 DOM，不另建一套重排视图。
+   */
+  function adoptCmpReadingPane() {
+    const pane = $('prReading');
+    const host = cmpEl('cmpPdfHost');
+    if (!pane || !host) return;
+    if (pane.parentElement !== host) host.appendChild(pane);
+  }
+
+  function restoreCmpReadingPane() {
+    const pane = $('prReading');
+    const main = document.querySelector('.pr-main');
+    if (!pane || !main) return;
+    if (pane.parentElement !== main) main.appendChild(pane);
   }
 
   // ---------- 版面块层：对照精读里的点击语义 ----------
@@ -7410,8 +7452,12 @@
   /** 把 PDF 滚到某一块所在的位置。已经看得见就不滚 —— 否则点当前页的段落会「抖」一下 */
   function cmpRevealBlockInPdf(id) {
     const b = cmp.blockById.get(id);
+    if (!b || !b.page) return;
+    // 原文栏此刻是重排文本流：PDF 页是隐藏的，滚它没有任何视觉效果。
+    // 重排视图按页定位即可 —— 块 id 分属两套编号体系，按页对齐已经够准。
+    if (pr.reading.on) { window.PrReading?.scrollToPage?.(b.page); return; }
     const scroller = cmpPdfScroller();
-    if (!b || !b.page || !scroller || cmp.view === 'trans') return;
+    if (!scroller || cmp.view === 'trans') return;
     const wrap = document.querySelector(`#prPages .pr-page-wrap[data-page="${b.page}"]`);
     if (!wrap) return;
     const sr = scroller.getBoundingClientRect();
@@ -7538,6 +7584,50 @@
     if (!scroller || scroller.dataset.cmpSyncBound === '1') return;
     scroller.dataset.cmpSyncBound = '1';
     scroller.addEventListener('scroll', cmpOnPdfScroll, { passive: true });
+  }
+
+  /**
+   * 原文栏换成「重排文本流」时的同一条锚线：重排视图里视口顶部的块 → 译文栏跟随。
+   *
+   * 重排视图没有 PDF 的页面几何，所以换算方式不同：PrReading.anchor() 给的是
+   * 「第几页 + 页内自上而下多少 pt」，把它折成页面高度百分比，再和版面块比 ——
+   * 和 PDF 那条路径用的是同一个百分比口径，落点因此是一致的。
+   */
+  function cmpTopVisibleBlockFromReading() {
+    const a = window.PrReading?.anchor?.();
+    if (!a?.page) return null;
+    const blocks = cmp.data?.blocks || [];
+    if (!blocks.length) return null;
+    // 用未旋转的页高：PrReading 的 y 就是以它的 `pageSize` 钩子（= pr.pageSizes）算出来的
+    const size = pr.pageSizes?.[a.page - 1] || getPageDisplaySize(a.page);
+    const pct = size?.h ? Math.max(0, Math.min(100, (a.y / size.h) * 100)) : 0;
+    let best = null;
+    for (const b of blocks) {
+      if (!b.page) continue;
+      if (b.page < a.page) { best = b; continue; }
+      if (b.page > a.page) break;
+      const flat = window.PrBlocks?.getBlock(b.id, b.page);
+      const p = flat ? window.PrBlocks.blockPercent(flat) : null;
+      if (!p) continue;
+      if (p.top <= pct) best = b;
+      else break;
+    }
+    return best;
+  }
+
+  function cmpOnReadingScroll() {
+    if (!cmp.on || cmp.syncing || cmp.view === 'pdf' || !pr.reading.on) return;
+    const b = cmpTopVisibleBlockFromReading();
+    if (!b || b.id === cmp.syncAnchorId) return;
+    cmp.syncAnchorId = b.id;
+    const flow = cmpEl('cmpTransFlow');
+    const el = transBlockEl(b.id);
+    if (!flow || !el) return;
+    cmp.syncing = true;
+    cmpScrollIntoView(flow, el, false);
+    markCmpBlockCurrent(b.id);
+    clearTimeout(cmp.syncTimer);
+    cmp.syncTimer = setTimeout(() => { cmp.syncing = false; }, 90);
   }
 
   // ---------- 单段按需翻译（点原文哪一段就翻哪一段） ----------
@@ -8186,6 +8276,109 @@
   }
 
   /**
+   * 工具条上的「AI 精修」状态：跑过了就常驻显示修了多少处，没跑过就收起来。
+   * 常驻显示的理由 —— 用户下次打开这篇时要知道「现在看到的是精修过的版本」，
+   * 否则没法判断标题加粗、脚注归位到底是规则给对了还是模型给对了。
+   */
+  function updateReadingAiState() {
+    const el = $('rmAiState');
+    const btn = $('rmAiBtn');
+    if (!el) return;
+    if (pr.reading.refining) return; // 进行中的文案由 refineReadingByAi 自己维护
+    const ai = pr.reading.doc?.ai;
+    if (!ai) {
+      el.textContent = '';
+      el.classList.add('hidden');
+      if (btn) { btn.textContent = 'AI 精修'; btn.disabled = false; }
+      return;
+    }
+    const bits = [];
+    for (const [k, label] of [['footnotes', '脚注'], ['headings', '标题'], ['joins', '合段']]) {
+      if (Number(ai[k])) bits.push(`${label} ${Number(ai[k])}`);
+    }
+    el.textContent = bits.length ? `AI 已修 ${bits.join(' / ')}` : 'AI 核对过 · 无需调整';
+    el.title = [ai.label || ai.model || '模型', String(ai.at || '').slice(0, 16).replace('T', ' ')]
+      .filter(Boolean).join(' · ');
+    el.classList.remove('hidden');
+    if (btn) { btn.textContent = '重跑精修'; btn.disabled = false; }
+  }
+
+  /**
+   * AI 精修：把规则判不准的三类语义问题交给**已配置的模型**（多是本地）再核一遍。
+   *
+   * 为什么值得单做一个按钮而不是自动跑：本地模型跑全篇要几十秒到几分钟，不能塞进
+   * 「打开就来」的路径里；但用户读完觉得「这段怎么被切成两半」时需要有个出口。
+   * 后端只让模型回答「哪些块是脚注 / 哪块是标题 / 哪两块要合并」，正文一个字不改，
+   * 所以这一步不会动原文用词，最坏情况也就是没修到。
+   */
+  async function refineReadingByAi() {
+    // 再点一次 = 取消（本地模型可能跑上一两分钟，必须留一个能停的口子）
+    if (pr.reading.refining) { pr.reading.aiAbort?.abort(); return; }
+    if (!pr.reading.on) return;
+    const body = readingSourceBody(false);
+    if (!body) { toast('当前文档没有可用于重排的 PDF', 'error'); return; }
+    const already = pr.reading.doc?.ai;
+    if (already && !window.confirm('这一篇已经用 AI 精修过了。要重新跑一次吗？（会再用一次模型）')) return;
+
+    const btn = $('rmAiBtn');
+    const stateEl = $('rmAiState');
+    const startedAt = Date.now();
+    pr.reading.refining = true;
+    const ctl = new AbortController();
+    pr.reading.aiAbort = ctl;
+    if (btn) btn.textContent = '取消';
+    const paint = () => {
+      if (!stateEl || !pr.reading.refining) return;
+      stateEl.textContent = `AI 精修中… ${((Date.now() - startedAt) / 1000).toFixed(0)} 秒`;
+      stateEl.title = '本地模型逐批核对版面；按「取消」可随时中止，已完成的批次不会丢';
+      stateEl.classList.remove('hidden');
+    };
+    paint();
+    const timer = setInterval(paint, 500);
+    try {
+      const data = await api('/api/reading/refine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...body, force: !!already }),
+        signal: ctl.signal,
+      });
+      // 期间可能已经换篇 / 退出阅读模式：这时候把结果塞回去就是串台
+      if (!pr.reading.on || pr.reading.forKey !== readingKey()) return;
+      const doc = data.doc;
+      const page = window.PrReading?.currentPage?.() || pr.pageNum || 1;
+      pr.reading.doc = doc;
+      // refine 返回的是**整篇**：之前「首屏 12 页 + 续拉」的待办就不用做了
+      pr.reading.more = null;
+      window.PrReading?.setDoc?.(doc);
+      window.PrReading?.render?.();
+      // 块 id 会被重排（r1…rN 重新编号），只能按页码回到原处
+      window.PrReading?.scrollToPage?.(page);
+      updateReadingHint();
+      const s = data.summary || doc?.ai || {};
+      const bits = [];
+      for (const [k, label] of [['footnotes', '脚注'], ['headings', '标题'], ['joins', '合段']]) {
+        if (Number(s[k])) bits.push(`${label} ${Number(s[k])}`);
+      }
+      if (data.cached) toast('这一篇之前精修过，直接用了缓存结果', 'info');
+      else if (bits.length) toast(`AI 精修完成：${bits.join('、')}`, 'success');
+      else toast('AI 核对完成，版面没有需要改的地方', 'success');
+    } catch (e) {
+      if (isAbortError(e)) { toast('已取消 AI 精修', 'info'); return; }
+      if (e?.code === 'NO_MODEL') {
+        toast('还没有配置可用的模型。AI 精修要在「设置 → 模型」里选一个模型（本地模型也可以）', 'error');
+      } else {
+        toast(e.message || 'AI 精修失败', 'error');
+      }
+    } finally {
+      clearInterval(timer);
+      pr.reading.refining = false;
+      pr.reading.aiAbort = null;
+      if (stateEl) stateEl.title = '';
+      updateReadingAiState();
+    }
+  }
+
+  /**
    * 静默预热：PDF 一打开就在后台把重排结果算好。
    *
    * 「快」的本质不是算得快，而是**在用户点之前就算完**。用户从打开 PDF 到点「阅读模式」
@@ -8229,7 +8422,11 @@
         if (input) input.value = page;
         updateReadingHint();
       },
-      onScroll: updateReadingHint,
+      onScroll: () => {
+        updateReadingHint();
+        // 对照精读里原文栏就是这块重排面板：它一滚，译文栏要跟着走
+        if (cmp.on) cmpOnReadingScroll();
+      },
       // 点重排视图里的高亮 / 笔记图标 → 跳到侧栏「笔记与高亮」里那一条
       onAnnotationClick: (id) => {
         const anns = currentAnnotations();
@@ -8270,6 +8467,8 @@
     if (!pane || !pages) return;
     pr.reading.busy = true;
     $('prReadingBtn')?.classList.add('busy');
+    // 对照精读下这块面板在 .pr-main 里，而 .pr-body 被隐藏 —— 必须搬到原文栏里才看得见
+    if (cmp.on) adoptCmpReadingPane();
     pane.classList.remove('hidden');
     pages.classList.add('hidden');
     $('rmLoading')?.classList.remove('hidden');
@@ -8281,6 +8480,7 @@
       window.PrReading.setDoc(doc);
       window.PrReading.mount();
       pr.reading.on = true;
+      updateReadingAiState(); // 这篇之前精修过 → 工具条上要显示「AI 已修 N 处」
       // 首段就铺到了目标页就直接定位；目标页在后面的段里，等续拉回来再定位
       const restore = pr.pageNum || 1;
       pr.reading.restorePage = window.PrReading.scrollToPage(restore) ? null : restore;
@@ -8307,7 +8507,13 @@
     const wasOn = pr.reading.on;
     const anchor = wasOn ? window.PrReading?.anchor?.() : null;
     if (wasOn) pr.reading.anchor = anchor || null;
+    // 精修可能还在跑：退出就把请求掐掉，别让它在后台继续烧本地模型
+    pr.reading.aiAbort?.abort();
+    pr.reading.aiAbort = null;
+    pr.reading.refining = false;
     try { window.PrReading?.unmount?.(); } catch (_) { /* 组件可能还没装 */ }
+    // 从对照精读的原文栏搬回 .pr-main，否则它会跟着 #cmpPdfHost 一起被藏起来
+    if (pane && pane.parentElement?.id === 'cmpPdfHost') restoreCmpReadingPane();
     pane?.classList.add('hidden');
     pages?.classList.remove('hidden');
     pr.reading.on = false;
@@ -8317,6 +8523,7 @@
     pr.reading.forKey = null;
     pr.reading.more = null;
     pr.reading.restorePage = null;
+    updateReadingAiState(); // doc 已清空 → 状态文案收起来
     $('prReadingBtn')?.classList.remove('reading', 'busy');
     $('rmLoading')?.classList.add('hidden');
     // 切回原页时落到同一段：重排视图里读到哪里，原页就回到哪里
@@ -9650,6 +9857,8 @@
     // 阅读模式：重排视图 ↔ 原页视图
     $('prReadingBtn')?.addEventListener('click', () => { toggleReadingMode(); });
     $('rmBackToPdf')?.addEventListener('click', () => { exitReadingMode(); });
+    // AI 精修：用已配置的模型复核脚注 / 标题 / 断段（跑过就显示修了几处）
+    $('rmAiBtn')?.addEventListener('click', () => { refineReadingByAi(); });
     // Ctrl/⌘ + 滚轮改字号（重排视图里「缩放」就是改字号，与 PDF 视图的缩放语义不同）
     $('rmScroll')?.addEventListener('wheel', (e) => {
       if (!pr.reading.on || !(e.ctrlKey || e.metaKey)) return;

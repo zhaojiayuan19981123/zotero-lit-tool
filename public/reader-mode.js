@@ -68,35 +68,56 @@
     const runOf = [];
     const idxOf = [];
     const lineOf = [];
+    const flagOf = [];
+    const urlOf = [];
     const lines = block.lines || [];
 
-    const push = (ch, ri, ci, li) => {
+    const push = (ch, ri, ci, li, flag, url) => {
       text += ch;
       runOf.push(ri);
       idxOf.push(ci);
       lineOf.push(li);
+      flagOf.push(flag);
+      urlOf.push(url || '');
     };
     const pushSep = (li) => {
       text += ' ';
       runOf.push(-1);
       idxOf.push(0);
       lineOf.push(li);
+      flagOf.push(0);
+      urlOf.push('');
+    };
+    // 脚注 / 作者单位这种「一行一个条目」的块要保留原始换行：
+    // 通讯邮箱、单位地址挤成一段读起来就是一团，所以用真换行 + white-space: pre-line。
+    const hardLines = block.kind === 'footnote';
+    const pushBreak = (li) => {
+      text += '\n';
+      runOf.push(-1);
+      idxOf.push(0);
+      lineOf.push(li);
+      flagOf.push(0);
+      urlOf.push('');
     };
 
     for (let li = 0; li < lines.length; li++) {
       const line = lines[li];
       const size = Number(line.s) || Number(block.size) || 10;
       let prevEnd = null;
-      for (const [x, w, str] of line.runs || []) {
-        const s = String(str || '');
+      for (const run of line.runs || []) {
+        const x = run[0];
+        const w = run[1];
+        const s = String(run[2] || '');
+        const flag = Number(run[3]) || 0;
+        const url = typeof run[4] === 'string' ? run[4] : '';
         if (!s) continue;
         if (prevEnd !== null) {
           const gap = Number(x) - prevEnd;
           if (gap > size * 0.22 && !/\s$/.test(text) && !/^\s/.test(s)) pushSep(li);
         }
         const ri = runs.length;
-        runs.push({ x: Number(x) || 0, w: Number(w) || 0, len: s.length, line: li });
-        for (let i = 0; i < s.length; i++) push(s[i], ri, i, li);
+        runs.push({ x: Number(x) || 0, w: Number(w) || 0, len: s.length, line: li, flag, url });
+        for (let i = 0; i < s.length; i++) push(s[i], ri, i, li, flag, url);
         prevEnd = Number(x) + (Number(w) || 0);
       }
       if (li === lines.length - 1) continue;
@@ -106,9 +127,11 @@
       if (/[A-Za-z]-$/.test(text) && /^[a-z]/.test(nextFirst)) {
         // 行尾断词：删掉连字符（映射表同步弹出）
         text = text.slice(0, -1);
-        runOf.pop(); idxOf.pop(); lineOf.pop();
+        runOf.pop(); idxOf.pop(); lineOf.pop(); flagOf.pop(); urlOf.pop();
         continue;
       }
+      // 脚注块一行一个条目：换行比补空格忠实（邮箱 / 单位地址不该连成一段）
+      if (hardLines) { pushBreak(li); continue; }
       if (CJK_EDGE.test(lastCh) || CJK_EDGE.test(nextFirst)) continue;
       pushSep(li);
     }
@@ -118,6 +141,8 @@
     block._runOf = Int32Array.from(runOf);
     block._idxOf = Int32Array.from(idxOf);
     block._lineOf = Int32Array.from(lineOf);
+    block._flagOf = Int8Array.from(flagOf);
+    block._urlOf = urlOf;
     return block;
   }
 
@@ -159,6 +184,10 @@
     if (block.align === 'center') el.classList.add('rm-center');
     if (block.bold) el.classList.add('rm-bold');
     if (block.kind === 'reference') el.classList.add('rm-ref');
+    if (block.kind === 'footnote') el.classList.add('rm-fn');
+    if (block.sep) el.classList.add('rm-fn-sep');
+    if (block.kind === 'kicker') el.classList.add('rm-kicker');
+    if (block.kind === 'authors') el.classList.add('rm-authors');
     fillText(el, block);
     return el;
   }
@@ -185,41 +214,106 @@
     return fig;
   }
 
-  /** 用带高亮的片段填满一个文本块 */
+  /** 带样式（粗体 / 斜体）的文字节点 */
+  function styledText(txt, flag) {
+    if (!txt) return null;
+    if (!flag) return document.createTextNode(txt);
+    const span = document.createElement('span');
+    span.className = 'rm-s' + (flag & 1 ? ' rm-b' : '') + (flag & 2 ? ' rm-i' : '');
+    span.textContent = txt;
+    return span;
+  }
+
+  /**
+   * 填满一个文本块。
+   *
+   * 三种内联信息要同时成立：原文的粗体/斜体（run 第 4 位）、超链接（run 第 5 位）、
+   * 批注高亮（按字符区间）。做法是给每个字符算三项属性，再按「属性完全相同的连续字符」
+   * 切段，逐段生成 <mark> / <a> / <span> 的嵌套 —— 这样三者重叠也不会互相吃掉。
+   */
   function fillText(el, block) {
-    const ranges = highlightsFor(block);
     const text = block._text || '';
     el.textContent = '';
-    if (!ranges.length) { el.appendChild(document.createTextNode(text)); return; }
-    let pos = 0;
-    for (const r of ranges) {
-      const start = Math.max(0, Math.min(text.length, r.start));
-      const end = Math.max(start, Math.min(text.length, r.end));
-      if (start > pos) el.appendChild(document.createTextNode(text.slice(pos, start)));
-      if (end > start) {
-        const mark = document.createElement('mark');
-        mark.className = 'rm-hl';
-        mark.dataset.ann = r.id;
-        if (r.type === 'underline') {
-          mark.classList.add('rm-underline');
-        } else {
-          mark.style.background = r.color || '#ffe08a';
-          mark.style.opacity = '0.42';
-        }
-        mark.textContent = text.slice(start, end);
-        el.appendChild(mark);
+    if (!text) return;
+    const ranges = highlightsFor(block);
+    const flags = block._flagOf;
+    const urls = block._urlOf;
+    const n = text.length;
+
+    // 每个字符落在哪条高亮里（-1 = 没有）
+    const hlOf = new Int32Array(n).fill(-1);
+    if (ranges.length) {
+      for (let k = 0; k < ranges.length; k++) {
+        const start = Math.max(0, Math.min(n, ranges[k].start));
+        const end = Math.max(start, Math.min(n, ranges[k].end));
+        for (let i = start; i < end; i++) if (hlOf[i] < 0) hlOf[i] = k;
       }
-      if (r.type === 'note' && r.note) {
-        const sup = document.createElement('sup');
-        sup.className = 'rm-note';
-        sup.dataset.ann = r.id;
-        sup.title = r.note;
-        sup.textContent = '✎';
-        el.appendChild(sup);
-      }
-      pos = Math.max(pos, end);
     }
-    if (pos < text.length) el.appendChild(document.createTextNode(text.slice(pos)));
+
+    let i = 0;
+    while (i < n) {
+      const flag = flags ? flags[i] : 0;
+      const url = urls ? urls[i] : '';
+      const hl = hlOf[i];
+      let j = i + 1;
+      while (j < n
+        && (flags ? flags[j] : 0) === flag
+        && (urls ? urls[j] : '') === url
+        && hlOf[j] === hl) j += 1;
+      el.appendChild(segmentNode(text.slice(i, j), flag, url, hl >= 0 ? ranges[hl] : null));
+      i = j;
+    }
+    // 笔记类批注在段末补一个小图标（点开看笔记）
+    for (const r of ranges) {
+      if (r.type !== 'note' || !r.note) continue;
+      const sup = document.createElement('sup');
+      sup.className = 'rm-note';
+      sup.dataset.ann = r.id;
+      sup.title = r.note;
+      sup.textContent = '✎';
+      el.appendChild(sup);
+    }
+  }
+
+  /** 一段同属性的文字 → 可嵌套的 <mark> / <a> / <span> */
+  function segmentNode(txt, flag, url, range) {
+    let inner = styledText(txt, flag);
+    if (url) {
+      const a = document.createElement('a');
+      a.className = 'rm-link';
+      if (url.startsWith('#p')) {
+        // 引文内部跳转：目标在重排视图里就是某一页，点一下滚过去，不用开新窗口
+        const page = Number(url.slice(2)) || 0;
+        a.classList.add('rm-xref');
+        a.href = '#';
+        a.title = '跳到第 ' + page + ' 页（参考文献）';
+        a.dataset.page = page;
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (page) scrollToPage(page);
+        });
+      } else {
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noreferrer noopener';
+        a.title = url;
+      }
+      a.appendChild(inner);
+      inner = a;
+    }
+    if (!range) return inner;
+    const mark = document.createElement('mark');
+    mark.className = 'rm-hl';
+    mark.dataset.ann = range.id;
+    if (range.type === 'underline') {
+      mark.classList.add('rm-underline');
+    } else {
+      mark.style.background = range.color || '#ffe08a';
+      mark.style.opacity = '0.42';
+    }
+    mark.appendChild(inner);
+    return mark;
   }
 
   /**

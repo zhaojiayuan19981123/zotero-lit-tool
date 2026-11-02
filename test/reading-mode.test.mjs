@@ -166,6 +166,23 @@ test('上页以句号结尾 → 不跨页接续', () => {
   assert.equal(doc.blocks.length, 2);
 });
 
+test('栏底断句 + 下一栏小写续写 → 接成一段（双栏排版里一句话跨栏很常见）', () => {
+  const doc = docOf([page(1, [
+    block('body', [line('hosts of live demonstrations might invite a group of', { x: 50, y: 120, size: 10, w: 230 })], { column: 0 }),
+    block('body', [line('or demonstrators might invite customers to privately view', { x: 306, y: 700, size: 10, w: 230 })], { column: 1 }),
+  ], { columns: [{ x0: 50, x1: 290 }, { x0: 306, x1: 545 }] })]);
+  assert.equal(doc.blocks.length, 1, '跨栏的同一句要合成一块');
+  assert.equal(doc.blocks[0].lines.length, 2);
+});
+
+test('栏底以句号结尾 → 不跨栏接续', () => {
+  const doc = docOf([page(1, [
+    block('body', [line('This paragraph ends properly.', { x: 50, y: 120, size: 10, w: 230 })], { column: 0 }),
+    block('body', [line('or demonstrators might invite customers', { x: 306, y: 700, size: 10, w: 230 })], { column: 1 }),
+  ], { columns: [{ x0: 50, x1: 290 }, { x0: 306, x1: 545 }] })]);
+  assert.equal(doc.blocks.length, 2);
+});
+
 // ---------------- 表格区 ----------------
 
 test('被拆成一格一块的表格 → 收回成一张整块裁图', () => {
@@ -292,4 +309,164 @@ test('空文档 / 缺字段不抛错', () => {
   assert.doesNotThrow(() => toReadingDoc({}));
   assert.equal(toReadingDoc({}).blocks.length, 0);
   assert.equal(toReadingDoc({ pages: [page(1, [])] }).blocks.length, 0);
+});
+
+// ---------------- 脚注归位 ----------------
+//
+// 用户最直接的抱怨是「脚注插在正文中间，一句话被切成两截」。脚注必须：
+//   ① 不参与正文排序；② 排在本页正文之后；③ 第一段带一条分隔线（Zotero 也是这么标的）。
+
+test('页底部小字脚注排到本页正文之后，并带分隔线', () => {
+  const body = paraBlock(['There are many different ways to enable employees', 'to express their concerns'], { top: 700 });
+  // 首页左下角那种作者单位 / 通讯邮箱：字号小于正文，内容像脚注
+  const note = block('body', [line('christine.ringler@ua.edu, Culverhouse College of Business', { x: 50, y: 100, size: 8, w: 240 })]);
+  const doc = docOf([page(1, [body, note])]);
+  const kinds = doc.blocks.map((b) => b.kind || 'body');
+  assert.deepEqual(kinds, ['body', 'footnote'], '脚注要排在正文之后，不能插在句子中间');
+  assert.equal(doc.blocks[1].sep, true, '本页第一段脚注带分隔线');
+  assert.equal(doc.stats.footnotes, 1);
+});
+
+test('分栏且整栏是小字时，该栏整栏判为脚注（Springer 首页那种）', () => {
+  const bodyLines = [
+    line('The process mindset literature suggests that', { x: 50, y: 700, size: 10, w: 250 }),
+    line('demonstrations work through the process itself', { x: 50, y: 686, size: 10, w: 250 }),
+  ];
+  const leftCol = [
+    block('body', [line('ORIGINAL EMPIRICAL RESEARCH', { x: 50, y: 780, size: 7, w: 200 })], { column: 0 }),
+    block('body', [line('Christine Ringler is an assistant professor', { x: 50, y: 200, size: 7, w: 240 })], { column: 0 }),
+    block('body', [line('at the University of Alabama, Tuscaloosa', { x: 50, y: 188, size: 7, w: 240 })], { column: 0 }),
+  ];
+  const rightCol = [block('body', bodyLines, { column: 1 })];
+  const doc = docOf([page(1, [...leftCol, ...rightCol], { columns: [{ x0: 50, x1: 300 }, { x0: 320, x1: 550 }] })]);
+  const notes = doc.blocks.filter((b) => b.kind === 'footnote');
+  assert.ok(notes.length >= 2, '整栏小字应全部判为脚注');
+  const prose = doc.blocks.find((b) => b.kind !== 'footnote' && b.kind !== 'kicker');
+  assert.match(prose.lines[0].runs.map((r) => r[2]).join(' '), /process mindset/, '正文不能混进作者单位');
+});
+
+// ---------------- 标题识别 ----------------
+
+test('非粗体的节名（Abstract / Introduction）识别成标题，且与正文同字号时是 h2', () => {
+  const doc = docOf([page(1, [
+    block('body', [line('Abstract', { y: 760, size: 10, w: 60 })]),
+    paraBlock(['Product demonstrations are powerful promotional tools.'], { top: 730 }),
+    block('body', [line('Introduction', { y: 660, size: 10, w: 80 })]),
+    paraBlock(['Product demonstrations have been evolving'], { top: 630 }),
+  ])]);
+  const heads = doc.blocks.filter((b) => b.level > 0);
+  assert.equal(heads.length, 2, '两行节名都应成为标题');
+  assert.deepEqual(heads.map((b) => b.level), [2, 2], '与正文同字号的节标题固定 h2，不能掉到 h5');
+});
+
+test('编号小节「3.1 Sample」识别成标题，句末带句号的正文句子不会', () => {
+  const doc = docOf([page(1, [
+    block('body', [line('3.1 Sample', { y: 760, size: 11, w: 70 })]),
+    paraBlock(['We surveyed 412 consumers across three studies.'], { top: 730 }),
+    block('body', [line('2020 was a difficult year for retail.', { y: 660, size: 10, w: 240 })]),
+  ])]);
+  const heads = doc.blocks.filter((b) => b.level > 0).map((b) => textsOf(b).join(''));
+  assert.deepEqual(heads, ['3.1 Sample']);
+});
+
+test('全大写的栏目行 → kicker，不当作正文句子', () => {
+  const doc = docOf([page(1, [
+    block('body', [line('ORIGINAL EMPIRICAL RESEARCH', { y: 770, size: 9, w: 210 })]),
+    paraBlock(['Demonstrations are everywhere in retail.'], { top: 730 }),
+  ])]);
+  assert.equal(doc.blocks[0].kind, 'kicker');
+  assert.equal(doc.blocks[0].level, 0, 'kicker 不参与标题分级');
+});
+
+test('粗体作者行 → authors（被大间隙切开的另一半也归为 authors，而不是小节标题）', () => {
+  const doc = docOf([page(1, [
+    block('heading', [line('Christine Ringler· Nancy J. Sirianni· Joann Peck', { x: 50, y: 700, size: 10, w: 300 })], { bold: true }),
+    block('heading', [line('Anders Gustafsson', { x: 380, y: 700, size: 10, w: 120 })], { bold: true }),
+    paraBlock(['Product demonstrations are powerful promotional tools'], { top: 660 }),
+  ])]);
+  const authors = doc.blocks.filter((b) => b.kind === 'authors');
+  assert.equal(authors.length, 1, '两半应合成一行 authors');
+  const text = authors[0].lines.flatMap((l) => l.runs.map((r) => r[2])).join(' ');
+  assert.match(text, /Christine Ringler/);
+  assert.match(text, /Anders Gustafsson/);
+  assert.equal(doc.blocks.filter((b) => b.level > 0).length, 0, '作者行不是标题');
+});
+
+// ---------------- 附录 ----------------
+
+test('附录里的量表条目不会被当成小节标题（整段附录变一片加粗）', () => {
+  const doc = docOf([page(1, [
+    block('heading', [line('Appendix 1 Scales', { y: 700, size: 12, w: 120 })]),
+    block('heading', [line('1. I become angry when my options are limited', { y: 676, size: 10, w: 300 })]),
+    block('heading', [line('2. I could picture myself in the scenario', { y: 661, size: 10, w: 300 })]),
+    block('heading', [line('3. I was mentally involved while watching', { y: 646, size: 10, w: 300 })]),
+    block('heading', [line('Appendix 2 Measures', { y: 620, size: 12, w: 140 })]),
+  ])]);
+  const heads = doc.blocks.filter((b) => b.level > 0).map((b) => textsOf(b).join(''));
+  assert.deepEqual(heads, ['Appendix 1 Scales', 'Appendix 2 Measures'],
+    '同字号/更大的才是附录小节标题，条目要当正文');
+});
+
+test('正文里的编号小节（3.1 Sample）不受附录规则影响', () => {
+  const doc = docOf([page(1, [
+    block('body', [line('3.1 Sample', { y: 760, size: 12, w: 70 })]),
+    paraBlock(['We surveyed 412 consumers across three studies.'], { top: 730 }),
+  ])]);
+  assert.equal(doc.blocks[0].level > 0, true);
+});
+
+// ---------------- 整页图形兜底 ----------------
+
+test('整页图形（描边画的框架图，只有几个零散标签）按整页裁图保留，不让这页消失', () => {
+  const doc = docOf([page(1, [
+    block('body', [line('A label inside the diagram', { y: 300, size: 9, w: 120 })]),
+  ], { rawItems: 120 })]);
+  const crops = doc.blocks.filter((b) => b.t === 'crop');
+  assert.equal(crops.length, 1, '应该补一张整页裁图');
+  assert.equal(crops[0].full, true);
+});
+
+test('正常正文页不会平白多出一张整页裁图', () => {
+  const doc = docOf([page(1, [
+    paraBlock([
+      'Product demonstrations are powerful promotional tools which can vary in how they present',
+      'information to consumers, and the process mindset literature suggests that the effect runs',
+      'through the process of imagining the product in use rather than through the outcome alone.',
+    ]),
+  ], { rawItems: 120 })]);
+  assert.equal(doc.blocks.filter((b) => b.t === 'crop').length, 0);
+});
+
+// ---------------- 链接（重排后仍可点） ----------------
+
+test('链接注记把片段切开，run 带 url，拼回去仍是原句', () => {
+  const text = 'see https://example.org/paper for details';
+  const x = 50;
+  const w = 200;
+  const size = 10;
+  const perChar = w / text.length;
+  // 只给 URL 那一段挂链接注记（x/w 与真实字符位置对齐）
+  const from = text.indexOf('https');
+  const to = text.indexOf(' for');
+  const link = {
+    x0: x + from * perChar,
+    x1: x + to * perChar,
+    y0: 690, y1: 702,
+    url: 'https://example.org/paper',
+  };
+  const lineObj = line(text, { x, y: 695, size, w });
+  lineObj.items = [{ text, x, w, y: 695, size }];
+  const p = page(1, [block('body', [lineObj])], { links: [link] });
+  const doc = docOf([p]);
+  const runs = doc.blocks[0].lines[0].runs;
+  assert.equal(runs.map((r) => r[2]).join(''), text, '切段不能丢字或改字');
+  const linked = runs.filter((r) => r.length >= 5 && r[4]);
+  assert.equal(linked.length, 1, '只有 URL 那一段带链接');
+  assert.equal(linked[0][4], 'https://example.org/paper');
+  assert.equal(linked[0][2], 'https://example.org/paper', '链接文字被完整切出来');
+});
+
+test('没有链接注记时 run 保持三元组（不凭空多出字段）', () => {
+  const doc = docOf([page(1, [paraBlock(['plain body text without any anchors'])])]);
+  for (const r of doc.blocks[0].lines[0].runs) assert.equal(r.length, 3);
 });

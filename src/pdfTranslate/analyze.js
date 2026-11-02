@@ -88,6 +88,8 @@ export async function analyzePdf(bytes, options = {}) {
   const names = pdfjs?.OPS ? opNameMap(pdfjs.OPS) : null;
 
   const pages = [];
+  // 引文内部跳转的 dest 字符串 → 目标页码，全篇共用一张缓存
+  const destCache = new Map();
   for (let idx = 0; idx < targets.length; idx++) {
     if (signal?.aborted) throw makeAbortError();
     const i = targets[idx];
@@ -112,14 +114,25 @@ export async function analyzePdf(bytes, options = {}) {
       pageInfo.error = '文本层解析失败：' + (e?.message || e);
     }
 
-    const items = collectItems(textContent);
+    // 图像 / 填充 / 字体名 / 链接注记：都在这里一次拿齐。
+    // 字体名要用来判粗体斜体（见 collectItems），所以必须早于建块；
+    // 它复用 getOperatorList，本来就是这个函数最贵的一步，不额外花时间。
+    const regions = await extractRegions(page, names);
+    pageInfo.images = regions.images;
+    pageInfo.fills = regions.fills;
+    pageInfo.links = await readLinks(page, doc, destCache);
+
+    const items = collectItems(textContent, regions.fonts);
     // 先定栏，再分行——顺序很重要：左右两栏的行常常共用同一条基线，
     // 如果先按基线聚行，一行的左半（栏 1）与右半（栏 2）会被拼成一句话。
     // 第一遍用「紧间隙」聚行，把跨栏的两段文字拆开，专门用来找栏间距；
     // 第二遍在确定好的栏内用「宽间隙」聚行，保证行内公式等宽间隙不会误拆。
-    const probeLines = groupIntoLines(items, { maxGapEm: 2 });
+    // 找栏距要用更紧的间隙：有的期刊栏间距只有 1.7em，按 2em 聚行会把左右两栏
+    // 粘成一行，于是「每行都横跨 gutter」，栏永远判不出来（正文两栏混排成一句）。
+    // 1.2em 是折中：比任何栏间距都窄，又比正文字间距宽，行内不会无故拆开。
+    const probeLines = groupIntoLines(items, { maxGapEm: 1.2 });
     const split = detectColumnSplit(probeLines, pageInfo);
-    const buckets = bucketItems(items, split, pageInfo);
+    const buckets = bucketItems(items, split, pageInfo, spanItemsOf(probeLines, split, pageInfo));
     const columnBlocks = [];
     for (const [key, bucketLines] of buckets) {
       if (!bucketLines.length) continue;
@@ -133,10 +146,6 @@ export async function analyzePdf(bytes, options = {}) {
     columnBlocks.forEach((b, i) => { b.index = i; b.id = `p${pageInfo.index}-b${i}`; });
     pageInfo.blocks = columnBlocks;
     pageInfo.rawItems = items.length;
-
-    const regions = await extractRegions(page, names);
-    pageInfo.images = regions.images;
-    pageInfo.fills = regions.fills;
 
     pages.push(pageInfo);
     onProgress?.({ stage: 'analyze', page: i, total: targets.length, percent: Math.round(((idx + 1) / targets.length) * 100) });
@@ -229,7 +238,7 @@ function majorityBool(values) {
 
 // ==================== 文字片段 → 行 ====================
 
-function collectItems(textContent) {
+function collectItems(textContent, fontInfo) {
   const styles = textContent.styles || {};
   const out = [];
   for (const it of textContent.items || []) {
@@ -240,7 +249,11 @@ function collectItems(textContent) {
     const style = styles[it.fontName] || {};
     const family = String(style.fontFamily || '');
     const fname = String(it.fontName || '');
+    const real = fontInfo?.[fname];
     const angle = Math.atan2(tr[1], tr[0]);
+    // 粗体/斜体优先用真实字体名（Springnew-Regular / MyriadPro-Semibold…），
+    // pdf.js 的 fontFamily 只给 serif/sans-serif，判不出字重。
+    const faceName = real?.name || '';
     out.push({
       text: it.str,
       x: tr[4],
@@ -252,9 +265,61 @@ function collectItems(textContent) {
       family,
       ascent: typeof style.ascent === 'number' ? style.ascent : 0.82,
       descent: typeof style.descent === 'number' ? style.descent : -0.22,
-      bold: /bold|black|heavy|semibold|demi|medi/i.test(family + ' ' + fname),
-      italic: /italic|oblique/i.test(family + ' ' + fname),
-      serif: inferSerif(family, fname),
+      bold: real ? !!real.bold : /bold|black|heavy|semibold|demi|medi/i.test(family + ' ' + fname),
+      italic: real ? !!real.italic : /italic|oblique/i.test(family + ' ' + fname),
+      serif: inferSerif(family, faceName || fname),
+    });
+  }
+  return out;
+}
+
+/**
+ * 链接注记。两类都收：
+ *   · 外链（http/https）→ 记 URL，重排视图里直接可点
+ *   · 引文内部跳转（正文里的 (Knott, 2017) → 参考文献条目）→ 解析成目标页码，
+ *     重排视图里点击就跳到那一页。Zotero 的阅读模式也是这么做的。
+ *
+ * 坐标与文字片段同一套（PDF 用户空间，原点左下），后面按矩形相交把链接对上文字。
+ * dest 字符串全篇会重复出现（同一篇文献被引多次），所以解析结果按字符串缓存，
+ * 否则一篇 20 页的论文要做上千次跨线程往返。
+ */
+async function readLinks(page, doc, destCache) {
+  let anns = [];
+  try {
+    anns = await page.getAnnotations({ intent: 'display' });
+  } catch (_) {
+    try { anns = await page.getAnnotations(); } catch (_e) { return []; }
+  }
+  const out = [];
+  for (const a of anns || []) {
+    if (!a || a.subtype !== 'Link') continue;
+    const r = a.rect;
+    if (!Array.isArray(r) || r.length < 4) continue;
+    let href = String(a.url || a.unsafeUrl || '').trim();
+    if (!/^https?:\/\//i.test(href)) {
+      href = '';
+      const dest = a.dest;
+      if (dest && doc && destCache) {
+        const key = typeof dest === 'string' ? dest : `arr:${JSON.stringify(dest)}`;
+        let pageNo = destCache.get(key);
+        if (pageNo === undefined) {
+          pageNo = 0;
+          try {
+            const resolved = typeof dest === 'string' ? await doc.getDestination(dest) : dest;
+            if (Array.isArray(resolved) && resolved[0]) pageNo = (await doc.getPageIndex(resolved[0])) + 1;
+          } catch (_e) { pageNo = 0; }
+          destCache.set(key, pageNo);
+        }
+        if (pageNo > 0 && pageNo !== page.index) href = `#p${pageNo}`;
+      }
+      if (!href) continue;
+    }
+    out.push({
+      x0: Math.min(r[0], r[2]),
+      x1: Math.max(r[0], r[2]),
+      y0: Math.min(r[1], r[3]),
+      y1: Math.max(r[1], r[3]),
+      url: href.slice(0, 500),
     });
   }
   return out;
@@ -404,22 +469,28 @@ function detectColumnSplit(lines, page) {
 
   const rights = clusterEdges(body.map((l) => l.x1));
   const lefts = clusterEdges(body.map((l) => l.x0));
-  if (!rights.length || !lefts.length) return null;
 
   let best = null;
-  for (const r of rights) {
-    for (const l of lefts) {
-      const gap = l.value - r.value;
-      if (gap < 5 || gap > 50) continue;
-      const split = (r.value + l.value) / 2;
-      if (split < page.x0 + page.width * 0.3 || split > page.x0 + page.width * 0.7) continue;
-      const support = Math.min(r.count, l.count);
-      if (support < 4) continue;
-      const score = support * 10 - gap;
-      if (!best || score > best.score) best = { score, split };
+  // 边界聚不出簇（行尾参差不齐的栏、整栏小字的首页）不等于不是双栏，
+  // 交给兜底的空槽判定；所以这里只跳过聚类，不直接返回 null。
+  if (rights.length && lefts.length) {
+    for (const r of rights) {
+      for (const l of lefts) {
+        const gap = l.value - r.value;
+        if (gap < 5 || gap > 50) continue;
+        const split = (r.value + l.value) / 2;
+        if (split < page.x0 + page.width * 0.3 || split > page.x0 + page.width * 0.7) continue;
+        const support = Math.min(r.count, l.count);
+        if (support < 4) continue;
+        const score = support * 10 - gap;
+        if (!best || score > best.score) best = { score, split };
+      }
     }
   }
-  if (!best) return null;
+  if (!best) {
+    // 边界聚不出簇（行尾参差不齐的栏、整栏小字的首页）≠ 不是双栏，交给不依赖整齐度的兜底
+    return detectColumnSplitByGutter(body, page);
+  }
 
   // 复核：拆分后左右两侧都要有足够多的行，并且纵向铺得够开
   const left = body.filter((l) => (l.x0 + l.x1) / 2 < best.split);
@@ -432,6 +503,61 @@ function detectColumnSplit(lines, page) {
   };
   if (coverage(left) < 0.3 || coverage(right) < 0.3) return null;
   return best.split;
+}
+
+/**
+ * 分栏识别的兜底：直接找「没人跨过去的竖线」。
+ *
+ * 上面的边界聚类要求左右两栏的边界各自整齐，遇到 Springer 这类首页就失效：
+ * 首页左栏整栏都是作者单位 / 脚注小字，行尾参差不齐（右沿聚不出簇），
+ * 于是判不出双栏，左右两栏的文字会按基线拼成同一行——
+ * 「Culverhouse College of Business, University of Alabama, is a newer phe…」
+ * 这种半句脚注半句正文的块就是这么来的。
+ *
+ * 这里换一个不依赖整齐度的判据：候选竖线 x 把行分成「完全在左」「完全在右」
+ * 「横跨 x」三类；双栏页的 gutter 处横跨的行很少（跨栏标题、跨栏图注），
+ * 单栏页则几乎每行都横跨。所以只要「横跨占比」够低、两侧都有足够的行，就是 gutter。
+ *
+ * 曾经加过一条反向排除（「同一基线上左右两侧都有字的行占比 > 0.45 就不算 gutter」），
+ * 用来防「假 gutter」——整页其实是单栏、只是 PDF 生成器把每一行切成左右两段。
+ * 但真实期刊的双栏几乎都是**左右两栏基线对齐**的，这条判据在真双栏页上同样接近 1，
+ * 实测两份双栏 PDF 全部误杀（两栏退回按基线拼成一行，出现「半句左栏 + 半句右栏」），
+ * 而它想防的假 gutter 一次也没复现，所以已移除。若将来真遇到假 gutter 样本，
+ * 正确判据是「左右两半的行端点是否都钉死在同一 x」（切缝固定），而不是「同基线两侧是否有字」。
+ */
+function detectColumnSplitByGutter(body, page) {
+  if (body.length < 12) return null;
+  const lo = page.x0 + page.width * 0.28;
+  const hi = page.x0 + page.width * 0.72;
+  let best = null;
+  const step = Math.max(1, page.width / 400);
+  for (let x = lo; x <= hi; x += step) {
+    let left = 0;
+    let right = 0;
+    let span = 0;
+    for (const l of body) {
+      if (l.x1 <= x) left++;
+      else if (l.x0 >= x) right++;
+      else span++;
+    }
+    if (left < 6 || right < 6) continue;
+    const spanRatio = span / body.length;
+    if (spanRatio > 0.5) continue;
+    // 两侧行数越多越可信；横跨的行按 3 倍扣分（它们是跨栏标题/图注，本就不该左右分）
+    const score = left + right - span * 3;
+    if (!best || score > best.score) best = { split: x, score, left, right };
+  }
+  if (!best) return null;
+  // 把 split 挪到两侧行端点之间的正中，避免切在某一侧行内一两个 pt 的地方
+  let leftEdge = 0;
+  let rightEdge = page.x0 + page.width;
+  for (const l of body) {
+    if (l.x1 <= best.split) leftEdge = Math.max(leftEdge, l.x1);
+    else if (l.x0 >= best.split) rightEdge = Math.min(rightEdge, l.x0);
+  }
+  const mid = rightEdge > leftEdge ? (leftEdge + rightEdge) / 2 : best.split;
+  if (mid < page.x0 + page.width * 0.25 || mid > page.x0 + page.width * 0.75) return best.split;
+  return mid;
 }
 
 /** 一维聚类：把相近的数值聚成一簇，返回出现次数 >= 2 的簇 */
@@ -453,16 +579,59 @@ function clusterEdges(values) {
 }
 
 /** 把片段按栏分桶；横跨栏间距的片段单独归入 span 桶（跨栏标题、跨栏图表） */
-function bucketItems(items, split, page) {
+function bucketItems(items, split, page, spanItems) {
   if (!split) return [['S', items]];
   const left = [];
   const right = [];
   const cross = [];
   for (const it of items) {
+    // 整行横跨栏距（跨栏摘要、跨栏图注）→ 整行归 span 桶。
+    // 只按单个片段判断是不够的：一个词不会跨过 gutter，于是跨栏段落会被
+    // 按词拦腰分到左右两栏，读起来就是「左半句 + 右半句」两段废文。
+    if (spanItems && spanItems.has(it)) { cross.push(it); continue; }
     if (it.x < split - 1 && it.x + it.w > split + 1) { cross.push(it); continue; }
     ((it.x + it.w / 2) < split ? left : right).push(it);
   }
   return [['L', left], ['R', right], ['S', cross]];
+}
+
+/**
+ * 哪些片段属于「整行横跨栏距」的行。
+ * probeLines 用的是紧间隙聚行，双栏页里左右栏的行不会粘在一起，
+ * 所以一行真的横跨 gutter 时，这一行就是跨栏内容（标题、摘要、跨栏图注）。
+ *
+ * 逐行判定还不够：跨栏段落的**最后一行**常常很短，够不到 gutter，会被判成左栏行，
+ * 于是「…in a con-」留在 S 桶、「stantly evolving…」被丢进 L 桶，一段被切成两块。
+ * 所以再做一遍向下/向上的传播：紧贴着跨栏行、左边界与字号都对得上的行，
+ * 视为同一段跨栏内容的续行。
+ */
+function spanItemsOf(probeLines, split, page) {
+  if (!split) return null;
+  const tol = Math.max(6, page.width * 0.015);
+  const lines = probeLines.slice().sort((a, b) => b.baseline - a.baseline);
+  const flags = lines.map((l) => l.x0 < split - tol && l.x1 > split + tol);
+  // 「跨过」而不是「碰到」：左栏末行常常正好排在 gutter 附近，
+  // 用 x0 < split < x1 会把它误判成跨栏，进而把整段正文塞进 span 桶。
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < lines.length; i++) {
+      if (flags[i]) continue;
+      const l = lines[i];
+      for (const j of [i - 1, i + 1]) {
+        const nb = lines[j];
+        if (!nb || !flags[j]) continue;
+        const dy = Math.abs(l.baseline - nb.baseline);
+        const maxSize = Math.max(l.size, nb.size);
+        if (dy > maxSize * 2.4 || dy < maxSize * 0.5) continue;   // 必须是紧邻的上一行/下一行
+        if (Math.abs(l.x0 - nb.x0) > maxSize * 2) continue;       // 左边界要对得上
+        if (Math.max(l.size, nb.size) / Math.min(l.size, nb.size) > 1.35) continue;
+        flags[i] = true;
+        break;
+      }
+    }
+  }
+  const out = new Set();
+  lines.forEach((l, i) => { if (flags[i]) for (const it of l.items) out.add(it); });
+  return out.size ? out : null;
 }
 
 /** 把同一栏（或跨栏桶）的行合并成段落 */
@@ -706,12 +875,13 @@ function medianOf(arr) {
 async function extractRegions(page, names) {
   const images = [];
   const fills = [];
-  if (!names) return { images, fills };
+  const fonts = {};
+  if (!names) return { images, fills, fonts };
   let opList;
   try {
     opList = await page.getOperatorList();
   } catch (_) {
-    return { images, fills };
+    return { images, fills, fonts };
   }
   const { fnArray, argsArray } = opList;
   let ctm = [1, 0, 0, 1, 0, 0];
@@ -727,6 +897,26 @@ async function extractRegions(page, names) {
       case 'save': stack.push(ctm.slice()); break;
       case 'restore': ctm = stack.pop() || [1, 0, 0, 1, 0, 0]; break;
       case 'transform': if (Array.isArray(args) && args.length >= 6) ctm = mulMatrix(ctm, args); break;
+      case 'setFont': {
+        // pdf.js 的 textContent 只给「通用族名」（serif / sans-serif），粗体信息全丢了：
+        // 一份 Springer 论文里标题、节标题、正文的 fontFamily 全是 sans-serif/serif。
+        // 真正的字重藏在字体文件的字体名里（MyriadPro-Bold / Semibold…），
+        // 只能从 operator list 的 setFont 拿到 id，再回 commonObjs 取字体名。
+        const id = args?.[0];
+        if (typeof id === 'string' && !fonts[id]) {
+          try {
+            const f = page.commonObjs?.get(id);
+            if (f?.name) {
+              fonts[id] = {
+                name: String(f.name),
+                bold: /bold|black|heavy|semibold|demi|medi|extrab/i.test(f.name),
+                italic: /italic|oblique/i.test(f.name),
+              };
+            }
+          } catch (_) { /* 字体还没加载好：当作未知，退回族名判断 */ }
+        }
+        break;
+      }
       case 'paintFormXObjectBegin':
         stack.push(ctm.slice());
         if (Array.isArray(args?.[0])) ctm = mulMatrix(ctm, args[0]);
@@ -763,7 +953,7 @@ async function extractRegions(page, names) {
       }
     }
   }
-  return { images, fills };
+  return { images, fills, fonts };
 }
 
 function mulMatrix(c, m) {

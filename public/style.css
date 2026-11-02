@@ -1761,6 +1761,14 @@ mark.anno-c-purple { color: var(--primary); background: none; }
 .rm-step-val { min-width: 32px; text-align: center; font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
 .rm-spacer { flex: 1; }
 .rm-page-hint { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* AI 精修：按钮跑完变成「重跑精修」，左侧常驻一行「AI 已修 脚注 12 / 标题 3」 */
+.rm-ai-btn { white-space: nowrap; }
+.rm-ai-state {
+  font-size: 11.5px; color: var(--text-3); white-space: nowrap;
+  padding: 2px 8px; border-radius: 999px; background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+}
+.rm-ai-state.hidden { display: none; }
 .rm-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding: 30px 16px 88px; }
 .rm-column {
   max-width: var(--rm-width); margin: 0 auto; padding: 42px 48px;
@@ -1768,9 +1776,33 @@ mark.anno-c-purple { color: var(--primary); background: none; }
   font-family: var(--rm-font); font-size: var(--rm-size); line-height: var(--rm-lh);
   color: var(--text); text-align: justify; hyphens: auto; overflow-wrap: break-word;
 }
-.rm-column > * + * { margin-top: .62em; }
+.rm-column > * + * { margin-top: .55em; }
 .rm-block { margin: 0; }
 .rm-block.rm-center { text-align: center; }
+/* 标题不要两端对齐：短标题被拉满一行时会撑出奇怪的词间距（纸面上标题本来就是左对齐 / 居中） */
+.rm-column > h1.rm-block, .rm-column > h2.rm-block, .rm-column > h3.rm-block,
+.rm-column > h4.rm-block, .rm-column > h5.rm-block { text-align: left; hyphens: manual; }
+/* 段间距：正文段落之间留白（而不是首行缩进）——Zotero 阅读模式也是这种块式排版，
+   缩进在重排视图里没有意义（原文的缩进只表达「这是一个新段」）。 */
+.rm-column > p[data-kind="body"] + p[data-kind="body"] { margin-top: .95em; }
+/* 内联样式：原文的粗体 / 斜体来自真实字体名，超链接来自链接注记 */
+.rm-s.rm-b { font-weight: 700; }
+.rm-s.rm-i { font-style: italic; }
+.rm-link { color: var(--primary); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--primary) 35%, transparent); }
+.rm-link:hover { border-bottom-color: var(--primary); background: var(--primary-soft); }
+.rm-xref { cursor: pointer; }
+/* 脚注 / 作者单位：排在每页正文之后，字号小一号、颜色淡一档，首页第一条带分隔线 */
+/* footnotes 一行一个条目（通讯邮箱、单位地址），保留原始换行 */
+.rm-block.rm-fn { font-size: .84em; line-height: 1.55; color: var(--text-2); text-align: left; white-space: pre-line; }
+.rm-block.rm-fn + .rm-block.rm-fn { margin-top: .28em; }
+.rm-block.rm-fn.rm-fn-sep {
+  margin-top: 1.7em; padding-top: .85em; border-top: 1px solid var(--border-soft);
+}
+.rm-block.rm-authors { color: var(--text); }
+.rm-block.rm-kicker {
+  font-size: .82em; font-weight: 700; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--text-2);
+}
 .rm-column h1, .rm-column h2, .rm-column h3, .rm-column h4, .rm-column h5 {
   font-weight: 700; line-height: 1.35; text-align: left;
 }
@@ -3909,6 +3941,14 @@ body.pn-resizing * { cursor: col-resize !important; }
   border: 1px solid var(--hair);
   box-shadow: 0 1px 3px rgba(0, 0, 0, .08), 0 10px 26px rgba(0, 0, 0, .05);
 }
+/* 对照精读里的原文栏也可能是重排文本流（阅读模式搬进来的）。栏宽只有全屏的三分之一，
+   所以把工具条与版心内边距一起收紧：否则工具条折成三四行、正文只剩窄窄一条。 */
+.cmp-pdf-host .pr-reading { flex: 1; min-height: 0; }
+.cmp-pdf-host .rm-bar { gap: 6px 8px; padding: 6px 10px; }
+.cmp-pdf-host .rm-bar-title { font-size: 12px; }
+.cmp-pdf-host .rm-scroll { padding: 16px 10px 60px; }
+.cmp-pdf-host .rm-column { padding: 22px 20px; border-radius: 8px; }
+.cmp-pdf-host .rm-page-hint { font-size: 11px; }
 
 /* ---------- 栏头 ---------- */
 .cmp-pane-head {

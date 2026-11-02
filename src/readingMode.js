@@ -20,9 +20,14 @@ import crypto from 'node:crypto';
 import { analyzePdf, mathScore } from './pdfTranslate/analyze.js';
 import { readingOrder } from './pdfTranslate/reflow.js';
 import { getDataDir } from './store.js';
+import { refineReadingDoc } from './readingAi.js';
 
 /** 结构版本；结构变了就 +1，旧缓存自动失效 */
-export const READING_SCHEMA = 1;
+export const READING_SCHEMA = 3;
+
+/** 片段样式位（写进结构树的 run 第 4 位，前端据此出 <b>/<i>） */
+const STYLE_BOLD = 1;
+const STYLE_ITALIC = 2;
 
 /** 单篇分析结果的缓存目录（按「路径 + 大小 + mtime + 结构版本」做键） */
 export function readingCacheDir() {
@@ -37,7 +42,7 @@ const MIN_CROP_AREA = 420;
 /** 页面插图的最小面积（pt²），比正文块更严格 —— 图标、分隔线不值得单独占位 */
 const MIN_FIGURE_AREA = 2200;
 
-const TEXT_KINDS = new Set(['title', 'heading', 'caption', 'body', 'reference', 'abstract']);
+const TEXT_KINDS = new Set(['title', 'heading', 'caption', 'body', 'reference', 'abstract', 'footnote', 'authors', 'kicker']);
 
 /** 正文块是否可重排（其余块走裁图） */
 function isTextBlock(b) {
@@ -91,7 +96,7 @@ function overlapRatio(a, b, threshold = 0.55) {
  * 与 reflow.js 的 assignHeadingLevels 保持同一套映射，避免「同一篇论文在
  * 重排译文和阅读模式里标题级数不一样」。
  */
-function makeLevelFn(pages) {
+function makeLevelFn(pages, bodySize) {
   const sizes = new Set();
   for (const page of pages) {
     for (const b of page.blocks || []) {
@@ -99,9 +104,13 @@ function makeLevelFn(pages) {
     }
   }
   const ranked = [...sizes].sort((a, b) => b - a);
+  const base = Number(bodySize) || 0;
   return (b) => {
     if (b.kind === 'title') return 1;
     if (b.kind === 'heading') {
+      // 与正文同字号的节标题（Abstract / Method 这类靠字重区分的）不该因为字号最小
+      // 被排到 h5：它们的层级是「一级小节」，按 h2 显示才和纸面观感一致。
+      if (base && b.size <= base * 1.02) return 2;
       const i = ranked.indexOf(round(b.size * 2) / 2);
       return Math.min(Math.max(i, 0), 3) + 2;
     }
@@ -142,7 +151,8 @@ function packLines(block, page, stamps) {
       const text = String(it.text ?? '');
       if (!text) continue;
       if (isNoiseRun(it)) continue;
-      runs.push([round(it.x, 2), round(it.w ?? 0, 2), text]);
+      const flags = (it.bold ? STYLE_BOLD : 0) | (it.italic ? STYLE_ITALIC : 0);
+      for (const r of splitRunsByLinks(it, flags, page.links)) runs.push(r);
     }
     if (!runs.length) continue;
     out.push({
@@ -158,6 +168,49 @@ function packLines(block, page, stamps) {
   return out;
 }
 
+/**
+ * 按链接注记把片段切小 —— 链接要精确到「哪几个字可点」，就不能整段挂同一个 URL。
+ * 字符宽度按片段等分离散（pdf.js 的 item 已是同一字体的连续文字，等宽近似足够准），
+ * 切点落在字符边界上，误差最多一个字。
+ *
+ * run 的格式：[x, w, text, styleFlags, url?]，url 只在有链接时才出现。
+ */
+function splitRunsByLinks(it, flags, links) {
+  const s = String(it.text ?? '');
+  const x = Number(it.x) || 0;
+  const w = Number(it.w) || 0;
+  const base = flags ? [round(x, 2), round(w, 2), s, flags] : [round(x, 2), round(w, 2), s];
+  if (!links?.length || !w || !s) return [base];
+  const size = Number(it.size) || 10;
+  const yLo = (Number(it.y) || 0) - size * 0.35;
+  const yHi = (Number(it.y) || 0) + size * 0.95;
+  const hits = links.filter((l) => l.y1 > yLo && l.y0 < yHi && l.x1 > x + 0.5 && l.x0 < x + w - 0.5);
+  if (!hits.length) return [base];
+  const bounds = new Set([x, x + w]);
+  for (const h of hits) {
+    bounds.add(Math.max(x, Math.min(x + w, h.x0)));
+    bounds.add(Math.max(x, Math.min(x + w, h.x1)));
+  }
+  const xs = [...bounds].sort((a, b) => a - b);
+  const perChar = w / s.length;
+  const out = [];
+  for (let i = 0; i < xs.length - 1; i++) {
+    const a = xs[i];
+    const b = xs[i + 1];
+    if (b - a < 0.2) continue;
+    const from = Math.max(0, Math.min(s.length, Math.round((a - x) / perChar)));
+    const to = Math.max(from, Math.min(s.length, Math.round((b - x) / perChar)));
+    const piece = s.slice(from, to);
+    if (!piece) continue;
+    const mid = (a + b) / 2;
+    const link = hits.find((h) => mid >= h.x0 - 0.2 && mid <= h.x1 + 0.2);
+    out.push(link
+      ? [round(a, 2), round(b - a, 2), piece, flags, link.url]
+      : [round(a, 2), round(b - a, 2), piece, flags].slice(0, flags ? 4 : 3));
+  }
+  return out.length ? out : [base];
+}
+
 /** 文字块 → 结构树节点 */
 function textNode(block, level, page, stamps) {
   return {
@@ -168,6 +221,7 @@ function textNode(block, level, page, stamps) {
     rect: rectOf(block),
     align: block.align === 'center' ? 'center' : 'left',
     bold: !!block.bold,
+    col: Number.isFinite(block.column) ? block.column : -1,
     size: round(block.size, 1),
     lines: packLines(block, page, stamps),
   };
@@ -252,6 +306,15 @@ function shouldJoinAdjacent(prev, next) {
   if (prev.level !== next.level) return false;
   if (prev.kind !== next.kind) return false;
   if (Math.abs(prev.size - next.size) > Math.max(1, prev.size * 0.1)) return false;
+  // 同一行被大间隙切开的左右两半（作者行里「·」两侧的大空白、并列机构名）：
+  // 纵向重合、横向相接、而且同栏 —— 这种情况纵向 gap 是负的，下面的判据一律会拒，
+  // 于是「Christine Ringler」和「· Nancy J. Sirianni…」会各自成段、各自加粗。
+  const sameRow = Math.abs(prev.rect[3] - next.rect[3]) < Math.max(3, prev.size * 0.6);
+  // 同栏、或者其中一块是跨栏碎片（col=-1）。两个不同栏（0 / 1）的块即使同一基线
+  // 也绝不能合并 —— 那正是双栏页左右两栏并排的位置。
+  const compatible = prev.col === next.col || prev.col === -1 || next.col === -1;
+  if (sameRow && compatible && prev.rect[2] <= next.rect[0] + 2
+    && next.rect[0] - prev.rect[2] < prev.size * 12) return true;
   const gap = prev.rect[1] - next.rect[3];
   if (gap < -3 || gap > Math.max(4, prev.size * 0.75)) return false;
   const centered = (prev.align === 'center' || next.align === 'center')
@@ -294,8 +357,9 @@ function joinAdjacent(nodes) {
  */
 const MARGIN_TEXT = /^(?:downloaded\s+from|this\s+article|the\s+current\s+issue\s+and\s+full\s+text\s+archive|contents\s+lists\s+available\s+at|journal\s+homepage|available\s+online\s+at|https?:\/\/|www\.|doi[\s:.]|e?-?issn|received\b|revised\b|accepted\b|published\b|available\s+online|©|copyright\b|all\s+rights\s+reserved|vol\.\s*\d|no\.\s*\d|pp\.\s*\d|\d{1,4}$)/i;
 
-function markMarginalia(pages) {
+function markMarginalia(pages, bodySize) {
   if (pages.length < 2) return;
+  const base = Number(bodySize) || 0;
   const norm = (t) => String(t || '').replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().toLowerCase();
   const seen = new Map();
   for (const page of pages) {
@@ -322,7 +386,13 @@ function markMarginalia(pages) {
       const narrow = (b.x1 - b.x0) < page.width * 0.22;
       const thinSide = narrow && (b.x1 < left + page.width * 0.14 || b.x0 > left + page.width * 0.78);
       const looksMargin = inBand && MARGIN_TEXT.test(String(b.text || '').trim());
-      if ((inBand && repeated) || looksMargin || thinSide) {
+      // 页眉 / 页脚的通用形态：压在页面最上（下）6% 的窄带里，而且比正文小。
+      // 单靠「跨页重复」抓不住这类行 —— 刊名那行每页都带不同的页码和 DOI 尾巴，
+      // 归一化之后不再是同一个串，于是首页的刊名就留在了正文开头。
+      const edgeBand = b.y1 > top - page.height * 0.06 || b.y0 < left + page.height * 0.06;
+      const smallish = base > 0 && (b.size || 0) < base * 0.98;
+      const runningHead = edgeBand && smallish && (b.lines || []).length <= 2;
+      if ((inBand && repeated) || looksMargin || thinSide || runningHead) {
         b.kind = 'furniture';
         b.translatable = false;
         b.reason = '页眉页脚/边栏小字（阅读模式剔除）';
@@ -334,6 +404,186 @@ function markMarginalia(pages) {
 /** 文字归一化：数字统一成 #，用来判「跨页重复」 */
 function normText(t) {
   return String(t || '').replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+// ==================== 脚注 / 作者单位 ====================
+//
+// 论文首页经常把作者单位、通讯邮箱、致谢性脚注排成一栏小字（Springer 就是整栏都是
+// 脚注）。这些块如果不单独处理，会混进正文流：要么按阅读顺序插在正文中间，
+// 要么被当成正文的一部分跟在段落后面。Zotero 的处理是把它们留在页面末尾。
+//
+// 判据用「字号明显小于正文」+「像脚注的内容」，两条都满足才动 —— 图注、公式编号
+// 也是小字，但它们不该被搬到页尾。
+
+const FOOTNOTE_MARK = /^(?:[*†‡§¶#]|\d{1,2}\s|\d{1,2}[.)]\s|[a-z][.)]\s)/;
+const FOOTNOTE_HINT = /@|https?:\/\/|e-?mail\s|served as|editor for|corresponding author|通讯作者|邮箱|基金|资助|收稿日期/i;
+
+/** 参考文献条目：作者, A. (2020)… / Retrieved … from … */
+const REFERENCE_ENTRY = /^\(?[A-Z][A-Za-z'’-]+,\s*[A-Z]\.|\(\d{4}[a-z]?\)|Retrieved\s+\w+/;
+
+/** 该块像不像脚注（只做内容判断，字号由调用方比） */
+function looksLikeFootnote(b) {
+  const t = String(b.text || '').trim();
+  if (!t) return false;
+  // 参考文献里全是邮箱式缩写、年份括号和网址，别被 FOOTNOTE_HINT 一网打尽
+  if (REFERENCE_ENTRY.test(t) && t.length > 30) return false;
+  if (t.length <= 240 && FOOTNOTE_HINT.test(t)) return true;
+  if (t.length <= 160 && FOOTNOTE_MARK.test(t)) return true;
+  return false;
+}
+
+/**
+ * 标记脚注块。两个来源：
+ *   1) 内容像脚注（邮箱 / 编辑 / 星号编号）且字号不超过正文 92%；
+ *   2) 整栏都是小字（Springer 式首页的整栏作者单位）—— 这一栏整体判为脚注，
+ *      否则整栏小字会排在正文前面，读起来像论文从作者单位开始。
+ */
+function markFootnotes(pages, bodySize) {
+  const base = Number(bodySize) || 0;
+  if (!base) return;
+  for (const page of pages) {
+    const blocks = (page.blocks || []).filter((b) => b && b.kind !== 'furniture');
+    if (!blocks.length) continue;
+    // 每栏的字号中位数：整栏小字 → 该栏是脚注区
+    const byCol = new Map();
+    for (const b of blocks) {
+      const key = b.column ?? -1;
+      if (!byCol.has(key)) byCol.set(key, []);
+      byCol.get(key).push(b.size || 0);
+    }
+    const smallCols = new Set();
+    if (byCol.size >= 2) {
+      const medians = [...byCol.entries()].map(([k, arr]) => {
+        const s = arr.slice().sort((x, y) => x - y);
+        return [k, s[Math.floor(s.length / 2)]];
+      });
+      const maxMed = Math.max(...medians.map((m) => m[1]));
+      for (const [k, med] of medians) {
+        if (med <= base * 0.93 && med < maxMed * 0.96) smallCols.add(k);
+      }
+    }
+    for (const b of blocks) {
+      if (b.kind === 'heading' || b.kind === 'title' || b.kind === 'caption') continue;
+      if (b.tableLike) continue;
+      const size = b.size || 0;
+      if (size > base * 0.93) continue;
+      const smallCol = smallCols.has(b.column ?? -1);
+      // 只在小字栏、或页面下半部分里认脚注：正文字号偏小的期刊（参考文献比正文小一号）
+      // 否则会把整段参考文献搬成脚注。
+      const top = page.y1 ?? page.height;
+      const lowerHalf = b.y1 < top - (page.height || 0) * 0.42;
+      if (smallCol || (lowerHalf && looksLikeFootnote(b))) {
+        b.kind = 'footnote';
+        b.translatable = false;
+        b.reason = '脚注 / 作者单位（阅读模式排到页末）';
+      }
+    }
+  }
+}
+
+// ==================== 标题识别 ====================
+//
+// pdf.js 的 fontFamily 只有 serif / sans-serif，靠族名判不出字重；现在字重来自
+// 真实字体名（见 analyze.js 的 setFont 处理），绝大多数节标题能直接认出来。
+// 剩下两类要补：① 节标题不是粗体（部分期刊如此）；② 粗体的作者行被误判成标题。
+
+const SECTION_LABEL = /^(?:abstract|a\s?b\s?s\s?t\s?r\s?a\s?c\s?t|keywords?|key\s?words|summary|introduction|background|related\s+work|literature\s+review|theoretical\s+(?:background|framework)|hypothes[ei]s|conceptual\s+(?:framework|model)|method(?:ology)?|materials?\s+and\s+methods?|research\s+design|data\s+and\s+(?:method|sample)s?|sample|measures?|procedure|results?|findings|discussion|conclusions?|limitations|implications|managerial\s+implications|future\s+research|acknowledge?ments?|references?|bibliography|appendix|摘要|关键词|引言|绪论|研究背景|文献综述|理论基础|研究假设|研究方法|研究设计|数据与方法|结果|讨论|结论|局限|启示|参考文献|致谢|附录)\s*[:：]?$/i;
+const NUMBERED_HEADING = /^(\d{1,2}(?:\.\d{1,2}){0,2})\.?\s+[\p{L}\p{Lu}]/u;
+const AUTHOR_LIKE = /[·•·][^·•]{2,40}[·•]|,\s*[A-Z][a-z]+\s+[A-Z][a-z]+\s*(?:,|and|&)/;
+
+/** 单行、够短、结尾不是句号 —— 标题的必要条件 */
+
+function fixHeadings(pages, bodySize) {
+  const base = Number(bodySize) || 0;
+  for (const page of pages) {
+    for (const b of page.blocks || []) {
+      if (!b || b.kind === 'furniture') continue;
+      const text = String(b.text || '').trim();
+      if (!text) continue;
+      if (b.kind === 'heading' || b.kind === 'title') {
+        // 粗体的作者行 / 机构行：一行里用「·」或「and」并列多个名字，不是标题
+        const single = (b.lines || []).length === 1;
+        if (single && base && (b.size || 0) <= base * 1.06 && AUTHOR_LIKE.test(text) && text.length > 20) {
+          b.kind = 'authors';
+          continue;
+        }
+        // 粗体的整行句子（不是标题）：以句号结尾，或长度超过 90 字
+        if (single && (/[.。]$/.test(text) || text.length > 110)) {
+          b.kind = 'body';
+        }
+        continue;
+      }
+      if (!base || b.kind === 'footnote') continue;
+      // 非粗体节标题：单独成行、短、命中节名表
+      if ((b.lines || []).length === 1 && text.length <= 60 && SECTION_LABEL.test(text)) {
+        b.kind = 'heading';
+        continue;
+      }
+      // 全大写的短行（"ORIGINAL EMPIRICAL RESEARCH"）：栏目名 / 眉标，不是正文句子
+      if ((b.lines || []).length === 1 && text.length <= 60 && /^[A-Z][A-Z0-9\s&/·-]{5,}$/.test(text)) {
+        b.kind = 'kicker';
+        continue;
+      }
+      // 「2 Method」/「3.1 Sample」式编号小节
+      const m = text.match(NUMBERED_HEADING);
+      if (m && text.length <= 90 && !/[.。]$/.test(text) && (b.lines || []).length <= 2) {
+        b.kind = 'heading';
+      }
+    }
+  }
+  // 附录里的量表条目：「1. I become angry when my options are limited」这类编号条目
+  // 会被版面分析判成小节标题，于是整段附录变成一片加粗大标题，一条正文都读不出来。
+  // 判据不看「编号 + 长度」（正文章节「3.1 Sample」也是编号），看**上下文**：
+  // 只要这一页出现了「Appendix / 附录」标题，从这一页起、到出现 References /
+  // Declarations 为止，比附录标题还小的「标题」都只是条目。
+  //
+  // 按页判断、不按块数组顺序判断：两栏页的右栏块在数组里排在附录标题**之前**，
+  // 按数组顺序做「进入/离开区间」会把整栏条目漏掉（实测右栏 16~20 号条目全部漏网）。
+  const APPENDIX_START = /^(?:appendix|appendices|附录)\b/i;
+  const APPENDIX_END = /^(?:references?|bibliography|declarations?|funding|acknowledge?ments?|参考文献|致谢|声明)\b/i;
+  let inAppendix = false;
+  let appendixTitleSize = 0;
+  for (const page of pages) {
+    const blocks = (page.blocks || []).filter((b) => b && b.kind !== 'furniture');
+    if (!inAppendix) {
+      const start = blocks.find((b) => (b.kind === 'heading' || b.kind === 'title')
+        && APPENDIX_START.test(String(b.text || '').trim()));
+      if (!start) continue;
+      inAppendix = true;
+      // 以附录标题自己的字号作基准 —— 不能用 bodySize：分段加载时后段只有参考文献，
+      // 统计出来的 bodySize 是 8.5（参考文献字号），附录条目却是 10pt，比不了。
+      appendixTitleSize = start.size || 0;
+    }
+    let ended = false;
+    for (const b of blocks) {
+      if (b.kind !== 'heading' && b.kind !== 'title') continue;
+      const text = String(b.text || '').trim();
+      if (!text) continue;
+      if (text.length <= 60 && APPENDIX_END.test(text)) { ended = true; continue; }
+      // 比附录标题还小的「标题」只是条目；同字号 / 更大的才可能是真的小节标题
+      if (appendixTitleSize && (b.size || 0) < appendixTitleSize - 0.2) {
+        b.kind = 'body';
+        b.reason = '附录里的编号条目（阅读模式不当标题）';
+      }
+    }
+    if (ended) inAppendix = false;
+  }
+  // 作者行的碎片归一：同一基线上的左右邻块（被大间隙切开的那半行）跟着标成 authors，
+  // 否则「Christine Ringler」会被当成一个一级小节标题加粗显示。
+  for (const page of pages) {
+    const blocks = (page.blocks || []).filter((b) => b && b.kind !== 'furniture');
+    for (const b of blocks) {
+      if (b.kind !== 'authors') continue;
+      for (const other of blocks) {
+        if (other === b || other.kind !== 'heading') continue;
+        if ((other.lines || []).length !== 1) continue;
+        if (Math.abs((other.y1 || 0) - (b.y1 || 0)) > 2.5) continue;
+        if (Math.abs((other.size || 0) - (b.size || 0)) > 1.2) continue;
+        other.kind = 'authors';
+      }
+    }
+  }
+  // 有 kind 变化后重新定级 —— 调用方在 fixHeadings 之后才建 levelOf
 }
 
 /**
@@ -609,6 +859,16 @@ function mergeNodes(prev, next) {
   return prev;
 }
 
+/** 跳过页末的脚注，找最后一个正文节点 —— 跨页接续要从它往后接 */
+function lastBodyNode(list) {
+  for (let i = list.length - 1; i >= 0; i--) {
+    const n = list[i];
+    if (n.t === 'text' && n.kind !== 'footnote') return n;
+    if (n.t === 'crop') return n;
+  }
+  return null;
+}
+
 /**
  * analyzePdf 的版面结构 → 阅读模式文档树。
  *
@@ -618,15 +878,18 @@ function mergeNodes(prev, next) {
 export function toReadingDoc(analysis) {
   const pages = Array.isArray(analysis?.pages) ? analysis.pages : [];
   const totalPages = analysis?.totalPages || pages.length;
-  markMarginalia(pages);
-  const levelOf = makeLevelFn(pages);
+  const bodySize = Number(analysis?.stats?.bodySize) || 0;
+  markMarginalia(pages, bodySize);
+  markFootnotes(pages, bodySize);
+  fixHeadings(pages, bodySize);
+  const levelOf = makeLevelFn(pages, bodySize);
   const stamps = collectStamps(pages);
   const blocks = [];
   const warnings = [];
   const pageTops = new Map();
   for (const page of pages) pageTops.set(page.index, (page.y1 ?? page.height) - (page.height || 0) * 0.08);
 
-  const stats = { text: 0, figures: 0, tables: 0, formulas: 0, chars: 0, emptyPages: 0 };
+  const stats = { text: 0, figures: 0, tables: 0, formulas: 0, chars: 0, emptyPages: 0, footnotes: 0 };
 
   for (const page of pages) {
     collapseTableZones(page);
@@ -689,23 +952,35 @@ export function toReadingDoc(analysis) {
       else stats.figures++;
     }
 
-    // 2) 文字块：可重排的走文本，其余（表格 / 公式 / 碎块）走裁图
+    // 2) 文字块：可重排的走文本，其余（表格 / 公式 / 碎块）走裁图。
+    //    脚注单独收集：它们在本页正文之后统一追加，不能参与正文的排序与拼接。
+    const noteNodes = [];
     for (const b of ordered) {
       if (!isTextBlock(b)) continue;
       if (b.x1 - b.x0 < MIN_TEXT_W || b.y1 - b.y0 < MIN_TEXT_H) continue;
       if (consumed.has(b)) continue;
       // 落在插图里的短文字（坐标轴标签、图例）已经画在裁图里了，再排一遍就是重复
       if (cropRects.some((r) => centerIn(b, r))) continue;
+      // 角标（作者单位编号 1 2 3、脚注星号）：几个 pt 的数字，裁成图毫无意义
+      const plain = String(b.text || '').trim();
+      if (plain.length <= 4 && (b.size || 0) < Math.max(6, bodySize * 0.72)) continue;
       const node = textNode(b, levelOf(b), page, stamps);
       if (!node.lines.length) continue;
       textRects.push(node.rect);
+      if (b.kind === 'footnote') {
+        // 每页第一段脚注带一条分隔线，和正文分开（Zotero 用一条细线做同样的标记）
+        if (!noteNodes.length) node.sep = true;
+        noteNodes.push(node);
+        stats.footnotes++;
+        continue;
+      }
       items.push({ rank: rankOf.get(b) ?? 0, y: b.y1, seq: items.length, el: node });
       stats.text++;
       stats.chars += node.lines.reduce(
         (n, l) => n + l.runs.reduce((m, r) => m + r[2].length, 0), 0);
     }
 
-    if (!items.length) {
+    if (!items.length && !noteNodes.length) {
       // 整页都没有可重排的内容：扫描页、整页插图（大图 / 大表）。重排救不了它，
       // 但也不能让这一页在阅读视图里凭空消失 —— 整页裁一张图放进去，内容不丢。
       const hasVisual = (page.images || []).length > 0 || (page.rawItems || 0) > 0;
@@ -724,20 +999,58 @@ export function toReadingDoc(analysis) {
       continue;
     }
 
-    // 3) 页内排序：阅读顺序名次优先，同名义次再按纵向从上到下
+    // 3) 页内排序：阅读顺序名次优先，同名义次再按纵向从上到下。
+    //    脚注不参与排序，整页正文排完之后接在末尾（Zotero 也是这么放的）：
+    //    脚注按阅读顺序本来就该在页末，混进正文只会把一句话切成两截。
     items.sort((a, b) => (a.rank - b.rank) || (b.y - a.y) || (a.seq - b.seq));
-    const pageNodes = joinAdjacent(items.map((i) => i.el)).map((n) => ({ ...n, _pageEnd: false }));
-    pageNodes[pageNodes.length - 1]._pageEnd = true;
+    const pageNodes = joinAdjacent([...items.map((i) => i.el), ...noteNodes])
+      .map((n) => ({ ...n, _pageEnd: false }));
+    // 跨页接续要看「最后一个正文块」，脚注在它之后
+    const lastBody = [...pageNodes].reverse().find((n) => n.kind !== 'footnote');
+    if (lastBody) lastBody._pageEnd = true;
+    else pageNodes[pageNodes.length - 1]._pageEnd = true;
+    // 栏间断句：双栏排版里一句话经常在栏底断开、下一栏接着写
+    //（"…view the demonstration together," / "or demonstrators might invite…"）。
+    // 给每一栏的最后一个正文块打上 _colEnd，让下面第 4 步的接续逻辑也能跨栏接上，
+    // 否则用户看到的仍然是「一句话被拆成两段」。同栏后来的会覆盖前面的 → 拿到栏末那个。
+    const lastInCol = new Map();
+    for (const n of pageNodes) {
+      if (n.t !== 'text' || n.kind === 'footnote') continue;
+      lastInCol.set(n.col ?? -1, n);
+    }
+    for (const n of lastInCol.values()) n._colEnd = true;
     blocks.push(...pageNodes);
+
+    // 3.5) 整页图形兜底：框架图 / 流程图这类图大多是用**描边**画的，进不了
+    //      vectorFigures（它只认填充色块），页面上又只有几个零散标签字。
+    //      这种页在此前只剩一行刊名，图整个丢掉。判据是「可重排的文字极少、
+    //      但这一页的原始文字片段很多」，补一张整页裁图，宁可多看一张图也不丢内容。
+    if (pageNodes.length && (page.rawItems || 0) >= 30) {
+      const chars = pageNodes.reduce((n, node) => n + (node.lines || []).reduce(
+        (m, l) => m + l.runs.reduce((k, r) => k + r[2].length, 0), 0), 0);
+      if (chars < 200 && !cropRects.length) {
+        const full = [
+          round((page.x0 ?? 0) + 1, 2),
+          round((page.y0 ?? 0) + 1, 2),
+          round((page.x1 ?? page.width) - 1, 2),
+          round((page.y1 ?? page.height) - 1, 2),
+        ];
+        blocks.push({ t: 'crop', k: 'figure', page: page.index, rect: full, caption: '', full: true, _pageEnd: true });
+        stats.figures++;
+        warnings.push(`第 ${page.index} 页几乎全是整页图形（框架图 / 流程图），已按原页裁图保留。`);
+      }
+    }
   }
 
-  // 4) 跨页段落接续
+  // 4) 跨页 / 跨栏段落接续
   const merged = [];
   for (const cur of blocks) {
-    const prev = merged[merged.length - 1];
-    if (prev && prev._pageEnd === true && canContinue(prev, cur, pageTops.get(cur.page))) {
+    const prev = lastBodyNode(merged);
+    if (prev && (prev._pageEnd === true || prev._colEnd === true)
+      && canContinue(prev, cur, pageTops.get(cur.page))) {
       mergeNodes(prev, cur);
       prev._pageEnd = cur._pageEnd === true;
+      prev._colEnd = cur._colEnd === true;
       continue;
     }
     merged.push(cur);
@@ -1011,6 +1324,31 @@ export function registerReadingRoutes(app, deps) {
     if (found.error) return res.json({ running: false });
     const p = getReadingProgress(found.path);
     res.json(p ? { running: true, ...p } : { running: false });
+  });
+
+  /**
+   * AI 精修：用当前配置的模型把「脚注 / 标题 / 断段」三类语义错误修一遍。
+   * 结果写回缓存，同一篇 PDF 只跑一次；失败不影响已渲染的规则结果。
+   */
+  app.post('/api/reading/refine', async (req, res) => {
+    const found = resolve(req.body);
+    if (found.error) return res.status(400).json({ error: found.error });
+    if (!/\.pdf$/i.test(found.path)) return res.status(400).json({ error: '阅读模式目前只支持 PDF' });
+    try {
+      const { doc } = await buildReadingDoc(found.path, {});
+      if (doc.ai && !req.body?.force) {
+        return res.json({ ok: true, cached: true, doc, summary: doc.ai, model: doc.ai.model || '' });
+      }
+      const settings = store?.getSettings ? store.getSettings() : {};
+      const out = await refineReadingDoc(doc, settings, {});
+      const key = cacheKey(found.path);
+      if (key) writeCacheFile(cachePath(key), out.doc);
+      res.json({ ok: true, cached: false, doc: out.doc, summary: out.summary, model: out.model || '' });
+    } catch (e) {
+      const code = e?.code || 'AI_FAILED';
+      const status = code === 'NO_MODEL' ? 400 : 500;
+      res.status(status).json({ error: (code === 'NO_MODEL' ? '' : 'AI 精修失败：') + (e?.message || e), code });
+    }
   });
 
   app.post('/api/reading/drop', (req, res) => {
