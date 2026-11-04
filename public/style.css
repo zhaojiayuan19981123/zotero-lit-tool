@@ -995,12 +995,13 @@ mark.kw { background: var(--primary-soft); color: var(--primary); border-radius:
 /* 阅读热力：按页停留时长（不再有「未阅读 / 阅读中 / 已阅读」三态） */
 .heat-cell { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 2px 4px; }
 .heat-bar { display: inline-flex; flex: 1; align-items: center; gap: 1px; min-width: 0; height: 10px; }
-.heat-tick { flex: 1 1 3px; min-width: 2px; height: 100%; border-radius: 1px; background: #e8ecf2; }
-.heat-tick.heat-lv1 { background: #d9e8f5; }
-.heat-tick.heat-lv2 { background: #a9d2ee; }
-.heat-tick.heat-lv3 { background: #71b4e0; }
-.heat-tick.heat-lv4 { background: #3d8fc9; }
-.heat-tick.heat-lv5 { background: #1f66a0; }
+.heat-tick { flex: 1 1 3px; min-width: 2px; height: 100%; border-radius: 1.5px; background: #e9edf3; }
+/* 冷（几乎没读）→ 热（停留最久）：蓝 → 青 → 黄 → 橙 → 红，一眼能看出读到哪、读得久 */
+.heat-tick.heat-lv1 { background: #b9dcfa; }
+.heat-tick.heat-lv2 { background: #68b7ef; }
+.heat-tick.heat-lv3 { background: #37a3c9; }
+.heat-tick.heat-lv4 { background: #f0b03c; }
+.heat-tick.heat-lv5 { background: #e8613c; }
 .heat-total, .heat-time { flex-shrink: 0; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 .heat-hidden { font-size: 11px; color: var(--text-3); }
 .heat-chip {
@@ -1866,6 +1867,12 @@ mark.anno-c-purple { color: var(--primary); background: none; }
   border: 1px solid var(--border-soft); border-radius: 8px; overflow: hidden;
 }
 .rm-crop-table .rm-crop-box { background: var(--surface); }
+/* 公式：和 Zotero 一样不带框、不留底色，就是纸面上那一行式子 */
+.rm-crop-formula .rm-crop-box {
+  background: transparent; border-color: transparent; border-radius: 4px; min-height: 0;
+}
+.rm-crop-formula:hover .rm-crop-box { border-color: var(--border-soft); }
+.rm-crop-formula figcaption { font-style: normal; }
 .rm-crop-canvas { display: block; width: 100%; height: auto; }
 .rm-crop-ph { font-size: 12px; letter-spacing: .1em; color: var(--text-3); }
 .rm-crop figcaption { margin-top: 7px; font-size: .82em; line-height: 1.55; color: var(--text-2); text-align: center; }

@@ -23,7 +23,7 @@ import { getDataDir } from './store.js';
 import { refineReadingDoc } from './readingAi.js';
 
 /** 结构版本；结构变了就 +1，旧缓存自动失效 */
-export const READING_SCHEMA = 4;
+export const READING_SCHEMA = 5;
 
 /** 片段样式位（写进结构树的 run 第 4 位，前端据此出 <b>/<i>） */
 const STYLE_BOLD = 1;
@@ -233,14 +233,19 @@ function textNode(block, level, page, stamps) {
 /**
  * 裁图节点。图注若与块重叠（图题的块通常紧贴图下方）就并入，前端渲染成 <figcaption>。
  */
-function cropNode({ page, rect, kind, caption }) {
-  return {
+function cropNode({ page, rect, kind, caption, size }) {
+  const node = {
     t: 'crop',
     k: kind,
     page,
     rect,
     caption: String(caption || '').slice(0, 300),
   };
+  // 原始字号的 pt 值：前端据此把裁图按「和正文同样的比例」呈现，
+  // 而不是不管多大都拉满整栏（小公式被放大成巨幅、半截公式更显突兀）。
+  const s = Number(size);
+  if (Number.isFinite(s) && s > 0) node.size = round(s, 1);
+  return node;
 }
 
 /**
@@ -274,6 +279,165 @@ function findCaption(node, blocks, pageHeight) {
     if (!best || gap < best.gap) best = { gap, text, block: b };
   }
   return best;
+}
+
+// ==================== 公式 / 图表整块归并 ====================
+//
+// pdf.js 的文本层常把一个**显示公式拆成好几块**：
+//     "PS=" | "αT +βC +γN +δP +εV + εL +θF +ϑS" | "(1)"
+// 甚至把括号、上下标、分式线各自成块。逐块裁图的结果是：小的碎片够不到最小面积被丢掉，
+// 剩下的半截公式再被等比拉到整栏宽 —— 于是「公式只显示了一半，还特别大」。
+// Zotero 的阅读模式里公式是完整的一张图，这里按版面几何把同一条公式的碎片并成一个
+// 矩形再裁，并吸收公式编号、分数线这类矢量填充块。
+
+const EQUATION_NO = /^\(\s*\d{1,3}[a-z]?\s*\)$/;
+
+function unionRect(a, b) {
+  return [
+    Math.min(a[0], b[0]), Math.min(a[1], b[1]),
+    Math.max(a[2], b[2]), Math.max(a[3], b[3]),
+  ];
+}
+
+/** 两矩形中心点是否分处两栏（用于阻止左右栏的公式被并到一起） */
+function acrossColumns(a, b, page) {
+  const cols = page.columns || [];
+  if (cols.length !== 2) return false;
+  const mid = (cols[0].x1 + cols[1].x0) / 2;
+  const ca = (a[0] + a[2]) / 2;
+  const cb = (b[0] + b[2]) / 2;
+  return (ca < mid) !== (cb < mid);
+}
+
+/**
+ * 两块公式碎片是否属于同一条公式。
+ * 判据：同一基线带（纵向重叠或中心接近），且横向距离不超过一个合理字距；
+ * 另外允许「上下叠放的分子/分母」——横向大幅重叠、纵向只差一点点。
+ */
+function sameEquation(a, b, base, page) {
+  const A = a.rect;
+  const B = b.rect;
+  const ah = A[3] - A[1];
+  const bh = B[3] - B[1];
+  if (ah <= 0 || bh <= 0) return false;
+  const overlapY = Math.min(A[3], B[3]) - Math.max(A[1], B[1]);
+  const vRatio = overlapY / Math.max(1, Math.min(ah, bh));
+  const sameBand = vRatio >= 0.3
+    || Math.abs((A[1] + A[3]) / 2 - (B[1] + B[3]) / 2) <= Math.max(3, Math.min(ah, bh) * 0.75);
+  const overlapX = Math.min(A[2], B[2]) - Math.max(A[0], B[0]);
+  const xRatio = overlapX / Math.max(1, Math.min(A[2] - A[0], B[2] - B[0]));
+  const gapY = Math.max(A[1], B[1]) - Math.min(A[3], B[3]);
+  const stacked = xRatio >= 0.5 && gapY <= Math.max(2, base * 0.35);
+  if (!sameBand && !stacked) return false;
+  const gapX = Math.max(A[0], B[0]) - Math.min(A[2], B[2]);
+  // 公式编号（(1) / (12a)）常右对齐在栏边，和公式主体隔着一大片空白，距离放宽
+  const numbered = EQUATION_NO.test(a.text || '') || EQUATION_NO.test(b.text || '');
+  if (gapX > (numbered ? base * 16 : base * 6)) return false;
+  if (acrossColumns(A, B, page) && gapX > base * 1.2) return false;   // 左右栏各自的公式不能并
+  return true;
+}
+
+/**
+ * 把一页里的公式碎片并成若干「整条公式」区域。
+ * 返回 [{ rect, blocks, text, size }]，面积过小的组直接丢弃（多半是角标、运算符残片）。
+ */
+function groupEquationParts(parts, page, bodySize) {
+  if (!parts.length) return [];
+  const base = Number(bodySize) || 10;
+  let groups = parts.map((p) => ({
+    rect: p.rect.slice(), blocks: [p.block], text: p.text || '', size: p.block.size || base,
+  }));
+  for (let pass = 0; pass < 6; pass++) {
+    const out = [];
+    for (const g of groups) {
+      const hit = out.find((o) => sameEquation(o, g, base, page));
+      if (hit) {
+        hit.rect = unionRect(hit.rect, g.rect);
+        hit.blocks.push(...g.blocks);
+        hit.text = (hit.text + ' ' + g.text).trim();
+        hit.size = Math.max(hit.size, g.size);
+      } else out.push(g);
+    }
+    if (out.length === groups.length) break;
+    groups = out;
+  }
+  return groups.filter((g) => {
+    const w = g.rect[2] - g.rect[0];
+    const h = g.rect[3] - g.rect[1];
+    return w >= 10 && h >= 5 && w * h >= MIN_CROP_AREA;
+  });
+}
+
+/**
+ * 把裁图矩形吸收掉紧邻的矢量填充块：分式横线、根号、大括号在 PDF 里是填充路径，
+ * 只按文字 bbox 裁会把它们切掉一截。只吃「面积不大、贴着矩形」的块，避免吞掉底纹。
+ */
+function growWithInk(rect, page, tol = 2.5) {
+  const out = rect.slice();
+  const area0 = Math.max(1, (out[2] - out[0]) * (out[3] - out[1]));
+  for (const f of page.fills || []) {
+    const fr = [f.x0, f.y0, f.x1, f.y1];
+    const fw = fr[2] - fr[0];
+    const fh = fr[3] - fr[1];
+    if (fw < 1 || fh < 1) continue;
+    if (fw * fh > area0 * 0.45) continue;                 // 大色块是底纹 / 表格底色
+    if (!nearBox(out, fr, tol)) continue;
+    out[0] = Math.min(out[0], fr[0]);
+    out[1] = Math.min(out[1], fr[1]);
+    out[2] = Math.max(out[2], fr[2]);
+    out[3] = Math.max(out[3], fr[3]);
+  }
+  return out;
+}
+
+/** 裁图矩形统一加一点内边距并夹到页面内：斜体字尾、根号上划线常常压着 bbox */
+function padRect(rect, pad, page) {
+  const lo = [page.x0 ?? 0, page.y0 ?? 0, page.x1 ?? page.width, page.y1 ?? page.height];
+  return [
+    round(Math.max(lo[0], rect[0] - pad), 2),
+    round(Math.max(lo[1], rect[1] - pad), 2),
+    round(Math.min(lo[2], rect[2] + pad), 2),
+    round(Math.min(lo[3], rect[3] + pad), 2),
+  ];
+}
+
+/**
+ * 图像 XObject 常被切成好几条（大图分片存储 / 扫描条带 / 图例单独一张图）。
+ * 逐张裁图会只剩图的一部分，这里把相接或重叠的图块并成一个外接矩形。
+ */
+function mergeFigureTiles(cands, base) {
+  const tiles = cands.filter((c) => c.kind === 'figure' && !c.vector && !c.block);
+  if (tiles.length < 2) return cands;
+  let groups = tiles.map((t) => ({ rect: t.rect.slice(), tiles: [t] }));
+  const touchTol = Math.max(4, base * 1.2);
+  for (let pass = 0; pass < 4; pass++) {
+    const out = [];
+    for (const g of groups) {
+      const hit = out.find((o) => {
+        const A = o.rect;
+        const B = g.rect;
+        const ovX = Math.min(A[2], B[2]) - Math.max(A[0], B[0]);
+        const ovY = Math.min(A[3], B[3]) - Math.max(A[1], B[1]);
+        const gapX = Math.max(A[0], B[0]) - Math.min(A[2], B[2]);
+        const gapY = Math.max(A[1], B[1]) - Math.min(A[3], B[3]);
+        if (ovX > 0 && ovY > 0) return true;                       // 直接重叠
+        if (gapX <= touchTol && ovY > Math.min(A[3] - A[1], B[3] - B[1]) * 0.35) return true;
+        if (gapY <= touchTol && ovX > Math.min(A[2] - A[0], B[2] - B[0]) * 0.35) return true;
+        return false;
+      });
+      if (hit) {
+        hit.rect = unionRect(hit.rect, g.rect);
+        hit.tiles.push(...g.tiles);
+      } else out.push(g);
+    }
+    if (out.length === groups.length) break;
+    groups = out;
+  }
+  const merged = groups.map((g) => ({ rect: g.rect, kind: 'figure', blocks: g.tiles.map((t) => t.block) }));
+  return [
+    ...cands.filter((c) => !(c.kind === 'figure' && !c.vector && !c.block)),
+    ...merged,
+  ];
 }
 
 /**
@@ -817,40 +981,100 @@ function collapseTableZones(page) {
   flush();
   if (!zones.length) return;
 
+  // 2.5) 区带按栏切开：只有「一侧明显是公式」时才切。
+  //      双栏页里左右两栏的行常常恰好对齐，一个「表格区」的包围盒很容易横跨栏缝，
+  //      右栏的公式就被并进左栏的表格裁图里（公式显示不出来的主要来源之一）。
+  //      但真正的通栏大表（表 1 左半是对照组、右半是处理组）必须整张保留，
+  //      所以判据不是「跨栏缝」而是「这一侧是不是一坨公式」：块少、块宽、全是公式。
+  const splitByColumn = (rect, items) => {
+    const cols = page.columns || [];
+    if (cols.length !== 2) return [{ rect, items }];
+    const mid = (cols[0].x1 + cols[1].x0) / 2;
+    if (items.some((b) => b.x0 < mid - 4 && b.x1 > mid + 4)) return [{ rect, items }];
+    const left = [];
+    const right = [];
+    for (const b of items) {
+      const cx = (b.x0 + b.x1) / 2;
+      (cx < mid ? left : right).push(b);
+    }
+    const colW = Math.max(1, cols[0].x1 - cols[0].x0);
+    const formulaish = (list) => {
+      if (!list.length) return false;
+      const formulas = list.filter((b) => b.kind === 'formula').length;
+      const wide = list.filter((b) => b.kind === 'formula' && (b.x1 - b.x0) > colW * 0.3).length;
+      return formulas >= list.length * 0.6 && wide >= 1;
+    };
+    const box = (list) => [
+      Math.min(...list.map((b) => b.x0)), Math.min(...list.map((b) => b.y0)),
+      Math.max(...list.map((b) => b.x1)), Math.max(...list.map((b) => b.y1)),
+    ];
+    if (left.length < 3 || right.length < 3) {
+      const keep = left.length >= right.length ? left : right;
+      return keep.length >= 4 ? [{ rect: box(keep), items: keep }] : [{ rect, items }];
+    }
+    const lf = formulaish(left);
+    const rf = formulaish(right);
+    if (!lf && !rf) return [{ rect, items }];              // 通栏大表，整张保留
+    if (rf && !lf) return [{ rect: box(left), items: left }];
+    if (lf && !rf) return [{ rect: box(right), items: right }];
+    return [{ rect: box(left), items: left }, { rect: box(right), items: right }];
+  };
+
   const consumed = new Set();
+  const flatZones = [];
+  // 一块区域要真的「连续 3 行以上都是网格行」才算表格区。按栏切开后必须重算：
+  // 右栏那种「一行公式 + 几行正文」的假网格只有 1 行，切开后就该被丢掉。
+  const gridRowCount = (items) => {
+    const rws = [];
+    for (const b of items.slice().sort((a, z) => z.y1 - a.y1)) {
+      const c = (b.y0 + b.y1) / 2;
+      const r = rws.find((x) => Math.abs(x.center - c) <= Math.max(3, (b.y1 - b.y0) * 0.6));
+      if (r) r.items.push(b);
+      else rws.push({ center: c, items: [b] });
+    }
+    return rws.filter((r) => {
+      if (r.items.length < 3) return false;
+      const span = Math.max(...r.items.map((i) => i.x1)) - Math.min(...r.items.map((i) => i.x0));
+      return span > w * 0.3;
+    }).length;
+  };
   for (const zone of zones) {
     const inZone = zone.flatMap((r) => r.items);
     const x0 = Math.min(...inZone.map((i) => i.x0));
     const x1 = Math.max(...inZone.map((i) => i.x1));
     const y0 = Math.min(...inZone.map((i) => i.y0));
     const y1 = Math.max(...inZone.map((i) => i.y1));
-    // 表格区里被单独切出来的小块（比如跨格的长标题）一并吞掉
-    for (const b of blocks) {
-      if (b.kind === 'furniture' || consumed.has(b)) continue;
-      const cx = (b.x0 + b.x1) / 2;
-      const cy = (b.y0 + b.y1) / 2;
-      if (cx > x0 - 4 && cx < x1 + 4 && cy > y0 - 4 && cy < y1 + 4) consumed.add(b);
+    for (const part of splitByColumn([x0, y0, x1, y1], inZone)) {
+      if (gridRowCount(part.items) < 3) continue;
+      // 表格区里被单独切出来的小块（比如跨格的长标题）一并吞掉
+      for (const b of blocks) {
+        if (b.kind === 'furniture' || consumed.has(b)) continue;
+        const cx = (b.x0 + b.x1) / 2;
+        const cy = (b.y0 + b.y1) / 2;
+        if (cx > part.rect[0] - 4 && cx < part.rect[2] + 4
+          && cy > part.rect[1] - 4 && cy < part.rect[3] + 4) consumed.add(b);
+      }
+      part.items.forEach((b) => consumed.add(b));
+      flatZones.push(part.rect);
     }
-    inZone.forEach((b) => consumed.add(b));
-    zone.rect = [x0, y0, x1, y1];
   }
 
   // 3) 用合成块替换掉被吞掉的原始块
-  const synth = zones.map((zone, i) => ({
+  const synth = flatZones.map((rect, i) => ({
     id: `p${page.index}-tbl${i + 1}`,
     index: 0,
     column: -1,
     span: 0,
-    colX0: zone.rect[0],
-    colX1: zone.rect[2],
-    colWidth: zone.rect[2] - zone.rect[0],
+    colX0: rect[0],
+    colX1: rect[2],
+    colWidth: rect[2] - rect[0],
     lines: [],
     lineCount: 0,
     text: '',
     rawText: '',
-    x0: zone.rect[0], y0: zone.rect[1], x1: zone.rect[2], y1: zone.rect[3],
-    width: zone.rect[2] - zone.rect[0],
-    height: zone.rect[3] - zone.rect[1],
+    x0: rect[0], y0: rect[1], x1: rect[2], y1: rect[3],
+    width: rect[2] - rect[0],
+    height: rect[3] - rect[1],
     size: 8,
     lineHeight: 9,
     align: 'left',
@@ -997,6 +1221,13 @@ function nodeChars(node) {
     (n, l) => n + (l.runs || []).reduce((m, r) => m + String(r[2] || '').length, 0), 0);
 }
 
+/** 结构树里一个文字节点的完整文本（行间补空格） */
+function nodeText(node) {
+  if (node.t !== 'text') return '';
+  return (node.lines || []).map((l) => (l.runs || []).map((r) => String(r[2] || '')).join(''))
+    .join(' ').replace(/\s+/g, ' ').trim();
+}
+
 /**
  * 跨栏 / 跨页断行处的连字符接合：`con-` + `stantly` → `constantly`。
  * 不在 run 层做的话，前端装配时按「片段间隙补空格」会拼成 `con- stantly`。
@@ -1051,13 +1282,117 @@ function lastBodyNode(list) {
   return null;
 }
 
+// ==================== 首页版面顺序 ====================
+//
+// 版面解析出来的首页块顺序不一定等于「读者想读的顺序」：Elsevier 首页左侧是一条
+// ARTICLE INFO 边栏（Keywords / DOI / 通讯作者），右边才是摘要；有的期刊把作者单位
+// 放在摘要后面，还有的把 Highlights 排在标题前。Zotero 的阅读模式一律按
+// 标题 → 作者 → 单位 → 摘要 → 关键词 → 正文 排，这里照做。
+//
+// 只调整「标题到 Introduction 之间」的这一小段，其余部分保持版面阅读顺序不动 ——
+// 动得越少，越不会把正文顺序弄乱。
+
+const ABSTRACT_LABEL = /^(?:a\s?b\s?s\s?t\s?r\s?a\s?c\s?t|abstract|摘\s*要)\s*[:：.．—–-]?$/i;
+const KEYWORDS_LABEL = /^(?:key\s?words?|key\s?terms?|index\s+terms|关键词)\s*[:：]?/i;
+const INTRO_LABEL = /^(?:\d{1,2}\.?\s*)?(?:introduction|引言|绪论|研究背景)\s*[:：]?$/i;
+const AFFIL_LIKE = /(?:universit|college|school\s+of|department|institute|faculty|business\s+school|@[\w.-]+\.|学院|大学|研究院|系\s*$)/i;
+
+/**
+ * 首页前区重排。返回新数组，不修改输入。
+ * 找不到论文标题（扫描件 / 结构异常）时原样返回，绝不凭空调整顺序。
+ */
+export function orderFrontMatter(blocks) {
+  if (!Array.isArray(blocks) || blocks.length < 4) return blocks;
+  const start = blocks.findIndex((b) => b.t === 'text' && b.kind === 'title');
+  if (start < 0) return blocks;
+
+  // 窗口结束：第一个 Introduction 标题；没有就取「标题所在页 + 1 页」以内的 60 块
+  let end = blocks.findIndex((b, i) => i > start && b.t === 'text'
+    && b.kind === 'heading' && INTRO_LABEL.test(nodeText(b)));
+  if (end < 0) {
+    const firstPage = blocks[start].page;
+    let i = start + 1;
+    while (i < blocks.length && blocks[i].page <= firstPage + 1 && i - start <= 60) i++;
+    end = i;
+  }
+  if (end <= start + 1) return blocks;
+
+  const head = blocks.slice(0, start);
+  const win = blocks.slice(start, end);
+  const tail = blocks.slice(end);
+
+  // 分档：0 标题 / 1 作者 / 2 单位 / 3 摘要小标题 / 4 摘要正文 / 5 关键词 / 6 其余
+  const scored = win.map((b, i) => {
+    const text = nodeText(b);
+    let bucket = 6;
+    if (b.t === 'text') {
+      if (b.kind === 'title' || i === 0) bucket = 0;
+      else if (isAuthorLine(b, text, i)) bucket = 1;
+      else if (ABSTRACT_LABEL.test(text) && text.length <= 24) bucket = 3;
+      else if (KEYWORDS_LABEL.test(text) && text.length <= 60) bucket = 5;
+      else if (AFFIL_LIKE.test(text) && text.length < 240
+        && (b.size || 0) <= (win[0].size || 12) * 1.02 && (b.size || 0) < 10) bucket = 2;
+    }
+    return { b, bucket, i };
+  });
+
+  // 没有「A B S T R A C T」小标题的期刊（Elsevier 的栏目名常被当成纯符号丢掉）：
+  // 把「作者 / 单位之后、第一个节标题之前」的正文段落当作摘要。
+  if (!scored.some((s) => s.bucket === 3)) {
+    let started = false;
+    for (const s of scored) {
+      if (!started) {
+        if (s.bucket <= 2) continue;                       // 标题 / 作者 / 单位 / 脚注
+        if (s.b.t === 'text' && s.b.kind === 'body') { started = true; s.bucket = 4; continue; }
+        break;                                             // 先碰到标题或图表：没有摘要段
+      }
+      if (s.b.t !== 'text' || s.b.kind !== 'body') break;
+      s.bucket = 4;
+    }
+  } else {
+    // 有摘要小标题时，标题之后、关键词之前的正文一律算摘要正文
+    let seen = false;
+    for (const s of scored) {
+      if (s.bucket === 5) seen = false;
+      if (s.bucket === 3) { seen = true; continue; }
+      if (seen && s.bucket === 6 && s.b.kind === 'body') s.bucket = 4;
+      if (seen && (s.b.kind === 'heading' || s.b.kind === 'kicker')) seen = false;
+    }
+  }
+
+  // 作者行原来是「小节标题」：改成 authors，前端才不会按 h2 加粗放大
+  for (const s of scored) {
+    if (s.bucket === 1 && s.b.t === 'text' && s.b.kind !== 'authors') {
+      s.b.kind = 'authors';
+      s.b.level = 0;
+    }
+  }
+
+  scored.sort((x, y) => (x.bucket - y.bucket) || (x.i - y.i));
+  return [...head, ...scored.map((s) => s.b), ...tail];
+}
+
+/**
+ * 作者行判定。`fixHeadings` 只能认出「一行里用 · 并列多个名字」的那种，
+ * 英文期刊更常见的是「Fang Dong, Weijia Liu, Zhiqing Wang」：它会被判成小节标题，
+ * 于是重排后跑到单位下面、甚至加粗成大标题。这里按「标题后不远处 + 逗号并排的人名」
+ * 补一道判据。
+ */
+function isAuthorLine(b, text, idx) {
+  if (b.kind === 'authors') return true;
+  if (idx < 1 || idx > 8) return false;
+  if (b.kind !== 'heading') return false;
+  if (!text || text.length > 240 || /[.。]$/.test(text)) return false;
+  const names = text.match(/\b[A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+\b/g) || [];
+  return names.length >= 1 && (/[,，]/.test(text) || /\band\b/.test(text));
+}
+
 /**
  * analyzePdf 的版面结构 → 阅读模式文档树。
  *
  * 纯函数（不碰文件系统、不读 PDF），测试可以直接喂构造的 pages 进来断言。
  * @returns {{v:number,pages:number,blocks:object[],stats:object,warnings:string[]}}
- */
-export function toReadingDoc(analysis) {
+ */export function toReadingDoc(analysis) {
   const pages = Array.isArray(analysis?.pages) ? analysis.pages : [];
   const totalPages = analysis?.totalPages || pages.length;
   const bodySize = Number(analysis?.stats?.bodySize) || 0;
@@ -1090,13 +1425,28 @@ export function toReadingDoc(analysis) {
     const textRects = [];
     let decorativePage = false;
 
-    // 1) 裁图候选：表格碎块 / 图像 XObject / 矢量插图。
+    // 1) 裁图候选：表格碎块 / 公式整块 / 图像 XObject / 矢量插图。
     //    先集中收集再统一判定，是因为「图注」要跟着裁图一起处理 —— 图注的文字
     //    由裁图节点的 <figcaption> 呈现，若同时再排一遍文字块，图注会重复出现一次。
     const cands = [];
     for (const b of ordered) {
-      if (isTextBlock(b) || !isCropBlock(b)) continue;
-      cands.push({ rect: rectOf(b), kind: b.tableLike ? 'table' : 'formula', block: b });
+      // 表格伪块：整块保留（表格的行列关系只有原图能表达）
+      if (b.kind !== 'formula' || !b.tableLike || isTextBlock(b) || !isCropBlock(b)) continue;
+      cands.push({ rect: rectOf(b), kind: 'table', block: b });
+    }
+    // 公式：先按版面把碎片并成整条公式，再裁一次图。逐块裁会把同一行公式切成
+    // "PS=" / 中间那一大串 / "(1)" 三张图，小的因面积不足被丢掉，剩下的半截
+    // 再被拉满整栏 —— 就是「公式只显示一部分、还特别大」的来源。
+    const formulaParts = [];
+    for (const b of ordered) {
+      if (b.kind !== 'formula' || b.tableLike || isTextBlock(b)) continue;
+      if (!b.lines?.length) continue;
+      formulaParts.push({ rect: rectOf(b), block: b, text: String(b.text || '').trim() });
+    }
+    for (const g of groupEquationParts(formulaParts, page, bodySize)) {
+      const rect = padRect(growWithInk(g.rect, page), 1.5, page);
+      const rank = Math.min(...g.blocks.map((b) => rankOf.get(b) ?? 0));
+      cands.push({ rect, kind: 'formula', rank, block: null, size: g.size });
     }
     for (const img of page.images || []) {
       const rect = [img.x0, img.y0, img.x1, img.y1];
@@ -1106,6 +1456,8 @@ export function toReadingDoc(analysis) {
     for (const rect of vectorFigures(page, ordered.filter(isTextBlock))) {
       cands.push({ rect, kind: 'figure', block: null, vector: true });
     }
+    // 分片存储的插图（大图切成几条、图例单独一张图）先并回整张
+    cands.splice(0, cands.length, ...mergeFigureTiles(cands, bodySize));
     // 期刊封面 / 出版商徽记：只剔除「图像 XObject」这类装饰图，不动矢量框架图、
     // 表格伪块和带图注的真插图。前提是这一页真有出版商刊眉 —— 否则整页无文字的
     // 扫描件大图会被误当成封面丢掉。整页都是装饰的页，后面也不补整页裁图。
@@ -1136,25 +1488,37 @@ export function toReadingDoc(analysis) {
       accepted.push(cand);
     }
 
-    // 图注归位：被裁图「吃掉」的图注块不再单独排成一行文字
+    // 图注归位：被裁图「吃掉」的图注块不再单独排成一行文字。
+    // 一张图注只能归一张图 —— 同一页里上方插图和下方表格挨得近时，按「距离最近」
+    // 贪心分配，否则表格会抢走上一张图的图注（figcaption 张冠李戴）。
     const consumed = new Set();
+    const pairs = [];
     for (const cand of accepted) {
       const cap = findCaption({ rect: cand.rect }, pageBlocks, page.height);
-      cand.caption = String(cap?.text || '').slice(0, 300);
-      if (cap?.block) consumed.add(cap.block);
+      if (cap) pairs.push({ cand, cap, gap: cap.gap });
+    }
+    pairs.sort((a, b) => a.gap - b.gap);
+    for (const { cand, cap } of pairs) {
+      if (consumed.has(cap.block)) continue;
+      cand.caption = String(cap.text || '').slice(0, 300);
+      consumed.add(cap.block);
     }
 
     for (const cand of accepted) {
+      const rect = cand.kind === 'formula' ? cand.rect : padRect(cand.rect, 1, page);
       const node = cropNode({
         page: page.index,
-        rect: cand.rect.map((v) => round(v, 2)),
+        rect: rect.map((v) => round(v, 2)),
         kind: cand.kind,
         caption: cand.caption,
+        size: cand.size,
       });
       cropRects.push(node.rect);
       // 裁图排在「它本该出现的位置」：表格/公式用它自己的阅读顺序名次（这样被吃掉的
       // 图注不会把它拽到上一栏去），插图用 cropRank 现算。
-      const rank = cand.block ? (rankOf.get(cand.block) ?? 0) : cropRank(cand.rect, ordered, page.columns);
+      const rank = Number.isFinite(cand.rank)
+        ? cand.rank
+        : (cand.block ? (rankOf.get(cand.block) ?? 0) : cropRank(cand.rect, ordered, page.columns));
       items.push({ rank, y: cand.rect[3], seq: items.length, el: node });
       if (cand.kind === 'table') stats.tables++;
       else if (cand.kind === 'formula') stats.formulas++;
@@ -1268,8 +1632,11 @@ export function toReadingDoc(analysis) {
   }
   for (const b of merged) delete b._pageEnd;
 
+  // 4.5) 首页前区按「标题 → 作者 → 单位 → 摘要 → 关键词」归位
+  const orderedDocs = orderFrontMatter(merged);
+
   // 5) 编号与稳定 id（前端拿它做定位锚点）
-  merged.forEach((b, i) => { b.id = `r${i + 1}`; });
+  orderedDocs.forEach((b, i) => { b.id = `r${i + 1}`; });
 
   return {
     v: READING_SCHEMA,
@@ -1278,12 +1645,12 @@ export function toReadingDoc(analysis) {
     // 正文基准字号 / 是否衬线：排版控件的「跟随原文」用它，避免整篇字体选错
     bodySize: analysis?.stats?.bodySize || 10,
     bodySerif: analysis?.stats?.bodySerif ?? null,
-    blocks: merged,
+    blocks: orderedDocs,
     stats: {
       ...stats,
-      blocks: merged.length,
-      headings: merged.filter((b) => b.t === 'text' && b.level > 0).length,
-      paragraphs: merged.filter((b) => b.t === 'text' && b.level === 0).length,
+      blocks: orderedDocs.length,
+      headings: orderedDocs.filter((b) => b.t === 'text' && b.level > 0).length,
+      paragraphs: orderedDocs.filter((b) => b.t === 'text' && b.level === 0).length,
     },
     warnings: [...new Set(warnings)].slice(0, 12),
   };

@@ -73,6 +73,17 @@ test('热力条按页着色，每一格都有页号提示', () => {
   assert.ok(bar.includes('第 5 页'));
 });
 
+test('热力分档按「本篇最久的一页」相对着色：短时间阅读也有颜色', () => {
+  // 只读了半分钟：原来一律落在最浅一档（整列看着是灰的）
+  assert.ok(H.level(5, 5) >= 1, '有停留就至少上色');
+  assert.equal(H.level(0, 5), 0, '没读过的一格保持空');
+  // 同一篇里最久的一页一定是最热的红/橙档
+  assert.equal(H.level(600, 600), 5);
+  assert.ok(H.level(60, 600) >= 1 && H.level(60, 600) <= 3);
+  // 但整篇只读了几秒时，别一上来就烧红
+  assert.ok(H.level(3, 3) <= 2);
+});
+
 test('译文缓存在本地，重新加载模块后仍能命中', async () => {
   const text = 'the demonstration together, or demonstrators might invite';
   CU.cacheSet(text, 'zh', 'volcweb', '', '这次演示，或者演示者可能会邀请');

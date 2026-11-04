@@ -14,7 +14,8 @@
   const MODE_KEY = 'sciterminal.readingHeatMode';
   const TICK_MS = 1000;
   const FLUSH_TICKS = 15;          // 每 15 秒落一次盘
-  const LEVELS = ['#e8ecf2', '#d9e8f5', '#a9d2ee', '#71b4e0', '#3d8fc9', '#1f66a0'];
+  // 冷 → 热：浅蓝 / 蓝 / 青 / 黄 / 橙 / 红（与 style.css 的 .heat-lv* 一一对应）
+  const LEVELS = ['#e9edf3', '#b9dcfa', '#68b7ef', '#37a3c9', '#f0b03c', '#e8613c'];
 
   let store = {};
   let mode = 'both';               // both | title | column
@@ -134,14 +135,32 @@
   function heatOf(docId) { return store[docId] || { pages: {}, total: 0, updatedAt: 0 }; }
   function total(docId) { return Number(heatOf(docId).total) || 0; }
 
-  function level(sec) {
+  /**
+   * 热力分档。
+   *
+   * 只看绝对秒数的话，通读一篇论文也就每页 1~2 分钟，全落在最浅两档，整列看着是灰的
+   * —— 用户以为「热力没上色」。所以改用「相对本篇最久的一页」+ 绝对下限双判据：
+   * 只要某一页停过几秒就至少是浅蓝，停留最久的几页一定进到黄 / 橙 / 红。
+   */
+  function level(sec, maxSec) {
     const s = Number(sec) || 0;
-    if (s < 30) return 0;
-    if (s < 120) return 1;
-    if (s < 420) return 2;
-    if (s < 900) return 3;
-    if (s < 1800) return 4;
-    return 5;
+    if (s <= 0) return 0;
+    if (s < 15) return 1;                       // 刚点开的一格：只上最浅的色
+    const m = Number(maxSec) || 0;
+    const r = m > 0 ? s / m : 0;
+    if (s >= 1800 || (r >= 0.85 && s >= 120)) return 5;
+    if (s >= 900 || (r >= 0.6 && s >= 60)) return 4;
+    if (s >= 300 || (r >= 0.4 && s >= 45)) return 3;
+    if (s >= 90 || (r >= 0.18 && s >= 20)) return 2;
+    return 1;
+  }
+
+  /** 一篇文献里停留最久的一页（相对分档的基准） */
+  function maxPage(docId) {
+    const pages = heatOf(docId).pages || {};
+    let max = 0;
+    for (const v of Object.values(pages)) max = Math.max(max, Number(v) || 0);
+    return max;
   }
 
   function format(sec) {
@@ -165,10 +184,11 @@
     const keys = Object.keys(h.pages).map(Number).filter((n) => n > 0).sort((a, b) => a - b);
     const last = Math.max(maxPages || 0, keys.length ? keys[keys.length - 1] : 0);
     const count = Math.min(Math.max(last, 12), 48);
+    const max = maxPage(docId);
     let cells = '';
     for (let p = 1; p <= count; p++) {
       const sec = Number(h.pages[p]) || 0;
-      cells += `<i class="heat-tick heat-lv${level(sec)}" title="第 ${p} 页 · ${format(sec)}"></i>`;
+      cells += `<i class="heat-tick heat-lv${level(sec, max)}" title="第 ${p} 页 · ${format(sec)}"></i>`;
     }
     return cells;
   }
@@ -188,7 +208,7 @@
     if (mode === 'column') return '';
     const docId = api.getDocId?.();
     if (!docId) return '';
-    const lv = level(heatOf(docId).pages?.[page]);
+    const lv = level(heatOf(docId).pages?.[page], maxPage(docId));
     return lv ? ` style="background:${LEVELS[lv]}26"` : '';
   }
 

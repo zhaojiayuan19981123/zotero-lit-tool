@@ -568,3 +568,85 @@ test('大字号全大写刊名 masthead 剔除，小字号全大写栏目行（k
   assert.ok(all.includes('ORIGINAL EMPIRICAL RESEARCH'), 'kicker 不是刊名，要保留');
   assert.ok(all.includes('A Real Paper Title'));
 });
+
+// ---------------- 公式 / 图表完整展示 ----------------
+
+test('一行公式被 pdf.js 拆成三块 → 并成一张完整裁图，编号也在里面', () => {
+  const cols = [{ x0: 0, x1: 298 }, { x0: 298, x1: 600 }];
+  const p = page(1, [
+    block('formula', [line('PS=', { x: 307, y: 492, size: 8, w: 16 })], { column: 1 }),
+    block('formula', [line('αT +βC +γN +δP', { x: 324, y: 492, size: 8, w: 140 })], { column: 1 }),
+    block('formula', [line('(1)', { x: 545, y: 492, size: 8, w: 13 })], { column: 1 }),
+    block('body', [line('The denotation of every symbol above is listed in Table 2.', { x: 307, y: 470, size: 8, w: 250 })], { column: 1 }),
+  ], { columns: cols });
+  const doc = docOf([p]);
+  const crops = doc.blocks.filter((b) => b.t === 'crop');
+  assert.equal(crops.length, 1, '三个碎片只该出一张图');
+  assert.equal(crops[0].k, 'formula');
+  assert.ok(crops[0].rect[0] <= 307.5, '左端要盖住 "PS="');
+  assert.ok(crops[0].rect[2] >= 557, '右端要盖住公式编号 (1)');
+});
+
+test('左右两栏的公式不会被并成一张（同一水平带也不行）', () => {
+  const cols = [{ x0: 0, x1: 298 }, { x0: 298, x1: 600 }];
+  const p = page(1, [
+    block('formula', [line('y = ax + b', { x: 60, y: 500, size: 9, w: 90 })], { column: 0 }),
+    block('formula', [line('z = cx + d', { x: 330, y: 500, size: 9, w: 90 })], { column: 1 }),
+  ], { columns: cols });
+  const doc = docOf([p]);
+  const crops = doc.blocks.filter((b) => b.t === 'crop');
+  assert.equal(crops.length, 2, '分处两栏的两个公式必须各出一张图');
+});
+
+test('表格区不横跨栏缝：右栏公式不会被并进左栏的表格裁图', () => {
+  const cols = [{ x0: 0, x1: 298 }, { x0: 298, x1: 600 }];
+  const cells = [];
+  for (let r = 0; r < 6; r++) {
+    const y = 500 - r * 18;
+    cells.push(
+      block('formula', [line('Item', { x: 45, y, size: 6.5, w: 40 })], { column: 0 }),
+      block('formula', [line('18–25', { x: 150, y, size: 6.5, w: 30 })], { column: 0 }),
+      block('formula', [line(String(40 + r * 7) + '(12.3)', { x: 240, y, size: 6.5, w: 40 })], { column: 0 }),
+    );
+  }
+  const p = page(1, [
+    ...cells,
+    // 右栏：同一水平带上一行公式碎片（旧实现会把它们当成表格的一行）
+    block('formula', [line('PS=', { x: 307, y: 494, size: 8, w: 16 })], { column: 1 }),
+    block('formula', [line('αT +βC +γN', { x: 324, y: 494, size: 8, w: 100 })], { column: 1 }),
+    block('formula', [line('(1)', { x: 545, y: 494, size: 8, w: 13 })], { column: 1 }),
+  ], { columns: cols });
+  const doc = docOf([p]);
+  const tables = doc.blocks.filter((b) => b.t === 'crop' && b.k === 'table');
+  const formulas = doc.blocks.filter((b) => b.t === 'crop' && b.k === 'formula');
+  for (const t of tables) assert.ok(t.rect[2] <= 298, `表格裁图越过了栏缝：${t.rect.join(',')}`);
+  assert.equal(formulas.length, 1, '右栏公式要单独出一张图');
+  assert.ok(formulas[0].rect[0] >= 298 && formulas[0].rect[2] >= 557);
+});
+
+// ---------------- 首页版面顺序 ----------------
+
+test('首页顺序：标题 → 作者 → 单位 → 摘要 → 引言', () => {
+  const p = page(1, [
+    block('title', [line('Environmental Penalties and Green Innovation', { x: 60, y: 740, size: 16, w: 460 })]),
+    block('body', [line('School of Business, Tsinghua University, Beijing 100084, China', { x: 60, y: 660, size: 7, w: 420 })]),
+    block('heading', [line('Fang Dong, Weijia Liu', { x: 60, y: 700, size: 10, w: 250 })]),
+    block('body', [
+      line('Environmental penalties exert regulatory pressure that transcends organizational', { x: 60, y: 620, size: 10, w: 480 }),
+      line('boundaries and shapes the innovation behaviour of downstream firms.', { x: 60, y: 606, size: 10, w: 460 }),
+    ]),
+    block('heading', [line('1. Introduction', { x: 60, y: 520, size: 12, w: 150 })]),
+    block('body', [
+      line('Environmental regulation is a central instrument for enforcing corporate compliance.', { x: 60, y: 490, size: 10, w: 480 }),
+      line('Prior work has examined its direct effects on the regulated firms themselves.', { x: 60, y: 476, size: 10, w: 470 }),
+    ]),
+  ]);
+  const doc = docOf([p]);
+  const kinds = doc.blocks.map((b) => b.kind || b.k);
+  assert.deepEqual(kinds.slice(0, 5), ['title', 'authors', 'body', 'body', 'heading'],
+    `首页前区顺序不对：${kinds.join(' → ')}`);
+  assert.ok(textsOf(doc.blocks[1]).join('').includes('Fang Dong'), '作者必须排到标题后面');
+  assert.ok(/School of Business/.test(textsOf(doc.blocks[2]).join('')), '单位要跟在作者后面');
+  assert.ok(/Environmental penalties exert/.test(textsOf(doc.blocks[3]).join('')), '摘要要在引言前');
+  assert.ok(/1\. Introduction/.test(textsOf(doc.blocks[4]).join('')), '引言在摘要之后');
+});

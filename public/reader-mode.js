@@ -234,6 +234,8 @@
     fig.dataset.id = block.id;
     fig.dataset.page = block.page;
     fig.dataset.rect = block.rect.join(',');
+    if (block.size) fig.dataset.size = block.size;
+    if (block.full) fig.dataset.full = '1';
     const box = document.createElement('div');
     box.className = 'rm-crop-box';
     box.style.aspectRatio = Math.max(0.05, (block.rect[2] - block.rect[0]) / Math.max(1, block.rect[3] - block.rect[1])) + '';
@@ -499,6 +501,13 @@
     if (color && /^#[0-9a-f]{6}$/i.test(t.bg)) color.value = t.bg;
     const fit = $('rmAutoFit');
     if (fit) fit.checked = !!t.autoFit;
+    // 字号 / 栏宽变了，裁图的自然宽度也要跟着变（图是按正文比例排的）
+    if (state.column) {
+      for (const fig of state.column.querySelectorAll('.rm-crop')) {
+        const r = (fig.dataset.rect || '').split(',').map(Number);
+        if (r.length === 4 && r.every(Number.isFinite)) fitCropWidth(fig, r[2] - r[0]);
+      }
+    }
   }
 
   function saveTypo() {
@@ -551,6 +560,33 @@
   }
 
   /**
+   * 裁图按「和正文相同的比例」排版。
+   *
+   * 原来一律铺满整栏：一条 20pt 宽的小公式会被放大十几倍（糊且刺眼），半截公式
+   * 被拉满整栏后更显突兀。现在用「正文 pt → 当前阅读字号 px」的比例算出自然宽度，
+   * 只在不超出栏宽时才按这个宽度居中显示；大图 / 跨栏图仍然铺满。
+   */
+  function fitCropWidth(fig, rectW) {
+    const box = fig.querySelector('.rm-crop-box');
+    if (!box) return;
+    const figure = box.parentElement;
+    const colW = figure ? figure.clientWidth : 0;
+    if (!colW) return;
+    const bodySize = Number(state.doc?.bodySize) || 10;
+    const host = state.column || state.host;
+    const fontPx = parseFloat(host ? getComputedStyle(host).fontSize : '') || 18;
+    if (fig.dataset.full === '1') {
+      box.style.width = '100%';
+      return;
+    }
+    const ratio = fontPx / Math.max(1, bodySize);       // 1pt 原稿 ≈ ratio px
+    const natural = Math.round(rectW * ratio);
+    const width = Math.max(120, Math.min(colW, natural));
+    box.style.width = Math.round((width / colW) * 10000) / 100 + '%';
+    box.style.marginInline = 'auto';
+  }
+
+  /**
    * 把原始页面的一块区域画成位图贴进 <figure>。
    * 目标像素宽度跟着版心走，但**上限 1600px**：阅读模式里图是缩略呈现，
    * 按 4K 屏宽度画满会把内存吃光，而用户想放大时还有「点击看原图」。
@@ -564,6 +600,7 @@
     if (!pageNum || rect.length !== 4 || rect.some((n) => !Number.isFinite(n))) return;
     fig.dataset.painting = '1';
     try {
+      fitCropWidth(fig, rect[2] - rect[0]);
       const page = await doc.getPage(pageNum);
       const base = page.getViewport({ scale: 1 });
       const rotate = ((Number(page.rotate) || 0) % 360 + 360) % 360;
