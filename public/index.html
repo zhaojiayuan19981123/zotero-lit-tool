@@ -221,9 +221,9 @@
       </nav>
 
       <div class="side-foot">
-        <div class="side-progress-row"><span class="dot dot-done"></span>已阅读 <b id="cntDone">0</b></div>
-        <div class="side-progress-row"><span class="dot dot-reading"></span>阅读中 <b id="cntReading">0</b></div>
-        <div class="side-progress-row"><span class="dot dot-unread"></span>未阅读 <b id="cntUnread">0</b></div>
+        <div class="side-progress-row"><span class="dot dot-done"></span>今日阅读 <b id="cntTodayHeat">0秒</b></div>
+        <div class="side-progress-row"><span class="dot dot-reading"></span>累计停留 <b id="cntTotalHeat">0秒</b></div>
+        <div class="side-progress-row"><span class="dot dot-unread"></span>最热页 <b id="cntHottestPage">—</b></div>
         <div class="side-foot-actions">
           <button id="btnNavSettings" class="side-icon-btn" type="button" title="设置" aria-label="设置">
             <svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>
@@ -315,7 +315,7 @@
           </div>
 
           <div class="card home-card home-reading">
-            <div class="card-head"><b><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg>本周阅读进度</b><button class="btn-ghost as-link" data-goto-lib>去文献中心 →</button></div>
+            <div class="card-head"><b><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg>阅读热力</b><button class="btn-ghost as-link" data-goto-lib>去文献中心 →</button></div>
             <div id="readingList" class="reading-list"></div>
           </div>
         </div>
@@ -340,9 +340,8 @@
 
         <nav class="view-tabs">
           <div class="tab active" data-tab="all"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-file"/></svg>全部</div>
-          <div class="tab" data-tab="未阅读"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg>未阅读</div>
-          <div class="tab" data-tab="阅读中"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-book"/></svg>阅读中</div>
-          <div class="tab" data-tab="已阅读"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-check"/></svg>已阅读</div>
+          <div class="tab" data-tab="hot"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-clock"/></svg>有热力</div>
+          <div class="tab" data-tab="cold"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-file"/></svg>无记录</div>
           <div class="tab-spacer"></div>
           <span id="statBadge" class="stat-badge"></span>
         </nav>
@@ -352,7 +351,7 @@
           <div class="bulk-acts">
             <button class="tb-btn" id="btnBulkParse"><svg class="ico" aria-hidden="true"><use href="#i-play"/></svg>解析选中</button>
             <button class="tb-btn" id="btnBulkReparse" title="忽略解析状态，强制对选中文献重新跑一遍 AI 解析"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-refresh"/></svg>批量重新解析</button>
-            <button class="tb-btn" id="btnBulkProgress"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-loader"/></svg>标记进度</button>
+            <button class="tb-btn" id="btnHeatMode" title="切换阅读热力的展示方式：标题底色 / 独立成列 / 两者都要"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-loader"/></svg>热力显示</button>
             <button class="tb-btn" id="btnBulkCollection"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-folder"/></svg>移动到分类</button>
             <button class="tb-btn" id="btnBulkRank" title="按当前期刊名重新查询 easyScholar 等级"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trophy"/></svg>更新等级</button>
             <button class="tb-btn danger" id="btnBulkDelete"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg>批量删除</button>
@@ -1887,9 +1886,14 @@
         <select id="cmpBarEngine" class="cmp-bar-engine" title="点段落即译 / 重译统一用这个引擎，顶部设置一次即可">
           <option value="auto">引擎：跟随全局设置</option>
         </select>
+        <select id="cmpPairMode" class="cmp-bar-engine" title="对照笔记的配对粒度；逐句模式仍按段落发送一次翻译请求，不会变成上千次句级请求">
+          <option value="para">逐段配对</option>
+          <option value="sentence">逐句配对</option>
+        </select>
         <span class="cmp-engine-state" id="cmpEngineState"></span>
         <span class="cmp-hint" id="cmpSyncHint"></span>
         <span class="cmp-bar-spacer"></span>
+        <button id="cmpExportNote" class="cmp-bar-btn" title="按当前配对方式导出对照笔记（Markdown，原文引用 + 译文）"><svg class="ico ico" aria-hidden="true"><use href="#i-download"/></svg>对照笔记</button>
         <button id="cmpStartToggle" class="cmp-bar-btn" title="选择翻译引擎，把整篇按版面块逐段翻译"><svg class="ico ico" aria-hidden="true"><use href="#i-globe"/></svg>整篇翻译</button>
       </div>
 
@@ -1987,6 +1991,28 @@
                 <option value="900">宽</option>
                 <option value="1200">满宽</option>
               </select>
+            </label>
+            <label class="rm-field">对齐
+              <select id="rmAlign" class="tb-select rm-select" title="正文两端对齐，标题/作者/脚注左对齐（默认，与 Zotero 一致）；也可改成全部两端或全部左对齐">
+                <option value="body">正文两端</option>
+                <option value="all">全部两端</option>
+                <option value="left">全部左对齐</option>
+              </select>
+            </label>
+            <label class="rm-field">底色
+              <select id="rmBg" class="tb-select rm-select" title="论文背景底色（参考 zotero-eye-care 的护眼配色）">
+                <option value="theme">跟随主题</option>
+                <option value="paper">纯白</option>
+                <option value="green">淡豆沙绿</option>
+                <option value="cream">暖米黄</option>
+                <option value="mist">雾蓝灰</option>
+                <option value="dark">深灰夜读</option>
+                <option value="custom">自定义…</option>
+              </select>
+              <input id="rmBgColor" class="rm-color" type="color" value="#f8f2df" title="自定义论文底色" aria-label="自定义论文底色"/>
+            </label>
+            <label class="rm-check" title="对照精读的原文栏较窄时自动缩小字号，最低 13px">
+              <input id="rmAutoFit" type="checkbox" checked/> 窄栏自适应
             </label>
             <span class="rm-spacer"></span>
             <span id="rmAiState" class="rm-ai-state hidden"></span>
@@ -2210,6 +2236,8 @@
   <script src="epub-reader.js"></script>
   <script src="reader-blocks.js"></script>
   <script src="reader-mode.js"></script>
+  <script src="reading-heat.js"></script>
+  <script src="compare-utils.js"></script>
   <script src="paper-note-utils.js"></script>
   <script src="doi-utils.js"></script>
   <script src="rank-utils.js"></script>

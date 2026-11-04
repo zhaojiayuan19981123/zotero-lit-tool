@@ -470,3 +470,101 @@ test('没有链接注记时 run 保持三元组（不凭空多出字段）', () 
   const doc = docOf([page(1, [paraBlock(['plain body text without any anchors'])])]);
   for (const r of doc.blocks[0].lines[0].runs) assert.equal(r.length, 3);
 });
+
+// ---------------- 出版商封面 / 跨栏断句 ----------------
+
+test('期刊封面：刊眉与出版商徽记不进重排，论文标题保留', () => {
+  const p = page(1, [
+    block('body', [line('InternationalJournalofProductionEconomics', { y: 780, size: 16 })]),
+    block('body', [line('journal homepage: www.elsevier.com/locate/ije', { y: 760, size: 9 })]),
+    block('title', [line('Information fusion in consumer complaints', { y: 720, size: 18 })]),
+  ], { images: [{ x0: 40, y0: 120, x1: 560, y1: 700 }] });
+  const doc = docOf([p]);
+  const text = doc.blocks.filter((b) => b.t === 'text').flatMap(textsOf).join(' ');
+  assert.match(text, /Information fusion in consumer complaints/, '论文标题必须留下');
+  assert.ok(!text.includes('elsevier') && !text.includes('InternationalJournalof'), '刊眉要剔除');
+  assert.equal(doc.blocks.filter((b) => b.t === 'crop').length, 0, '出版商徽记不该裁成插图');
+});
+
+test('带图注的真插图不会因为面积大被当成封面装饰', () => {
+  const p = page(2, [
+    paraBlock(['a normal body paragraph with plenty of words in this page']),
+    block('caption', [line('Figure 3. The proposed framework', { y: 300, size: 9 })]),
+  ], { images: [{ x0: 40, y0: 330, x1: 560, y1: 700 }] });
+  const doc = docOf([p]);
+  assert.ok(doc.blocks.some((b) => b.t === 'crop'), '论文插图要保留');
+});
+
+test('跨页断句：连字符自动接合，并记录译文回分比例', () => {
+  const p1 = page(1, [block('body', [line('we observe a con-', { y: 700, size: 10, w: 180 })])]);
+  const p2 = page(2, [block('body', [line('stantly evolving patterns', { y: 700, size: 10, w: 220 })])]);
+  const doc = docOf([p1, p2]);
+  assert.equal(doc.blocks.length, 1, '两截要拼成同一个段落');
+  const b = doc.blocks[0];
+  assert.equal(b.parts.length, 2, '要记下两处来源');
+  assert.equal(b.parts[0].page, 1);
+  assert.equal(b.parts[1].page, 2);
+  assert.ok(Math.abs(b.parts.reduce((n, p) => n + p.ratio, 0) - 1) < 0.001);
+  assert.ok(textsOf(b).join('').includes('constantly'), '跨页断词要接合');
+});
+
+// ---------------- 出版商装饰剔除 ----------------
+
+test('Elsevier 首页：刊头刊名 / 刊眉 / 版权行 / 页眉卷期行都不进重排，只从论文标题开始', () => {
+  const p = page(1, [
+    block('body', [line('Tourism Management 110 (2025) 105182', { y: 780, size: 9, w: 220 })]),
+    block('body', [line('Contents lists available at ScienceDirect', { y: 762, size: 8, w: 260 })]),
+    block('title', [line('Tourism Management', { y: 744, size: 13, w: 170 })]),
+    block('body', [line('journal homepage: www.elsevier.com/locate/tourman', { y: 720, size: 9, w: 300 })]),
+    block('title', [line('AI-infused video marketing: a study', { y: 690, size: 16, w: 460 })]),
+    paraBlock(['Generative AI has become ubiquitous in tourism research.'], { top: 640 }),
+    block('body', [line('0261-5177/© 2025 Elsevier Ltd. All rights reserved.', { y: 60, size: 7, w: 300 })]),
+  ]);
+  const doc = docOf([p]);
+  const all = doc.blocks.flatMap(textsOf).join(' ');
+  assert.ok(!/elsevier|ScienceDirect|journal homepage|rights reserved|Tourism Management 110/.test(all), `装饰内容漏进来了：${all}`);
+  assert.ok(doc.blocks[0].lines[0].runs[0][2].startsWith('AI-infused'), '第一个块必须是论文标题');
+});
+
+test('INFORMS 封面页（下载信息 + 版权条款）整页跳过，不把 boilerplate 插进正文', () => {
+  const cover = page(1, [
+    block('title', [line('Organization Science', { y: 760, size: 16, w: 240 })]),
+    block('body', [line('This article was downloaded by: [10.0.0.1]', { y: 700, size: 8, w: 300 })]),
+    block('body', [line('Publication details, including instructions for authors', { y: 660, size: 8, w: 340 })]),
+    block('body', [line('Full terms and conditions of use: https://pubsonline.informs.org/terms', { y: 620, size: 8, w: 400 })]),
+    block('body', [line('To cite this article: Shrestha et al. (2020)', { y: 580, size: 8, w: 300 })]),
+  ]);
+  const body = page(2, [
+    block('title', [line('Algorithm Supported Induction for Building Theory', { y: 700, size: 16, w: 480 })]),
+    paraBlock(['Across many fields of social science, machine learning is used.'], { top: 640 }),
+  ]);
+  const doc = docOf([cover, body]);
+  const all = doc.blocks.flatMap(textsOf).join(' ');
+  assert.ok(!/downloaded by|Publication details|Full terms|To cite this article/.test(all), `封面页没跳过：${all}`);
+  assert.equal(doc.blocks[0].page, 2, '阅读流应从第 2 页开始');
+  assert.ok(doc.warnings.some((w) => /出版商信息页/.test(w)), '要给出跳过提示');
+});
+
+test('正文段落里的 URL 不被当成出版商装饰', () => {
+  const p = page(1, [paraBlock([
+    'The dataset is documented at https://example.org/paper and can be downloaded',
+    'from the project homepage after registration.',
+  ], { top: 600 })]);
+  const doc = docOf([p]);
+  assert.equal(doc.blocks.length, 1);
+  assert.ok(textsOf(doc.blocks[0]).join('').includes('example.org'), '带 URL 的正文必须保留');
+});
+
+test('大字号全大写刊名 masthead 剔除，小字号全大写栏目行（kicker）保留', () => {
+  const p = page(1, [
+    block('body', [line('ORGANIZATION SCIENCE', { y: 780, size: 12, w: 260 })]),
+    block('body', [line('ORIGINAL EMPIRICAL RESEARCH', { y: 755, size: 7, w: 200 })]),
+    block('title', [line('A Real Paper Title', { y: 700, size: 16, w: 300 })]),
+    paraBlock(['Body text that should survive the filter.'], { top: 650 }),
+  ]);
+  const doc = docOf([p]);
+  const all = doc.blocks.flatMap(textsOf).join(' ');
+  assert.ok(!all.includes('ORGANIZATION SCIENCE'), '刊名 masthead 应剔除');
+  assert.ok(all.includes('ORIGINAL EMPIRICAL RESEARCH'), 'kicker 不是刊名，要保留');
+  assert.ok(all.includes('A Real Paper Title'));
+});

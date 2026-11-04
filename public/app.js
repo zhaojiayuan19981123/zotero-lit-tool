@@ -5,7 +5,7 @@
   // ============ 字段定义 ============
   const FIXED_COLS = [
     { key: 'attachment', label: '文献PDF上传', type: 'attach', w: 130 },
-    { key: 'readingProgress', label: '阅读进度', type: 'progress', w: 96 },
+    { key: 'readingHeat', label: '阅读热力', type: 'heat', w: 168 },
     { key: 'rating', label: '评级', type: 'rating', w: 112 },
     { key: 'journalRank', label: '期刊等级', type: 'rank', w: 170 },
   ];
@@ -97,7 +97,7 @@
   const docTypeLabel = (t) => (LIB_META[t] ? LIB_META[t].label.replace('文库', '') : '实证类');
 
   const STATUS_LABEL = { done: '已完成', parsing: '解析中', pending: '待解析', error: '解析失败' };
-  const PROGRESS_LIST = ['未阅读', '阅读中', '已阅读'];
+  // 阅读进度三态已移除，改为「阅读热力」：按页记录停留时长，见 reading-heat.js
   const HIGHLIGHT_COLORS = { yellow: '#ffe08a', green: '#b5e6b5', blue: '#a8d4f5', pink: '#f7b8d0' };
   const UNCLASSIFIED = '__uncategorized__';
 
@@ -516,7 +516,11 @@
     return holder.innerHTML;
   }
 
-  async function loadItems() { items = await api('/api/literature'); render(); }
+  async function loadItems() {
+    items = await api('/api/literature');
+    window.ReadingHeat?.sync(items);   // 服务端热力与本地离线缓存取较大值
+    render();
+  }
   async function loadSettings() {
     settings = await api('/api/settings');
     fillSettingsForm();    // 恢复用户调节过的表格列宽
@@ -566,10 +570,18 @@
         </span>
       </div>`;
     }).join('');
-    // 底部阅读进度统计
-    $('cntDone').textContent = items.filter((i) => i.readingProgress === '已阅读').length;
-    $('cntReading').textContent = items.filter((i) => i.readingProgress === '阅读中').length;
-    $('cntUnread').textContent = items.filter((i) => (i.readingProgress || '未阅读') === '未阅读').length;
+    updateHeatStats();
+  }
+
+  /** 侧栏底部的热力统计：计时器每 15 秒刷新一次，不重绘整张表格。 */
+  function updateHeatStats() {
+    const H = window.ReadingHeat;
+    if (!H) return;
+    const s = H.summary();
+    const set = (id, val) => { const el = $(id); if (el) el.textContent = val; };
+    set('cntTodayHeat', H.format(s.todaySec));
+    set('cntTotalHeat', H.format(s.totalSec));
+    set('cntHottestPage', s.hottest.page ? `P${s.hottest.page}` : '—');
   }
 
   function selectLib(type, collectionId) {
@@ -739,7 +751,14 @@
     let list = items.filter((i) => (i.docType || 'empirical') === lib.type);
     if (lib.collectionId === UNCLASSIFIED) list = list.filter((i) => !i.collectionId);
     else if (lib.collectionId) list = list.filter((i) => i.collectionId === lib.collectionId);
-    if (tab !== 'all') list = list.filter((i) => (i.readingProgress || '未阅读') === tab);
+    // 热力筛选：hot / cold 只看「有没有停留记录」，不是主观的阅读状态标签
+    if (tab !== 'all') {
+      const H = window.ReadingHeat;
+      list = list.filter((i) => {
+        const sec = H ? H.total(i.id) : Number(i.readingHeat?.total) || 0;
+        return tab === 'hot' ? sec > 0 : sec <= 0;
+      });
+    }
     const st = el.statusFilter.value;
     if (st !== 'all') list = list.filter((i) => i.status === st);
     const q = searchQuery();
@@ -875,12 +894,14 @@
       }
       case 'title': {
         const v = it.title || '';
-        return `<div class="clamp cell-title" data-open="${it.id}" data-field="title" title="点击查看全文解析">${highlight(v) || '<span class="cell-empty">（未命名）</span>'}</div>`;
+        // 热力也可以直接染在标题底色上（mode=both / title）
+        const heat = window.ReadingHeat;
+        const tint = heat ? heat.titleStyle(it.id) : '';
+        return `<div class="clamp cell-title"${tint} data-open="${it.id}" data-field="title" title="点击查看全文解析">${highlight(v) || '<span class="cell-empty">（未命名）</span>'}</div>`;
       }
       case 'attach': return attachCell(it);
-      case 'progress': {
-        const p = it.readingProgress || '未阅读';
-        return `<button class="progress-badge progress-${p}" data-progress="${it.id}" title="点击切换阅读进度">◔ ${p}</button>`;
+      case 'heat': {
+        return window.ReadingHeat ? window.ReadingHeat.cellHtml(it) : '<div class="clamp cell-text">—</div>';
       }
       case 'rating': {
         const r = Math.round(it.rating || 0);
@@ -1141,7 +1162,7 @@
       if (rr) { e.stopPropagation(); refreshLitRank(rr.dataset.refreshrank); return; }
       const star = e.target.closest('[data-star]');
       if (star) { setRating(star.closest('[data-rating]').dataset.rating, parseInt(star.dataset.star, 10)); return; }
-      const pb = e.target.closest('[data-progress]'); if (pb) { cycleProgress(pb.dataset.progress); return; }
+      const hc = e.target.closest('[data-heatmode]'); if (hc) { cycleHeatMode(); return; }
       const del = e.target.closest('[data-delattach]'); if (del) { e.preventDefault(); removeAttachment(del.dataset.delattach); return; }
       // PDF 文件名 = 「去磁盘上找它」，不是「再读一遍」
       const pdfLink = e.target.closest('[data-pdflink], [data-reveal]');
@@ -1214,12 +1235,15 @@
     const updated = await api('/api/literature/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: next }) });
     const idx = items.findIndex((x) => x.id === id); if (idx >= 0) items[idx] = updated; render();
   }
-  async function cycleProgress(id) {
-    const it = items.find((x) => x.id === id);
-    const cur = it?.readingProgress || '未阅读';
-    const next = PROGRESS_LIST[(PROGRESS_LIST.indexOf(cur) + 1) % PROGRESS_LIST.length];
-    const updated = await api('/api/literature/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ readingProgress: next }) });
-    const idx = items.findIndex((x) => x.id === id); if (idx >= 0) items[idx] = updated; render();
+  /** 热力展示方式循环：两者都要 → 只染标题底色 → 只独立成列。 */
+  function cycleHeatMode() {
+    const H = window.ReadingHeat;
+    if (!H) return;
+    const next = { both: 'title', title: 'column', column: 'both' }[H.mode] || 'both';
+    H.setMode(next);
+    render();
+    const label = { both: '标题底色 + 独立成列', title: '仅标题底色', column: '仅独立成列' }[next];
+    toast('阅读热力：' + label, 'success');
   }
   async function removeAttachment(id) {
     if (!confirm('确认移除该附件？解析内容将一并清空。')) return;
@@ -1320,24 +1344,6 @@
     } catch (e) { toast('批量重新解析失败：' + e.message, 'error'); await loadItems(); }
   }
 
-  // 批量标记阅读进度
-  async function batchProgress() {
-    const ids = pickIdsOrWarn();
-    if (!ids) return;
-    const pick = prompt(`将选中的 ${ids.length} 篇标记为阅读进度：\n\n1 = 未阅读\n2 = 阅读中\n3 = 已阅读\n\n请输入 1 / 2 / 3`, '1');
-    if (pick === null) return;
-    const map = { 1: '未阅读', 2: '阅读中', 3: '已阅读' };
-    const progress = map[String(pick).trim()];
-    if (!progress) { toast('请输入 1、2 或 3', 'error'); return; }
-    try {
-      await api('/api/literature/batch-progress', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, readingProgress: progress }),
-      });
-      await loadItems();
-      toast(`已将 ${ids.length} 篇标记为「${progress}」`, 'success');
-    } catch (e) { toast('标记失败：' + e.message, 'error'); }
-  }
-
   // 批量更新期刊等级：复用单条刷新接口，串行并显示进度
   async function batchRank() {
     const ids = pickIdsOrWarn();
@@ -1417,7 +1423,7 @@
   /** 表格列 → 详情卡片里的字段锚点（没有对应区块的列返回 null） */
   function drawerFieldOf(col) {
     if (!col || !col.key) return null;
-    const own = ['attachment', 'readingProgress', 'rating', 'actions'];
+    const own = ['attachment', 'readingHeat', 'rating', 'actions'];
     if (own.includes(col.key)) return null;
     return col.key;
   }
@@ -1472,7 +1478,7 @@
         ${chip('导入时间', importText, 'importedAt')} ${chip('作者', it.authors, 'authors')} ${chip('期刊/会议', it.journal, 'journal')} ${chip('年份', it.year, 'year')} ${chip('DOI', it.doi, 'doi')} ${chip('关键词', it.keywords, 'keywords')}
         ${col ? `<span class="meta-chip"><b>分类：</b>${esc(col.name)}</span>` : ''}
         <span class="badge badge-source">${docTypeLabel(it.docType || 'empirical')}</span>
-        <button class="progress-badge progress-${it.readingProgress || '未阅读'}" data-dprogress>◔ ${it.readingProgress || '未阅读'}</button>
+        <span class="heat-chip" title="按页停留时长（仅窗口前台计时）">◔ 阅读热力 ${window.ReadingHeat ? window.ReadingHeat.format(window.ReadingHeat.total(it.id)) : '0秒'}</span>
         <span class="stars" data-drating>${[1, 2, 3, 4, 5].map((n) => `<button class="star ${n <= Math.round(it.rating || 0) ? 'on' : ''}" data-dstar="${n}">★</button>`).join('')}</span>
         ${it.status !== 'done' ? `<span class="badge badge-${it.status}" data-field-anchor="status" title="${esc(it.error || '')}">${STATUS_LABEL[it.status]}</span>` : ''}
       </div>
@@ -3053,7 +3059,7 @@
     // 批量操作栏
     $('btnBulkParse').addEventListener('click', batchParse);
     $('btnBulkReparse').addEventListener('click', batchReparse);
-    $('btnBulkProgress').addEventListener('click', batchProgress);
+    $('btnHeatMode').addEventListener('click', cycleHeatMode);
     $('btnBulkCollection').addEventListener('click', () => {
       const ids = pickIdsOrWarn();
       if (ids) openClassModal(ids);
@@ -3164,7 +3170,6 @@
 
     el.drawerBody.addEventListener('click', async (e) => {
       const ds = e.target.closest('[data-dstar]'); if (ds) { setRating(currentId, parseInt(ds.dataset.dstar, 10)); renderDrawer(); return; }
-      if (e.target.closest('[data-dprogress]')) cycleProgress(currentId).then(renderDrawer);
       if (e.target.closest('#btnSaveDrawerThoughts')) {
         const v = $('drawerThoughts').value.trim();
         const updated = await api('/api/literature/' + currentId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ thoughts: v }) });
@@ -6085,6 +6090,15 @@
     pr.layoutFor = null;
     if (window.PrBlocks) window.PrBlocks.clear();
     setLayoutBtn('idle');
+    // 阅读热力起表：只在文献库记录上记（成果附件没有可写回的文献记录）；
+    // 「仅窗口前台才计时」由 reading-heat.js 内部判定。
+    let heatTick = 0;
+    window.ReadingHeat?.start({
+      getDocId: () => (pr.open && pr.recordId ? pr.recordId : ''),
+      getPage: () => (pr.reading.on ? (window.PrReading?.currentPage?.() || 1) : (pr.pageNum || 1)),
+      onTick: () => { if (++heatTick % 15 === 0) updateHeatStats(); },
+      onModeChange: () => render(),
+    });
     // 按格式分流到两个渲染内核（外壳与右侧面板完全一致，只有正文这层不同）
     if (pr.fileKind === 'epub') {
       loadEpubDocument(pdfUrl, pr.recordId);
@@ -6630,7 +6644,8 @@
     view: 'split',          // pdf(仅原文) | split(原文+译文) | trans(仅译文)
     ratios: { outline: 0.15, src: 0.34, trans: 0.32, assist: 0.30 },
     activeId: null,
-    transCache: new Map(),  // 单段翻译结果：blockId -> 译文
+    transCache: new Map(),  // 单段翻译结果：blockId -> 译文（另有 localStorage 持久缓存）
+    splitGroups: new Map(), // blockId -> 被分栏/换页截断的同一句的块 id 数组
     syncing: false,         // 同步滚动加锁，避免两侧互相触发形成回环
     syncTimer: null,
     syncAnchorId: null,     // 上一次「同步滚动」认定的锚点块，重复的不再处理
@@ -6870,14 +6885,21 @@
     const pane = $('prReading');
     const host = cmpEl('cmpPdfHost');
     if (!pane || !host) return;
-    if (pane.parentElement !== host) host.appendChild(pane);
+    if (pane.parentElement !== host) {
+      host.appendChild(pane);
+      // 原文栏只剩 1/3 屏宽，字号要按新容器重算（窄栏自适应）
+      requestAnimationFrame(() => window.PrReading?.applyTypography?.());
+    }
   }
 
   function restoreCmpReadingPane() {
     const pane = $('prReading');
     const main = document.querySelector('.pr-main');
     if (!pane || !main) return;
-    if (pane.parentElement !== main) main.appendChild(pane);
+    if (pane.parentElement !== main) {
+      main.appendChild(pane);
+      requestAnimationFrame(() => window.PrReading?.applyTypography?.());
+    }
   }
 
   // ---------- 版面块层：对照精读里的点击语义 ----------
@@ -7212,6 +7234,28 @@
     return false;
   }
 
+  /** 当前对照精读用的引擎 / 目标语言（本地缓存 key 的一部分）。 */
+  function cmpCurrentEngine() {
+    const bar = cmpEl('cmpBarEngine')?.value || 'auto';
+    const own = cmpEl('cmpEngine')?.value || 'auto';
+    const fallback = bar !== 'auto' ? bar : (own !== 'auto' ? own : ($('prTranslateSource')?.value || 'auto'));
+    const { provider, profileId } = cmpResolveSource(fallback);
+    const target = cmpEl('cmpTarget')?.value || $('prLangTo')?.value || 'zh';
+    return { provider, profileId, target };
+  }
+
+  /** 再次打开这篇时，先把本地缓存的译文填回去，不再向引擎发请求。 */
+  function cmpFillLocalCache(blocks) {
+    const CU = window.CompareUtils;
+    if (!CU) return;
+    const { provider, profileId, target } = cmpCurrentEngine();
+    for (const b of Array.isArray(blocks) ? blocks : []) {
+      if (String(b.translation || '').trim()) continue;
+      const hit = CU.cacheGet(b.text, target, provider, profileId);
+      if (hit) b.translation = hit;
+    }
+  }
+
   function setCmpData(data, { translated = true } = {}) {
     cmp.structureOnly = !translated;
     cmp.data = data || null;
@@ -7227,6 +7271,16 @@
       cmp.orderIndex.set(b.id, i);
       if ((b.kind === 'title' || b.kind === 'heading') && String(b.text || '').trim()) cmp.heads.push(b.id);
     });
+    cmpFillLocalCache(blocks);
+    // 被分栏 / 换页截断的句子：整组拼成完整句后**一次**送翻译，译文按原比例分回两处。
+    // 只在这里算一次，翻译时直接按 id 取组，避免每点一段都全量扫描。
+    cmp.splitGroups.clear();
+    const CU = window.CompareUtils;
+    if (CU) {
+      for (const group of CU.splitGroups(blocks)) {
+        for (const gid of group) cmp.splitGroups.set(gid, group);
+      }
+    }
     // 版面块层跟着换：只有进了对照流的块才可点（见 cmpSyncPdfBlocks 的注释）
     cmpSyncPdfBlocks();
     renderCmp();
@@ -7286,7 +7340,10 @@
     }
 
     if (tr) {
-      parts.push(`<div class="cmp-block-text">${esc(tr)}</div>`);
+      // 逐句模式下把原文句 / 译文句并列显示；请求始终按段落发，不按句发
+      parts.push(window.CompareUtils
+        ? window.CompareUtils.translationHtml(b.text, tr)
+        : `<div class="cmp-block-text">${esc(tr)}</div>`);
     } else if (b.translatable) {
       parts.push('<div class="cmp-block-text cmp-block-missing">—（未翻译）点「译」只翻这一段</div>');
     } else {
@@ -7352,7 +7409,9 @@
     }
     box.innerHTML = heads.map((b) => {
       const lv = cmpHeadingLevel(b);
-      return `<button class="cmp-outline-item" data-level="${lv}" data-cmp-out="${esc(String(b.id))}" title="${esc(String(b.text || ''))}">`
+      // 标题底色 = 这一页的停留时长；「仅独立成列」模式下不着色
+      const tint = window.ReadingHeat?.outlineStyle(b.page) || '';
+      return `<button class="cmp-outline-item" data-level="${lv}" data-cmp-out="${esc(String(b.id))}"${tint} title="${esc(String(b.text || ''))}">`
         + `<span class="cmp-outline-text">${esc(String(b.text || '').trim())}</span>`
         + `<span class="cmp-outline-page">P${esc(String(b.page || ''))}</span></button>`;
     }).join('');
@@ -7453,9 +7512,14 @@
   function cmpRevealBlockInPdf(id) {
     const b = cmp.blockById.get(id);
     if (!b || !b.page) return;
-    // 原文栏此刻是重排文本流：PDF 页是隐藏的，滚它没有任何视觉效果。
-    // 重排视图按页定位即可 —— 块 id 分属两套编号体系，按页对齐已经够准。
-    if (pr.reading.on) { window.PrReading?.scrollToPage?.(b.page); return; }
+    // 原文栏此刻是重排文本流：PDF 页是隐藏的。按「页 + 页内纵向百分比」
+    // 在重排块里找最接近的一块，滚过去并闪一下，而不是只跳到那一页开头。
+    if (pr.reading.on) {
+      const flat = window.PrBlocks?.getBlock(id, b.page);
+      const p = flat ? window.PrBlocks.blockPercent(flat) : null;
+      window.PrReading?.focusBlock?.(b.page, p ? p.top : 0);
+      return;
+    }
     const scroller = cmpPdfScroller();
     if (!scroller || cmp.view === 'trans') return;
     const wrap = document.querySelector(`#prPages .pr-page-wrap[data-page="${b.page}"]`);
@@ -7615,6 +7679,32 @@
     return best;
   }
 
+  /**
+   * 点重排段落 → 译文栏定位。
+   * 重排块 id（r1…）与对照块 id（p3-b17）是两套编号，所以按「页 + 页内纵向
+   * 百分比」折算：拿点击块的 rect 算出它在原页的顶部百分比，再在同页的对照块里
+   * 找几何最接近的一个。之前这里没有任何点击链路，只有滚动时的弱同步。
+   */
+  function cmpSelectBlockByReading(info) {
+    if (!cmp.on || !Array.isArray(cmp.data?.blocks) || !cmp.data.blocks.length) return;
+    const page = Number(info?.page) || 0;
+    const ps = pr.pageSizes?.[page - 1];
+    const h = Number(ps?.h || ps?.height) || 0;
+    const topPct = h && Array.isArray(info?.rect)
+      ? Math.max(0, Math.min(100, (1 - Number(info.rect[3]) / h) * 100)) : 0;
+    let best = null;
+    let bestD = Infinity;
+    for (const b of cmp.data.blocks) {
+      if (b.page !== page) continue;
+      const flat = window.PrBlocks?.getBlock?.(b.id, b.page);
+      const p = flat ? window.PrBlocks.blockPercent(flat) : null;
+      const d = p ? Math.abs(p.top - topPct) : 50;
+      if (d < bestD) { bestD = d; best = b; }
+    }
+    if (!best) best = cmp.data.blocks.find((b) => b.page >= page) || cmp.data.blocks[0];
+    if (best) cmpSelectBlock(best.id, { scrollTrans: true, flash: true, translate: true });
+  }
+
   function cmpOnReadingScroll() {
     if (!cmp.on || cmp.syncing || cmp.view === 'pdf' || !pr.reading.on) return;
     const b = cmpTopVisibleBlockFromReading();
@@ -7659,41 +7749,69 @@
    * `source` 显式指定引擎、用 `force` 覆盖已有译文。
    */
   async function cmpTranslateBlock(id, { auto = false, force = false, source } = {}) {
-    const b = cmp.blockById.get(id);
-    if (!b || !b.translatable) return;
-    // 已经有译文且不是「重新翻译」时，不重复翻
-    if (!force && (String(b.translation || '').trim() || cmp.transCache.has(id))) return;
-    const text = String(b.text || '').trim();
+    const CU = window.CompareUtils;
+    const first = cmp.blockById.get(id);
+    if (!first || !first.translatable) return;
+    // 被分栏 / 换页截断的段落整组一起翻：拼成完整句、连字符接合，一次请求，
+    // 拿到译文再按原文长度比例分回各个块。逐句配对只是显示粒度，绝不按句发请求。
+    const group = cmp.splitGroups.get(id);
+    const ids = group && group.length >= 2 ? group : [id];
+    const members = ids.map((x) => cmp.blockById.get(x)).filter((b) => b && b.translatable);
+    if (!members.length) return;
+    if (!force && members.every((b) => String(b.translation || '').trim() || cmp.transCache.has(b.id))) return;
+
+    const { provider: p0, profileId: i0, target } = cmpCurrentEngine();
+    let provider = p0;
+    let profileId = i0;
+    if (source) { const r = cmpResolveSource(source); provider = r.provider; profileId = r.profileId; }
+    const joined = CU ? CU.joinParts(members.map((b) => ({ id: b.id, text: b.text }))) : null;
+    const text = joined ? joined.text : String(first.text || '').trim();
     if (!text) { if (!auto) toast('这一段没有可翻译的文字', 'error'); return; }
-    // 翻译源优先级：显式传入 → 顶部工具条（#cmpBarEngine）→ 启动面板（#cmpEngine）→ 设置页翻译源（#prTranslateSource）
-    const bar = cmpEl('cmpBarEngine')?.value || 'auto';
-    const own = cmpEl('cmpEngine')?.value || 'auto';
-    const fallback = bar !== 'auto' ? bar : (own !== 'auto' ? own : ($('prTranslateSource')?.value || 'auto'));
-    const src = source ?? fallback;
-    const { provider, profileId } = cmpResolveSource(src);
-    const target = cmpEl('cmpTarget')?.value || $('prLangTo')?.value || 'zh';
-    setCmpTransText(id, '<span class="cmp-pending">翻译中…</span>', { pending: true });
+
+    for (const b of members) setCmpTransText(b.id, '<span class="cmp-pending">翻译中…</span>', { pending: true });
+    // 本地缓存命中就直接回填，不再向引擎发请求（再次打开这篇也一样）
+    let tr = CU ? CU.cacheGet(text, target, provider, profileId) : '';
     try {
-      const data = await api('/api/translate', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, target, provider, profileId }),
+      if (!tr) {
+        const data = await api('/api/translate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, target, provider, profileId }),
+        });
+        tr = String(data.translation || '').trim();
+        CU?.cacheSet(text, target, provider, profileId, tr);
+      }
+      const pieces = members.length > 1 && CU && joined
+        ? CU.splitByWeights(tr, joined.weights) : [tr];
+      members.forEach((b, i) => {
+        const piece = pieces[i] || '';
+        b.translation = piece;
+        cmp.transCache.set(b.id, piece);
+        CU?.cacheSet(String(b.text || ''), target, provider, profileId, piece);
+        cmpApplyTranslation(b.id, b.text, piece);
       });
-      const tr = String(data.translation || '').trim();
-      cmp.transCache.set(id, tr);
-      // 写回块对象：切视图 / 重渲染时译文不会丢（也是「已译段数」的计数依据）
-      b.translation = tr;
-      // 译完之后「译」按钮就没有意义了，换成「复制 + 重译」
-      const blk = transBlockEl(id);
-      const trBtn = blk?.querySelector('.cmp-act[data-cmp-act="tr"]');
-      if (trBtn) trBtn.outerHTML = cmpRetransActs(id);
-      // 译出来了就不必再占着裁图（图表除外 —— 它们本来就没有译文）
-      if (blk?.querySelector('.cmp-block-img')) blk.querySelector('.cmp-block-img').remove();
-      setCmpTransText(id, esc(tr) || '—（空译文）');
       refreshCmpCounts();
-      if (!auto) toast('已翻译这一段', 'success');
+      if (!auto) toast(members.length > 1 ? `已按整段翻译并回分 ${members.length} 处` : '已翻译这一段', 'success');
     } catch (e) {
-      setCmpTransText(id, `<span class="cmp-trans-error">${ico('alert')}${esc(e.message)}</span>`, { pending: true });
+      for (const b of members) {
+        setCmpTransText(b.id, `<span class="cmp-trans-error">${ico('alert')}${esc(e.message)}</span>`, { pending: true });
+      }
     }
+  }
+
+  /** 译文写回 DOM：逐句模式下换成并列句，同时把「译」按钮换成复制 / 重译。 */
+  function cmpApplyTranslation(id, srcText, tr) {
+    const blk = transBlockEl(id);
+    if (!blk) return;
+    const html = window.CompareUtils
+      ? window.CompareUtils.translationHtml(srcText, tr)
+      : `<div class="cmp-block-text">${esc(tr)}</div>`;
+    const old = blk.querySelector('.cmp-block-text');
+    if (old) old.outerHTML = html;
+    else blk.insertAdjacentHTML('beforeend', html);
+    const trBtn = blk.querySelector('.cmp-act[data-cmp-act="tr"]');
+    if (trBtn) trBtn.outerHTML = cmpRetransActs(id);
+    const img = blk.querySelector('.cmp-block-img');
+    if (img) img.remove();
   }
 
   /** 有译文时的动作按钮：复制 + 重新翻译（用顶部工具条统一的引擎重译）。 */
@@ -7915,10 +8033,36 @@
     }
   }
 
+  /** 按当前配对方式导出对照笔记（原文引用 + 译文的 Markdown）。 */
+  function exportCmpNote() {
+    const CU = window.CompareUtils;
+    const blocks = Array.isArray(cmp.data?.blocks) ? cmp.data.blocks : [];
+    if (!CU || !blocks.length) { toast('还没有对照数据', 'error'); return; }
+    const title = (typeof prDocumentTitle === 'function' ? prDocumentTitle() : '') || '对照精读';
+    const md = CU.buildNote(blocks, CU.getPairMode(), title);
+    const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown;charset=utf-8' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `对照笔记-${String(title).slice(0, 40).replace(/[\\/:*?"<>|]/g, '_')}.md`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`对照笔记已导出（${CU.getPairMode() === 'sentence' ? '逐句' : '逐段'}）`, 'success');
+  }
+
   function bindCmpEvents() {
     initCmpResizers();
     initCmpSync();
     bindCmpView(cmp.view);
+
+    const pairSel = cmpEl('cmpPairMode');
+    if (pairSel) {
+      pairSel.value = window.CompareUtils?.getPairMode?.() || 'para';
+      pairSel.addEventListener('change', () => {
+        window.CompareUtils?.setPairMode(pairSel.value);
+        renderCmp();   // 只改显示粒度，不发任何翻译请求
+      });
+    }
+    cmpEl('cmpExportNote')?.addEventListener('click', exportCmpNote);
 
     cmpEl('prToggleCmp')?.addEventListener('click', () => { toggleCmpMode().catch(() => {}); });
 
@@ -8427,6 +8571,8 @@
         // 对照精读里原文栏就是这块重排面板：它一滚，译文栏要跟着走
         if (cmp.on) cmpOnReadingScroll();
       },
+      // 点重排视图里的一段 → 译文栏定位到对应块（Ctrl/Cmd 点击由阅读器自己弹出原文浮层）
+      onBlockClick: (info) => { if (cmp.on) cmpSelectBlockByReading(info); },
       // 点重排视图里的高亮 / 笔记图标 → 跳到侧栏「笔记与高亮」里那一条
       onAnnotationClick: (id) => {
         const anns = currentAnnotations();
@@ -8537,6 +8683,7 @@
 
   function closePdfReader() {
     pr.open = false;
+    window.ReadingHeat?.stop();   // 关阅读器立刻结算并落盘，别把最后一段停留丢掉
     // 阅读模式先把重排视图收干净（它持有 DOM 与裁图 canvas），再销毁 PDF
     exitReadingMode({ silent: true });
     pr.reading.doc = null;
@@ -11324,13 +11471,12 @@
       ? feed.slice(0, 12).map((f) => `<div class="feed-item"><span class="feed-ico">${f.ico}</span><span class="feed-text" title="${esc(f.text)}">${esc(f.text)}</span><span class="feed-time">${fmtTime(f.ts)}</span></div>`).join('')
       : '<div class="pr-loading">暂无动态，去上传文献或创建项目吧</div>';
 
-    // 本周阅读进度
+    // 阅读热力：按页停留时长，替代原来的三态进度条
+    const H = window.ReadingHeat;
     const recent = items.filter((i) => i.filename).slice(0, 8);
-    $('readingList').innerHTML = recent.length ? recent.map((i) => {
-      const p = i.readingProgress || '未阅读';
-      const w = p === '已阅读' ? 100 : p === '阅读中' ? 50 : 6;
-      const color = p === '已阅读' ? 'var(--green)' : p === '阅读中' ? 'var(--orange)' : 'var(--scrollbar-hover)';
-      return `<div class="reading-item"><div class="reading-title"><b title="${esc(i.title || '')}">${esc(clipTitle(i.title || i.originalName || '未命名', 26))}</b><span style="color:${color};flex-shrink:0">${p}</span></div><div class="reading-bar"><span style="width:${w}%;background:${color}"></span></div></div>`;
+    $('readingList').innerHTML = recent.length && H ? recent.map((i) => {
+      const sec = H.total(i.id);
+      return `<div class="reading-item"><div class="reading-title"><b title="${esc(i.title || '')}">${esc(clipTitle(i.title || i.originalName || '未命名', 26))}</b><span class="heat-time">${H.format(sec)}</span></div><div class="heat-bar">${H.barHtml(i.id)}</div></div>`;
     }).join('') : '<div class="pr-loading">还没有上传 PDF 文献</div>';
 
     // 重要节点倒计时（任务 / 返修截止 / 大论文章节节点 / 项目）

@@ -25,7 +25,43 @@
   };
 
   /** 排版默认值；用户可以改，改完写 localStorage */
-  const DEFAULT_TYPO = { font: 'auto', size: 18, lineHeight: 1.75, width: 720 };
+  const DEFAULT_TYPO = {
+    font: 'auto', size: 18, lineHeight: 1.75, width: 720,
+    align: 'body',   // body=仅正文两端对齐 / all=全部两端对齐 / left=全部左对齐
+    bg: 'theme',     // 论文底色：theme=跟随主题，其余为护眼预设或 #rrggbb
+    autoFit: true,   // 窄栏（对照精读）空间不足时自动缩小字号
+  };
+
+  /**
+   * 参考 zotero-eye-care 的四套护眼预设（该插件把配色接进 Zotero 原生主题引擎）。
+   * 色值直接取自它的 README：淡豆沙绿 / 暖米黄 / 雾蓝灰 / 深灰夜读，
+   * 四组正文对比度都超过 WCAG AA。这里同样只给论文版心换色，图表保持原色。
+   */
+  const BG_PRESETS = {
+    paper: { surface: '#ffffff', bg: '#f1f2f4', text: '#1f2328' },
+    green: { surface: '#DCEAD8', bg: '#D2E1CE', text: '#26352A' }, // 淡豆沙绿
+    cream: { surface: '#F5E9CE', bg: '#EFE1C2', text: '#40372A' }, // 暖米黄
+    mist: { surface: '#E3EBF1', bg: '#D9E3EB', text: '#293742' },  // 雾蓝灰
+    dark: { surface: '#252A2E', bg: '#1C2023', text: '#D7DDD9' },  // 深灰夜读
+  };
+
+  function bgOf(value) {
+    if (BG_PRESETS[value]) return BG_PRESETS[value];
+    if (/^#[0-9a-f]{6}$/i.test(String(value || ''))) {
+      const hex = String(value);
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      const light = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
+      const darken = (v) => Math.max(0, Math.round(v * 0.93)).toString(16).padStart(2, '0');
+      return {
+        surface: hex,
+        bg: `#${darken(r)}${darken(g)}${darken(b)}`,
+        text: light < 0.5 ? '#eceef0' : '#22262b',
+      };
+    }
+    return null; // theme：交给全局 CSS 变量
+  }
 
   const state = {
     doc: null,
@@ -408,6 +444,19 @@
     return blocks.length;
   }
 
+  /**
+   * 空间不足时自动缩小字号：对照精读里阅读面板只占 1/3 屏，18px 会把正文挤成
+   * 每七八个字一行。按滚动容器实际宽度折算，最低 13px；用户手动调的字号是上限。
+   */
+  function fittedSize() {
+    const t = state.typo;
+    if (!t.autoFit) return t.size;
+    const w = state.host?.clientWidth || 0;
+    if (!w || w >= 860) return t.size;
+    const ratio = Math.min(1, Math.max(0.62, w / 860));
+    return Math.max(13, Math.round(t.size * ratio));
+  }
+
   function applyTypography() {
     const host = $('prReading');
     if (!host) return;
@@ -415,18 +464,41 @@
     const auto = state.doc?.bodySerif;
     const family = t.font === 'auto' ? (auto === false ? FONT_STACKS.sans : FONT_STACKS.serif)
       : t.font === 'sans' ? FONT_STACKS.sans : FONT_STACKS.serif;
-    host.style.setProperty('--rm-size', t.size + 'px');
+    host.style.setProperty('--rm-size', fittedSize() + 'px');
     host.style.setProperty('--rm-lh', String(t.lineHeight));
     host.style.setProperty('--rm-font', family);
     host.style.setProperty('--rm-width', t.width + 'px');
+    host.dataset.rmAlign = t.align;
+    const preset = bgOf(t.bg);
+    if (preset) {
+      host.style.setProperty('--rm-surface', preset.surface);
+      host.style.setProperty('--rm-bg', preset.bg);
+      host.style.setProperty('--rm-text', preset.text);
+    } else {
+      host.style.removeProperty('--rm-surface');
+      host.style.removeProperty('--rm-bg');
+      host.style.removeProperty('--rm-text');
+    }
     const sizeLabel = $('rmSizeLabel');
-    if (sizeLabel) sizeLabel.textContent = String(t.size);
+    if (sizeLabel) {
+      const actual = fittedSize();
+      sizeLabel.textContent = actual === t.size ? String(t.size) : `${actual}*`;
+      sizeLabel.title = actual === t.size ? '' : `窄栏自动缩小（设定 ${t.size}px）`;
+    }
     const lhLabel = $('rmLhLabel');
     if (lhLabel) lhLabel.textContent = t.lineHeight.toFixed(2).replace(/0$/, '');
-    const fontSel = $('rmFont');
-    if (fontSel && fontSel.value !== t.font) fontSel.value = t.font;
-    const widthSel = $('rmWidth');
-    if (widthSel && Number(widthSel.value) !== t.width) widthSel.value = String(t.width);
+    const syncSel = (id, value) => {
+      const el = $(id);
+      if (el && el.value !== String(value)) el.value = String(value);
+    };
+    syncSel('rmFont', t.font);
+    syncSel('rmWidth', t.width);
+    syncSel('rmAlign', t.align);
+    syncSel('rmBg', BG_PRESETS[t.bg] ? t.bg : 'custom');
+    const color = $('rmBgColor');
+    if (color && /^#[0-9a-f]{6}$/i.test(t.bg)) color.value = t.bg;
+    const fit = $('rmAutoFit');
+    if (fit) fit.checked = !!t.autoFit;
   }
 
   function saveTypo() {
@@ -442,6 +514,10 @@
           size: Math.min(30, Math.max(12, Number(raw.size) || DEFAULT_TYPO.size)),
           lineHeight: Math.min(2.6, Math.max(1.2, Number(raw.lineHeight) || DEFAULT_TYPO.lineHeight)),
           width: Math.min(1200, Math.max(480, Number(raw.width) || DEFAULT_TYPO.width)),
+          align: ['body', 'all', 'left'].includes(raw.align) ? raw.align : DEFAULT_TYPO.align,
+          bg: (BG_PRESETS[raw.bg] || /^#[0-9a-f]{6}$/i.test(String(raw.bg || '')))
+            ? raw.bg : DEFAULT_TYPO.bg,
+          autoFit: raw.autoFit === undefined ? DEFAULT_TYPO.autoFit : !!raw.autoFit,
         };
       }
     } catch (_) { /* 用默认值 */ }
@@ -829,11 +905,14 @@
     loadTypo();
     applyTypography();
     bindControls();
+    window.addEventListener('resize', onResize);
     render();
   }
 
   function unmount() {
     cancelChunks();
+    window.removeEventListener('resize', onResize);
+    hideOriginal();
     state.pendingScrollPage = null;
     disconnectCrops();
     if (state.host) state.host.scrollTop = 0;
@@ -874,6 +953,49 @@
     };
     bindStep('rmSizeMinus', 'rmSizePlus', 'size', 1, 12, 30);
     bindStep('rmLhMinus', 'rmLhPlus', 'lineHeight', 0.1, 1.2, 2.6);
+
+    const align = $('rmAlign');
+    if (align && align.dataset.bound !== '1') {
+      align.dataset.bound = '1';
+      align.addEventListener('change', () => {
+        state.typo.align = ['body', 'all', 'left'].includes(align.value) ? align.value : 'body';
+        applyTypography(); saveTypo();
+      });
+    }
+    const bg = $('rmBg');
+    if (bg && bg.dataset.bound !== '1') {
+      bg.dataset.bound = '1';
+      bg.addEventListener('change', () => {
+        const color = $('rmBgColor');
+        state.typo.bg = bg.value === 'custom' ? (color?.value || '#f8f2df') : bg.value;
+        applyTypography(); saveTypo();
+      });
+    }
+    const color = $('rmBgColor');
+    if (color && color.dataset.bound !== '1') {
+      color.dataset.bound = '1';
+      color.addEventListener('input', () => {
+        state.typo.bg = color.value;
+        const bgSel = $('rmBg');
+        if (bgSel) bgSel.value = 'custom';
+        applyTypography(); saveTypo();
+      });
+    }
+    const fit = $('rmAutoFit');
+    if (fit && fit.dataset.bound !== '1') {
+      fit.dataset.bound = '1';
+      fit.addEventListener('change', () => {
+        state.typo.autoFit = !!fit.checked;
+        applyTypography(); saveTypo();
+      });
+    }
+  }
+
+  // 面板搬进对照精读 / 窗口缩放后，可用宽度变了，字号要跟着重算
+  let resizeRaf = 0;
+  function onResize() {
+    if (resizeRaf) return;
+    resizeRaf = requestAnimationFrame(() => { resizeRaf = 0; applyTypography(); });
   }
 
   /** 标注变动后重画高亮（保留滚动位置，不整页重排） */
@@ -887,13 +1009,99 @@
     }
   }
 
-  // 点击高亮/笔记图标 → 交给外层定位到批注条目
+  // ==================== 单个文本块的原文浮层（Ctrl/Cmd + 点击）====================
+  let originalTimer = 0;
+  function hideOriginal() {
+    const pop = $('rmOriginalPop');
+    if (pop) pop.classList.remove('show');
+  }
+  function showOriginal(block, x, y) {
+    let pop = $('rmOriginalPop');
+    if (!pop) {
+      pop = document.createElement('div');
+      pop.id = 'rmOriginalPop';
+      pop.className = 'rm-original-pop';
+      document.body.appendChild(pop);
+    }
+    // 原始 run 文本（未经装配，不补空格、不去连字符），按 PDF 行还原
+    const raw = (block.lines || [])
+      .map((l) => (l.runs || []).map((r) => String(r[2] || '')).join(''))
+      .join('\n');
+    pop.textContent = '';
+    const head = document.createElement('div');
+    head.className = 'rm-original-head';
+    head.textContent = `原文块 ${block.id || ''} · 第 ${block.page || '?'} 页 · ${block.kind || 'text'}`;
+    const body = document.createElement('pre');
+    body.className = 'rm-original-body';
+    body.textContent = raw || String(block._text || '');
+    pop.append(head, body);
+    const w = 380;
+    pop.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 12, x + 12))}px`;
+    pop.style.top = `${Math.max(8, Math.min(window.innerHeight - 240, y + 12))}px`;
+    pop.classList.add('show');
+    clearTimeout(originalTimer);
+    originalTimer = setTimeout(hideOriginal, 12000);
+  }
+
+  /**
+   * 译文块 → 重排原文定位。对照精读的版面块带「页 + 页内顶部百分比」，
+   * 换算成 PDF 纵坐标后，在这一页的重排文本块里挑纵向最接近的滚过去并闪一下。
+   */
+  function focusBlock(page, topPct) {
+    const p = Number(page) || 0;
+    const ps = state.hooks.pageSize?.(p);
+    const h = Number(ps?.h || ps?.height) || 0;
+    const y = h && Number.isFinite(Number(topPct)) ? h * (1 - Number(topPct) / 100) : null;
+    let best = null;
+    let bestD = Infinity;
+    for (const b of state.blocks) {
+      if (b.t !== 'text' || b.page !== p) continue;
+      const cy = b.rect ? (b.rect[1] + b.rect[3]) / 2 : 0;
+      const d = y == null ? 0 : Math.abs(cy - y);
+      if (d < bestD) { bestD = d; best = b; }
+    }
+    if (!best) return false;
+    const el = state.byId.get(best.id);
+    if (!el) return false;
+    scrollToEl(el);
+    el.classList.remove('rm-focus');
+    void el.offsetWidth;
+    el.classList.add('rm-focus');
+    setTimeout(() => el.classList.remove('rm-focus'), 1600);
+    return true;
+  }
+
+  // 点击高亮/笔记图标 → 批注条目；Ctrl/Cmd 点击 → 原文浮层；
+  // 普通点击段落 → 通知对照精读把译文定位到对应块。
   document.addEventListener('click', (e) => {
     const hit = e.target?.closest?.('.rm-hl, .rm-note');
-    if (!hit) return;
-    const ann = hit.dataset.ann;
-    if (!ann) return;
-    state.hooks.onAnnotationClick?.(ann, e);
+    if (hit) {
+      const ann = hit.dataset.ann;
+      if (ann) state.hooks.onAnnotationClick?.(ann, e);
+      return;
+    }
+    const el = e.target?.closest?.('.rm-block');
+    if (!el || e.target?.closest?.('a, .rm-crop')) return;
+    const block = state.blockByEl.get(el) || state.byId.get(el.dataset.id);
+    if (!block) {
+      const pop = $('rmOriginalPop');
+      if (pop && !e.target?.closest?.('#rmOriginalPop')) hideOriginal();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      showOriginal(block, e.clientX, e.clientY);
+      return;
+    }
+    hideOriginal();
+    state.hooks.onBlockClick?.({
+      blockId: block.id,
+      page: block.page,
+      text: block._text || '',
+      kind: block.kind,
+      rect: block.rect,
+      parts: block.parts || null,
+    });
   });
 
   window.PrReading = {
@@ -910,6 +1118,7 @@
     currentPage,
     scrollToPage,
     scrollToBlock,
+    focusBlock,
     get doc() { return state.doc; },
     get typography() { return state.typo; },
     debug: () => ({

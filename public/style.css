@@ -992,14 +992,22 @@ mark.kw { background: var(--primary-soft); color: var(--primary); border-radius:
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* 阅读进度 */
-.progress-badge {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 3px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; border: none; font-family: inherit;
+/* 阅读热力：按页停留时长（不再有「未阅读 / 阅读中 / 已阅读」三态） */
+.heat-cell { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 2px 4px; }
+.heat-bar { display: inline-flex; flex: 1; align-items: center; gap: 1px; min-width: 0; height: 10px; }
+.heat-tick { flex: 1 1 3px; min-width: 2px; height: 100%; border-radius: 1px; background: #e8ecf2; }
+.heat-tick.heat-lv1 { background: #d9e8f5; }
+.heat-tick.heat-lv2 { background: #a9d2ee; }
+.heat-tick.heat-lv3 { background: #71b4e0; }
+.heat-tick.heat-lv4 { background: #3d8fc9; }
+.heat-tick.heat-lv5 { background: #1f66a0; }
+.heat-total, .heat-time { flex-shrink: 0; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.heat-hidden { font-size: 11px; color: var(--text-3); }
+.heat-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px;
+  border-radius: 999px; font-size: 12px; background: var(--primary-soft); color: var(--primary);
 }
-.progress-未阅读 { background: var(--red-soft); color: var(--red); }
-.progress-阅读中 { background: var(--orange-soft); color: var(--orange); }
-.progress-已阅读 { background: var(--green-soft); color: var(--green); }
+.reading-item .heat-bar { display: flex; width: 100%; margin-top: 5px; }
 
 /* 评级 */
 .stars { display: inline-flex; gap: 2px; }
@@ -1736,11 +1744,31 @@ mark.anno-c-purple { color: var(--primary); background: none; }
    浏览器自己重排 —— 这正是重排模式里没有「缩放」概念的原因。 */
 .pr-reading {
   flex: 1; min-width: 0; position: relative;
-  display: flex; flex-direction: column; background: var(--bg);
+  display: flex; flex-direction: column; background: var(--rm-bg, var(--bg));
+  color: var(--rm-text, var(--text));
   --rm-size: 18px; --rm-lh: 1.75; --rm-width: 720px;
   --rm-font: Georgia, "Times New Roman", "Songti SC", "Source Han Serif SC", SimSun, serif;
 }
 .pr-reading.hidden { display: none; }
+/* 新增控件：底色取色器 / 自适应字号开关 */
+.rm-color { width: 24px; height: 24px; padding: 0; border: 1px solid var(--border-soft); border-radius: 6px; background: transparent; cursor: pointer; }
+.rm-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-3); white-space: nowrap; cursor: pointer; }
+.rm-check input { accent-color: var(--primary); }
+/* Ctrl/Cmd 点击段落后查看该文本块的原始 PDF 文本 */
+.rm-original-pop {
+  position: fixed; z-index: 9999; width: 380px; max-height: 300px; display: none;
+  flex-direction: column; padding: 10px 12px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, .22);
+}
+.rm-original-pop.show { display: flex; }
+.rm-original-head { font-size: 11.5px; font-weight: 600; color: var(--text-3); margin-bottom: 6px; }
+.rm-original-body {
+  margin: 0; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font-size: 12.5px; line-height: 1.6; color: var(--text); font-family: ui-monospace, Consolas, monospace;
+}
+/* 译文块点回原文时的定位闪烁 */
+.rm-block.rm-focus { outline: 2px solid var(--primary); outline-offset: 3px; border-radius: 3px; background: var(--primary-soft); transition: background .3s; }
 .rm-bar {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 7px 14px; background: var(--surface); border-bottom: 1px solid var(--border-soft);
@@ -1772,13 +1800,27 @@ mark.anno-c-purple { color: var(--primary); background: none; }
 .rm-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding: 30px 16px 88px; }
 .rm-column {
   max-width: var(--rm-width); margin: 0 auto; padding: 42px 48px;
-  background: var(--surface); border-radius: 10px; box-shadow: 0 2px 18px rgba(30, 40, 60, .10);
+  background: var(--rm-surface, var(--surface)); border-radius: 10px;
+  box-shadow: 0 2px 18px rgba(30, 40, 60, .10);
   font-family: var(--rm-font); font-size: var(--rm-size); line-height: var(--rm-lh);
-  color: var(--text); text-align: justify; hyphens: auto; overflow-wrap: break-word;
+  color: var(--rm-text, var(--text)); text-align: justify; hyphens: auto;
+  overflow-wrap: break-word;
+  /* 中文避头尾：strict 会禁止标点出现在行首/行尾，hanging-punctuation 让句末标点悬挂 */
+  line-break: strict; word-break: normal; hanging-punctuation: allow-end;
+  text-spacing-trim: space-first;
 }
 .rm-column > * + * { margin-top: .55em; }
 .rm-block { margin: 0; }
 .rm-block.rm-center { text-align: center; }
+/* 对齐策略（默认 body）：只有正文段落两端对齐，标题/作者/关键词/脚注/图注各按纸面习惯。
+   之前 .rm-column 一把 justify 扣到底，短标题和关键词都被拉出夸张词间距。 */
+.pr-reading[data-rm-align="body"] .rm-column > :not(p[data-kind="body"]) { text-align: left; hyphens: manual; }
+.pr-reading[data-rm-align="body"] .rm-column > p[data-kind="caption"],
+.pr-reading[data-rm-align="body"] .rm-column > .rm-center { text-align: center; }
+.pr-reading[data-rm-align="all"] .rm-column > * { text-align: justify; hyphens: auto; }
+.pr-reading[data-rm-align="left"] .rm-column > * { text-align: left; hyphens: manual; }
+.pr-reading[data-rm-align="left"] .rm-column > .rm-center,
+.pr-reading[data-rm-align="all"] .rm-column > .rm-center { text-align: center; }
 /* 标题不要两端对齐：短标题被拉满一行时会撑出奇怪的词间距（纸面上标题本来就是左对齐 / 居中） */
 .rm-column > h1.rm-block, .rm-column > h2.rm-block, .rm-column > h3.rm-block,
 .rm-column > h4.rm-block, .rm-column > h5.rm-block { text-align: left; hyphens: manual; }
@@ -4041,6 +4083,12 @@ body.pn-resizing * { cursor: col-resize !important; }
 .cmp-act:disabled { opacity: .5; cursor: not-allowed; }
 
 .cmp-block-text { font-size: 13.5px; line-height: 1.85; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+/* 逐句配对：原文句在上（淡）、译文句在下，一一并列。请求仍按整段发。 */
+.cmp-block-text.cmp-pairs { padding: 2px 0; }
+.cmp-pair { padding: 5px 0 6px; border-bottom: 1px dashed var(--border-soft); }
+.cmp-pair:last-child { border-bottom: 0; }
+.cmp-pair-src { font-size: 11.5px; line-height: 1.55; color: var(--ink-3); margin-bottom: 2px; }
+.cmp-pair-tr { font-size: 13.5px; line-height: 1.8; color: var(--ink); }
 .cmp-block[data-kind="title"] .cmp-block-text { font-size: 17px; font-weight: 700; line-height: 1.5; letter-spacing: .2px; }
 .cmp-block[data-kind="heading"] .cmp-block-text { font-size: 14.5px; font-weight: 700; line-height: 1.6; }
 .cmp-block[data-kind="caption"] .cmp-block-text { font-size: 12px; font-style: italic; color: var(--ink-2); }

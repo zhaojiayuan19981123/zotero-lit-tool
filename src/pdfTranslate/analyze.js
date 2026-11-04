@@ -123,6 +123,11 @@ export async function analyzePdf(bytes, options = {}) {
     pageInfo.links = await readLinks(page, doc, destCache);
 
     const items = collectItems(textContent, regions.fonts);
+    // 旋转排版的文字（arXiv 页边的竖排编号、侧栏刊名、竖排水印）不参与横排：
+    // 它既不能按基线聚行，也不能进分栏投票；若还计入 rawItems，会让
+    // 「整页几乎全是图形」的兜底把这页错判成整页裁图。单独记个数便于排查。
+    const flatItems = items.filter((it) => Math.abs(it.angle) < 0.02);
+    pageInfo.rotatedItems = items.length - flatItems.length;
     // 先定栏，再分行——顺序很重要：左右两栏的行常常共用同一条基线，
     // 如果先按基线聚行，一行的左半（栏 1）与右半（栏 2）会被拼成一句话。
     // 第一遍用「紧间隙」聚行，把跨栏的两段文字拆开，专门用来找栏间距；
@@ -130,9 +135,9 @@ export async function analyzePdf(bytes, options = {}) {
     // 找栏距要用更紧的间隙：有的期刊栏间距只有 1.7em，按 2em 聚行会把左右两栏
     // 粘成一行，于是「每行都横跨 gutter」，栏永远判不出来（正文两栏混排成一句）。
     // 1.2em 是折中：比任何栏间距都窄，又比正文字间距宽，行内不会无故拆开。
-    const probeLines = groupIntoLines(items, { maxGapEm: 1.2 });
+    const probeLines = groupIntoLines(flatItems, { maxGapEm: 1.2 });
     const split = detectColumnSplit(probeLines, pageInfo);
-    const buckets = bucketItems(items, split, pageInfo, spanItemsOf(probeLines, split, pageInfo));
+    const buckets = bucketItems(flatItems, split, pageInfo, spanItemsOf(probeLines, split, pageInfo));
     const columnBlocks = [];
     for (const [key, bucketLines] of buckets) {
       if (!bucketLines.length) continue;
@@ -145,7 +150,7 @@ export async function analyzePdf(bytes, options = {}) {
     columnBlocks.sort((a, b) => (b.y1 - a.y1) || (a.x0 - b.x0));
     columnBlocks.forEach((b, i) => { b.index = i; b.id = `p${pageInfo.index}-b${i}`; });
     pageInfo.blocks = columnBlocks;
-    pageInfo.rawItems = items.length;
+    pageInfo.rawItems = flatItems.length;
 
     pages.push(pageInfo);
     onProgress?.({ stage: 'analyze', page: i, total: targets.length, percent: Math.round(((idx + 1) / targets.length) * 100) });
@@ -460,39 +465,49 @@ function assembleLine(items, size) {
  * 为什么不用「投影空白带」这种更直观的做法：跨栏的大图、跨栏图注、图内并排标签
  * 都会横穿栏间距，用整行或片段做投影都会把 gutter 填满，双栏页反而识别不出来。
  */
+const SPLIT_MIN_SCORE = 10;
+
 function detectColumnSplit(lines, page) {
   if (page.width < 200) return null;
+  const W = page.width;
+  // 只用 x 坐标，不碰基线：真实期刊两栏的基线常常错开，按基线配对会把真双栏杀掉。
+  // 横跨整页的标题 / 图注（> 62% 页宽）整行排除：它们本来就该独占一带，
+  // 让它们参与投票会把空白通道填满，也会被拦腰切成左右两半。
   const body = lines.filter((l) => !l.spread
     && l.text.replace(/\s/g, '').length >= 12
-    && (l.x1 - l.x0) > page.width * 0.12);
+    && (l.x1 - l.x0) > W * 0.12
+    && (l.x1 - l.x0) < W * 0.62);
   if (body.length < 10) return null;
 
+  const starts = columnStartClusters(body, W);
+  const cands = new Set();
+  const add = (x) => {
+    if (x > page.x0 + W * 0.25 && x < page.x0 + W * 0.75) cands.add(Math.round(x * 2) / 2);
+  };
+
+  // 信号① 行的投票：左栏右沿 / 右栏左沿各自钉在同一条竖线上
   const rights = clusterEdges(body.map((l) => l.x1));
   const lefts = clusterEdges(body.map((l) => l.x0));
-
-  let best = null;
-  // 边界聚不出簇（行尾参差不齐的栏、整栏小字的首页）不等于不是双栏，
-  // 交给兜底的空槽判定；所以这里只跳过聚类，不直接返回 null。
-  if (rights.length && lefts.length) {
-    for (const r of rights) {
-      for (const l of lefts) {
-        const gap = l.value - r.value;
-        if (gap < 5 || gap > 50) continue;
-        const split = (r.value + l.value) / 2;
-        if (split < page.x0 + page.width * 0.3 || split > page.x0 + page.width * 0.7) continue;
-        const support = Math.min(r.count, l.count);
-        if (support < 4) continue;
-        const score = support * 10 - gap;
-        if (!best || score > best.score) best = { score, split };
-      }
+  for (const r of rights) {
+    for (const l of lefts) {
+      const gap = l.value - r.value;
+      if (gap >= 5 && gap <= 50) add((r.value + l.value) / 2);
     }
   }
-  if (!best) {
-    // 边界聚不出簇（行尾参差不齐的栏、整栏小字的首页）≠ 不是双栏，交给不依赖整齐度的兜底
-    return detectColumnSplitByGutter(body, page);
-  }
+  // 信号② 空白通道：没被文字横穿的竖线
+  for (const g of gutterCandidates(body, page)) add(g.split);
+  // 信号③ 栏的起始位置：右栏所有行从同一个 x 起排，通道就在它左边一点
+  for (const c of starts) add(c.value - Math.max(3, W * 0.012));
 
-  // 复核：拆分后左右两侧都要有足够多的行，并且纵向铺得够开
+  let best = null;
+  for (const split of cands) {
+    const ev = evaluateColumnSplit(split, body, page, starts);
+    if (!ev || ev.score < SPLIT_MIN_SCORE) continue;
+    if (!best || ev.score > best.score) best = { split, score: ev.score, signals: ev.signals };
+  }
+  if (!best) return null;
+
+  // 复核：两侧都要有足够多的行并纵向铺开（阈值比旧版宽，首页半栏小字也适用）
   const left = body.filter((l) => (l.x0 + l.x1) / 2 < best.split);
   const right = body.filter((l) => (l.x0 + l.x1) / 2 >= best.split);
   const minLines = Math.max(4, body.length * 0.15);
@@ -501,8 +516,54 @@ function detectColumnSplit(lines, page) {
     const ys = list.map((l) => l.baseline);
     return (Math.max(...ys) - Math.min(...ys)) / page.height;
   };
-  if (coverage(left) < 0.3 || coverage(right) < 0.3) return null;
-  return best.split;
+  if (coverage(left) < 0.22 || coverage(right) < 0.22) return null;
+  return refineGutter(best.split, body, page);
+}
+
+/** 信号③：把每行的左端点聚簇，稳定的簇就是「某一栏的起排位置」。 */
+function columnStartClusters(body, W) {
+  const tol = Math.max(4, W * 0.012);
+  const sorted = body.map((l) => l.x0).sort((a, b) => a - b);
+  const out = [];
+  for (const v of sorted) {
+    const last = out[out.length - 1];
+    if (last && v - last.max <= tol) {
+      last.max = v; last.sum += v; last.count++; last.value = last.sum / last.count;
+    } else {
+      out.push({ min: v, max: v, sum: v, count: 1, value: v });
+    }
+  }
+  return out.filter((c) => c.count >= 3);
+}
+
+/**
+ * 三类信号合并打分。gutter 给基础分，行端钉在 split 两侧给「投票」分，
+ * 右栏起始簇与左栏起始簇给「起始位置」分。任一信号单独很强都能把双栏判出来，
+ * 三者同时命中则最稳；单栏页因为几乎每行都横穿中间竖线，基础分会被扣成负数。
+ */
+function evaluateColumnSplit(split, body, page, starts) {
+  const W = page.width;
+  let left = 0;
+  let right = 0;
+  let span = 0;
+  let nearRightEdge = 0;
+  let nearLeftStart = 0;
+  // 容差要按页宽给：refineGutter 会把 split 挪到两侧端点的正中，窄栏本身又有
+  // 几个 pt 的行尾参差，固定 9pt 会把真双栏的「行端钉在栏缝两侧」证据全丢掉。
+  const edgeTol = Math.max(12, W * 0.03);
+  for (const l of body) {
+    if (l.x1 <= split) { left++; if (split - l.x1 <= edgeTol) nearRightEdge++; }
+    else if (l.x0 >= split) { right++; if (l.x0 - split <= edgeTol) nearLeftStart++; }
+    else span++;
+  }
+  if (left < 6 || right < 6 || span / body.length > 0.5) return null;
+  const gutter = left + right - span * 3;
+  const vote = Math.min(nearRightEdge, nearLeftStart);
+  const rightStart = starts.find((c) => c.value >= split - 4 && c.value <= split + W * 0.06);
+  const leftStart = starts.find((c) => c.value <= page.x0 + W * 0.2);
+  const start = (rightStart ? Math.min(rightStart.count, 24) : 0) * 0.7
+    + (leftStart ? Math.min(leftStart.count, 24) : 0) * 0.3;
+  return { score: gutter + vote * 3 + start, signals: { gutter, vote, start: Math.round(start) } };
 }
 
 /**
@@ -525,11 +586,11 @@ function detectColumnSplit(lines, page) {
  * 而它想防的假 gutter 一次也没复现，所以已移除。若将来真遇到假 gutter 样本，
  * 正确判据是「左右两半的行端点是否都钉死在同一 x」（切缝固定），而不是「同基线两侧是否有字」。
  */
-function detectColumnSplitByGutter(body, page) {
-  if (body.length < 12) return null;
+function gutterCandidates(body, page) {
+  if (body.length < 12) return [];
   const lo = page.x0 + page.width * 0.28;
   const hi = page.x0 + page.width * 0.72;
-  let best = null;
+  const out = [];
   const step = Math.max(1, page.width / 400);
   for (let x = lo; x <= hi; x += step) {
     let left = 0;
@@ -540,24 +601,38 @@ function detectColumnSplitByGutter(body, page) {
       else if (l.x0 >= x) right++;
       else span++;
     }
-    if (left < 6 || right < 6) continue;
-    const spanRatio = span / body.length;
-    if (spanRatio > 0.5) continue;
-    // 两侧行数越多越可信；横跨的行按 3 倍扣分（它们是跨栏标题/图注，本就不该左右分）
-    const score = left + right - span * 3;
-    if (!best || score > best.score) best = { split: x, score, left, right };
+    if (left < 6 || right < 6 || span / body.length > 0.5) continue;
+    // 两侧行数越多越可信；横跨的行按 3 倍扣分（跨栏标题/图注本就不该左右分）
+    out.push({ split: x, score: left + right - span * 3 });
   }
-  if (!best) return null;
-  // 把 split 挪到两侧行端点之间的正中，避免切在某一侧行内一两个 pt 的地方
+  out.sort((a, b) => b.score - a.score);
+  // 只留彼此隔开的局部最优，别把同一条通道的几百个 x 都塞进候选集
+  const picked = [];
+  for (const c of out) {
+    if (picked.length >= 4) break;
+    if (picked.some((p) => Math.abs(p.split - c.split) < page.width * 0.03)) continue;
+    picked.push(c);
+  }
+  return picked;
+}
+
+/** 把 split 挪到两侧行端点之间的正中，避免切在某一侧行内一两个 pt 的地方。 */
+function refineGutter(split, body, page) {
   let leftEdge = 0;
   let rightEdge = page.x0 + page.width;
   for (const l of body) {
-    if (l.x1 <= best.split) leftEdge = Math.max(leftEdge, l.x1);
-    else if (l.x0 >= best.split) rightEdge = Math.min(rightEdge, l.x0);
+    if (l.x1 <= split) leftEdge = Math.max(leftEdge, l.x1);
+    else if (l.x0 >= split) rightEdge = Math.min(rightEdge, l.x0);
   }
-  const mid = rightEdge > leftEdge ? (leftEdge + rightEdge) / 2 : best.split;
-  if (mid < page.x0 + page.width * 0.25 || mid > page.x0 + page.width * 0.75) return best.split;
+  const mid = rightEdge > leftEdge ? (leftEdge + rightEdge) / 2 : split;
+  if (mid < page.x0 + page.width * 0.25 || mid > page.x0 + page.width * 0.75) return split;
   return mid;
+}
+
+/** 只靠空白通道的旧入口，保留下来给单测/诊断脚本用；主链路已改为三类信号共同评分。 */
+function detectColumnSplitByGutter(body, page) {
+  const picked = gutterCandidates(body, page);
+  return picked.length ? refineGutter(picked[0].split, body, page) : null;
 }
 
 /** 一维聚类：把相近的数值聚成一簇，返回出现次数 >= 2 的簇 */
@@ -743,11 +818,15 @@ function canMerge(block, line) {
   const overlap = Math.min(prev.x1, line.x1) - Math.max(prev.x0, line.x0);
   const minWidth = Math.min(prev.x1 - prev.x0, line.x1 - line.x0);
   if (minWidth > 4 && overlap < minWidth * 0.25) return why('水平不重叠');
+  // 编号列表的悬挂缩进：首行从「1. 」起排，续行统一缩进到文字起点。
+  // 旧判据把「本行比上一行右移」一律当成新段落的段首缩进，于是一个列表项的
+  // 每一行都会被切成独立段落（参考文献编号、附录条目尤其明显）。
+  const hanging = hangingListIndent(block, line, prev) != null;
   // 本行明显比上一行更缩进 → 这是新段落的段首缩进
   const region = block.region;
   const right = region ? region.x1 : prev.x1;
   const indentStep = Math.max(3, prev.size * 0.6);
-  if (line.x0 - prev.x0 > indentStep) return why('段首缩进');
+  if (!hanging && line.x0 - prev.x0 > indentStep) return why('段首缩进');
   // 标题经常是两行换行，而且第一行天然不排满。若两行左边界、字号和字形
   // 都一致，应视为同一个标题块；否则会把标题拆成多个翻译请求，译文逐行回写
   // 后就会出现截图中那种“中文碎片插进英文标题/摘要”的错位效果。
@@ -760,15 +839,40 @@ function canMerge(block, line) {
     // 正文常见 8–11pt，不会把普通段落的短行大量误合并。
     && (prev.bold || line.bold || Math.min(prev.size, line.size) >= 12)
     && !isListItemStart(line.text);
-  if (!headingContinuation) {
+  if (!headingContinuation && !hanging) {
     // 上一行没排满（离文本区右边界还有一大截）说明段落已结束
     const shortTol = Math.max(prev.size * 1.6, (right - (region?.x0 ?? prev.x0)) * 0.05);
     if ((right - prev.x1) > shortTol) return why(`上行为短行 ${(right - prev.x1).toFixed(1)}>${shortTol.toFixed(1)}`);
   }
   // 字体风格突变（加粗小标题）另起一段
   if (line.bold !== prev.bold && line.size > prev.size) return why('字重变化');
-  if (isListItemStart(line.text)) return why('列表项起首');
+  if (!hanging && isListItemStart(line.text)) return why('列表项起首');
   return true;
+}
+
+/**
+ * 本行是不是「编号列表首项的悬挂缩进续行」。
+ * 认法：块内最近一个列表项起首行的 x0 是标记起点；续行 x0 会稳定落在
+ * 它右侧 0.35~5em 处。第一次遇到就把这个 x0 锁进 block.listIndent，
+ * 之后只接受同一缩进的行；遇到真正的下一个列表项（x0 回到标记起点）
+ * 由 isListItemStart 断段，不会串成一整块。
+ */
+function hangingListIndent(block, line, prev) {
+  let marker = null;
+  for (let i = block.lines.length - 1; i >= 0; i--) {
+    if (isListItemStart(block.lines[i].text)) { marker = block.lines[i]; break; }
+  }
+  if (!marker) return null;
+  const dx = line.x0 - marker.x0;
+  if (dx <= prev.size * 0.35 || dx > prev.size * 5) return null;
+  const tol = Math.max(2.5, prev.size * 0.5);
+  if (block.listIndent != null) {
+    return Math.abs(line.x0 - block.listIndent) <= tol ? block.listIndent : null;
+  }
+  // 只在「上一行就是列表首行」时锁定，免得把普通段落的段首缩进误吞进来
+  if (!isListItemStart(prev.text) && Math.abs(prev.x0 - line.x0) > tol) return null;
+  block.listIndent = line.x0;
+  return line.x0;
 }
 
 function isListItemStart(text) {
@@ -1261,4 +1365,5 @@ function computeColumnGeometry(pages) {
   }
 }
 
-export { mathScore, looksLikeTable, dehyphenate };
+// detectColumnSplit / clusterEdges / columnStartClusters 也导出，供分栏三信号的单测直接构造行。
+export { mathScore, looksLikeTable, dehyphenate, detectColumnSplit, gutterCandidates, columnStartClusters, evaluateColumnSplit, buildBlocks, canMerge, hangingListIndent, groupIntoLines };

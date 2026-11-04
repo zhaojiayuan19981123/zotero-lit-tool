@@ -23,7 +23,7 @@ import { getDataDir } from './store.js';
 import { refineReadingDoc } from './readingAi.js';
 
 /** 结构版本；结构变了就 +1，旧缓存自动失效 */
-export const READING_SCHEMA = 3;
+export const READING_SCHEMA = 4;
 
 /** 片段样式位（写进结构树的 run 第 4 位，前端据此出 <b>/<i>） */
 const STYLE_BOLD = 1;
@@ -55,6 +55,9 @@ function isTextBlock(b) {
     // 短标题）。判断依据是「字母占比高且几乎不含数学符号」——这类宁可重排，
     // 也不要把一行字裁成图片：裁图不可选、不可搜，还会让段落断成两截。
     const t = String(b.text || '').trim();
+    // URL / DOI / ORCID 行：斜杠和数字多，字母占比天然偏低，但它们是可读文字。
+    // 裁成图片会把一行链接放大成整栏宽的截图（ORCID 就是三行巨字）。
+    if (/(?:https?:\/\/|www\.|doi\.org|orcid\.org)/i.test(t)) return true;
     const letters = (t.match(/[A-Za-z\u4e00-\u9fff]/g) || []).length;
     return t.length >= 6 && letters / t.length > 0.6 && mathScore(t) < 0.06;
   }
@@ -273,6 +276,141 @@ function findCaption(node, blocks, pageHeight) {
   return best;
 }
 
+/**
+ * 出版商 / 期刊封面的装饰内容。Zotero 的重排不显示这些，只从论文标题开始：
+ * 页顶的刊名、"journal homepage: www.elsevier.com/locate/ije"、以及占半页的
+ * 出版商徽记（大树、盾徽、期刊 logo）都不属于论文正文。
+ *
+ * 判据刻意保守，只碰「页顶 22% 区域内的装饰文字」与「面积 > 22% 页宽×页高、
+ * 没有 Fig/Table 图注、本页文字又很少的大图」。带图注的真插图、正文页里的
+ * 图表、封面以外的任何内容都不受影响。
+ */
+const PUBLISHER_DECOR = /journal\s*homepage|www\.|elsevier|sciencedirect|springer|wiley|taylor\s*&\s*francis|sagepub|issn|©|copyright|all\s+rights\s+reserved|available\s+online/i;
+
+/**
+ * 强判据：这些文案只会出现在出版商的刊眉 / 封面页 / 页脚版权行上，
+ * 正文里绝不会整块出现，命中即剔除 —— 不限位置、不限长度。
+ * PDF 常把刊眉抽成没有空格的驼峰串（journalhomepage:www…），匹配前先切开。
+ */
+const PUBLISHER_STRONG = [
+  /this\s*article\s*was\s*downloaded\s*by/i,
+  /publication\s*details,?\s*including\s*instructions/i,
+  /full\s*terms\s*and\s*conditions\s*of\s*use/i,
+  /^to\s*cite\s*this\s*article/i,
+  /please\s*scroll\s*down\s*for\s*article/i,
+  /contents\s*lists?\s*available\s*at\s*sciencedirect/i,
+  /journal\s*homepage/i,
+  /available\s*online\s*at\s*www\./i,
+  /published\s*online\s*in\s*articles?\s*in\s*advance/i,
+  /©\s*\d{4}/,
+  /^\d{4}-\d{3}[\dXx]?\/©/,
+  /all\s*rights\s*(are\s*)?reserved/i,
+  // Elsevier 页眉「Tourism Management 110 (2025) 105182」
+  /^[A-Z][^\n]{2,60}?\s\d{2,4}\s\(\d{4}\)\s[\dA-Za-z]+$/,
+  // Springer 页眉「Journal of the Academy of Marketing Science (2024) 52:512–530」
+  /^\S.{2,60}\s\(\d{4}\)\s\d+:\d+\s?[-–]\s?\d+/,
+  // 整块只是一条 DOI 链接的（页脚版权行），不是正文
+  /^https?:\/\/(dx\.)?doi\.org\/\S{5,90}$/i,
+];
+
+/** 封面 / 下载信息页的整页判据：两类以上固定文案同时出现 → 整页都是出版商的 */
+const COVER_PAGE_FURNITURE = [
+  /this\s*article\s*was\s*downloaded\s*by/i,
+  /publication\s*details,?\s*including\s*instructions/i,
+  /full\s*terms\s*and\s*conditions\s*of\s*use/i,
+  /^to\s*cite\s*this\s*article/i,
+  /please\s*scroll\s*down\s*for\s*article/i,
+  /informs\.org/i,
+];
+
+/** 无空格驼峰串恢复空格后再匹配（journalhomepage:www → journal homepage: www） */
+function splitCamel(t) {
+  return String(t || '').replace(/([a-z])([A-Z])/g, '$1 $2');
+}
+
+function matchPublisherStrong(text) {
+  const raw = String(text || '').trim();
+  // 原文先试，再试驼峰切开后的形态：切开是为了救「journalhomepage:www…」这种
+  // 无空格抽取，但会把 ScienceDirect 切坏，所以两种都要试
+  return PUBLISHER_STRONG.some((re) => re.test(raw))
+    || PUBLISHER_STRONG.some((re) => re.test(splitCamel(raw)));
+}
+
+/**
+ * 弱判据（正文里出现 "https://example.org/paper" 很常见）：
+ * 只认页顶 22% 刊眉带内、110 字以内的短行，或无空格驼峰的刊名。
+ */
+function isPublisherDecorText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (matchPublisherStrong(raw)) return true;
+  if (raw.length > 110) return false;
+  if (PUBLISHER_DECOR.test(splitCamel(raw))) return true;
+  // 刊名常被 PDF 抽成没有空格的驼峰串（InternationalJournalofProductionEconomics）
+  return raw.length > 14 && !/\s/.test(raw) && /^[A-Z][A-Za-z]+[A-Z]/.test(raw);
+}
+
+function decorativeTextBlocks(page, pageBlocks, bodySize = 0) {
+  const out = new Set();
+  const H = page.height || 1;
+  const weakBand = (page.y1 ?? H) - H * 0.22;
+  const headBand = (page.y1 ?? H) - H * 0.14;
+  const mastheadBand = (page.y1 ?? H) - H * 0.08;
+  let journalName = '';
+  // 页眉行常被 markMarginalia 标成 furniture，先从全量 blocks（含 furniture）提刊名
+  for (const b of (page.blocks || [])) {
+    const t = splitCamel(String(b.text || '').trim());
+    const head = t.match(/^([A-Z][^\n]{2,60}?)\s\d{2,4}\s\(\d{4}\)\s[\dA-Za-z]+$/);
+    if (head) journalName = head[1].trim().toLowerCase();
+  }
+  for (const b of pageBlocks) {
+    const raw = String(b.text || '').trim();
+    if (!raw) continue;
+    // 字距拉开的栏目标签（Elsevier 的「A R T I C L E   I N F O」/「A B S T R A C T」）：
+    // 语义上就是标签，重排里留着只会变成一行奇怪的碎字
+    if (/^(?:[A-Z]\s+){3,}[A-Z]$/.test(raw)) { out.add(b); continue; }
+    // 首页正文页顶的刊名 masthead（INFORMS 的 ORGANIZATION SCIENCE / MARKETING SCIENCE）：
+    // 全大写、明显大于正文、只出现一次，跨页重复检测抓不到
+    if (bodySize > 0 && raw.length <= 46
+      && (b.y1 ?? 0) >= mastheadBand
+      && (b.size || 0) >= bodySize * 1.05
+      && /^[A-Z][A-Z\s&.'’-]*$/.test(raw)) { out.add(b); continue; }
+    if (matchPublisherStrong(raw)) { out.add(b); continue; }
+    if ((b.y1 ?? 0) >= weakBand && isPublisherDecorText(raw)) out.add(b);
+  }
+  // 刊头大字刊名（Elsevier banner 的 Tourism Management）：与页眉刊名同名、在页顶带内
+  if (journalName) {
+    for (const b of pageBlocks) {
+      const raw = String(b.text || '').trim().replace(/\s+/g, ' ');
+      if (!raw || raw.length > 70) continue;
+      if ((b.y1 ?? 0) >= headBand && raw.toLowerCase() === journalName) out.add(b);
+    }
+  }
+  return out;
+}
+
+/** 封面 / 下载信息页：两类以上固定文案 → 整页跳过（标题作者下一页还会再出现一遍） */
+function isPublisherCoverPage(pageBlocks) {
+  let hits = 0;
+  for (const b of pageBlocks) {
+    const t = splitCamel(String(b.text || '').trim());
+    if (COVER_PAGE_FURNITURE.some((re) => re.test(t)) && ++hits >= 2) return true;
+  }
+  return false;
+}
+
+function isDecorativeFigure(cand, page, pageBlocks) {
+  const W = page.width || 1;
+  const H = page.height || 1;
+  const area = (cand.rect[2] - cand.rect[0]) * (cand.rect[3] - cand.rect[1]);
+  if (area < W * H * 0.22) return false;
+  // 有图注的是论文里的真插图，不是封面徽记
+  if (findCaption({ rect: cand.rect }, pageBlocks, H)?.text) return false;
+  // 文字多的页是正文页，大图可能是图表，别误杀
+  const chars = pageBlocks.reduce((n, b) => n + String(b.text || '').length, 0);
+  return chars < 450;
+}
+
 /** 结束符判断：同页碎片拼接与跨页接续都只对「话没说完」的块生效 */
 const SENTENCE_END = /[.!?。！？：:；;…]["'”’）)\]]?\s*$/;
 const CJK_START = /^[\u3000-\u9fff\uff00-\uffef]/;
@@ -467,7 +605,10 @@ function markFootnotes(pages, bodySize) {
       if (b.tableLike) continue;
       const size = b.size || 0;
       if (size > base * 0.93) continue;
-      const smallCol = smallCols.has(b.column ?? -1);
+      // 跨栏块（column 未定，如 Elsevier 首页的摘要）不属于任何「小字栏」：
+      // 把它算进 smallCols 会把摘要整段当成脚注推到页末（摘要跑到正文后面）。
+      const col = b.column ?? -1;
+      const smallCol = col >= 0 && smallCols.has(col);
       // 只在小字栏、或页面下半部分里认脚注：正文字号偏小的期刊（参考文献比正文小一号）
       // 否则会把整段参考文献搬成脚注。
       const top = page.y1 ?? page.height;
@@ -851,7 +992,48 @@ function firstRunText(node) {
   return String(run?.[2] || '').trimStart();
 }
 
-function mergeNodes(prev, next) {
+function nodeChars(node) {
+  return (node.lines || []).reduce(
+    (n, l) => n + (l.runs || []).reduce((m, r) => m + String(r[2] || '').length, 0), 0);
+}
+
+/**
+ * 跨栏 / 跨页断行处的连字符接合：`con-` + `stantly` → `constantly`。
+ * 不在 run 层做的话，前端装配时按「片段间隙补空格」会拼成 `con- stantly`。
+ */
+function joinHyphen(prev, next) {
+  const line = prev.lines?.[prev.lines.length - 1];
+  const nextLine = next.lines?.[0];
+  const tail = line?.runs?.[line.runs.length - 1];
+  const head = nextLine?.runs?.[0];
+  if (!tail || !head) return false;
+  const a = String(tail[2] || '');
+  const b = String(head[2] || '');
+  if (!/[A-Za-z]-$/.test(a) || !/^[a-z]/.test(b)) return false;
+  tail[2] = a.slice(0, -1) + b;
+  nextLine.runs.shift();
+  if (!nextLine.runs.length) next.lines.shift();
+  return true;
+}
+
+/**
+ * 合并两块文字。跨栏 / 跨页接续时额外记下每一截来自哪一页哪一栏、占多少字符：
+ * 这就是「译文按原比例分回两处」所需的权重 —— 整句先拼好送翻译，拿到译文后
+ * 按 parts 的 ratio 切开，分别回填到两个位置。
+ */
+function mergeNodes(prev, next, opts = {}) {
+  const charsPrev = nodeChars(prev);
+  const charsNext = nodeChars(next);
+  joinHyphen(prev, next);
+  if (opts.continuation) {
+    const parts = prev.parts || [{ page: prev.page, col: prev.col ?? -1, chars: charsPrev }];
+    const last = parts[parts.length - 1];
+    if (last.page === next.page && last.col === (next.col ?? -1)) last.chars += charsNext;
+    else parts.push({ page: next.page, col: next.col ?? -1, chars: charsNext });
+    const total = parts.reduce((n, p) => n + p.chars, 0) || 1;
+    for (const p of parts) p.ratio = round(p.chars / total, 4);
+    prev.parts = parts;
+  }
   prev.lines.push(...next.lines);
   const [ax0, ay0, ax1, ay1] = prev.rect;
   const [bx0, by0, bx1, by1] = next.rect;
@@ -894,11 +1076,19 @@ export function toReadingDoc(analysis) {
   for (const page of pages) {
     collapseTableZones(page);
     const pageBlocks = (page.blocks || []).filter((b) => b && b.kind !== 'furniture');
+    // 出版商的封面 / 下载信息页（INFORMS 那种整页 "This article was downloaded by…"）：
+    // 标题与作者在下一页还会完整出现一遍，整页跳过，免得 boilerplate 插进正文顺序里
+    if (isPublisherCoverPage(pageBlocks)) {
+      warnings.push(`第 ${page.index} 页是出版商信息页，已整体跳过。`);
+      continue;
+    }
     const ordered = readingOrder(page);
+    const decorText = decorativeTextBlocks(page, pageBlocks, bodySize);
     const rankOf = new Map(ordered.map((b, i) => [b, i]));
     const items = [];
     const cropRects = [];
     const textRects = [];
+    let decorativePage = false;
 
     // 1) 裁图候选：表格碎块 / 图像 XObject / 矢量插图。
     //    先集中收集再统一判定，是因为「图注」要跟着裁图一起处理 —— 图注的文字
@@ -915,6 +1105,25 @@ export function toReadingDoc(analysis) {
     }
     for (const rect of vectorFigures(page, ordered.filter(isTextBlock))) {
       cands.push({ rect, kind: 'figure', block: null, vector: true });
+    }
+    // 期刊封面 / 出版商徽记：只剔除「图像 XObject」这类装饰图，不动矢量框架图、
+    // 表格伪块和带图注的真插图。前提是这一页真有出版商刊眉 —— 否则整页无文字的
+    // 扫描件大图会被误当成封面丢掉。整页都是装饰的页，后面也不补整页裁图。
+    const H = page.height || 1;
+    const bannerBand = (page.y1 ?? H) - H * 0.18;
+    if (decorText.size > 0) {
+      for (let i = cands.length - 1; i >= 0; i--) {
+        const c = cands[i];
+        if (c.kind !== 'figure' || c.vector || c.block) continue;
+        if (findCaption({ rect: c.rect }, pageBlocks, H)?.text) continue;
+        // 有刊眉装饰文字的页：页顶 18% 带内、无图注的横幅图（期刊封面缩略图 / logo），
+        // 或面积超过整页 22% 的大徽记，都是装饰。带图注、或在文字页中部的大图不动。
+        const inBanner = c.rect[1] >= bannerBand && c.rect[3] <= (page.y1 ?? H);
+        if (!inBanner && !isDecorativeFigure(c, page, pageBlocks)) continue;
+        cands.splice(i, 1);
+      }
+      // 封面页既不该保留大徽记，也不该「兜底补一张整页裁图」把封面又放回来
+      decorativePage = true;
     }
 
     const accepted = [];
@@ -957,6 +1166,7 @@ export function toReadingDoc(analysis) {
     const noteNodes = [];
     for (const b of ordered) {
       if (!isTextBlock(b)) continue;
+      if (decorText.has(b)) continue;              // 页顶刊名 / journal homepage
       if (b.x1 - b.x0 < MIN_TEXT_W || b.y1 - b.y0 < MIN_TEXT_H) continue;
       if (consumed.has(b)) continue;
       // 落在插图里的短文字（坐标轴标签、图例）已经画在裁图里了，再排一遍就是重复
@@ -983,7 +1193,8 @@ export function toReadingDoc(analysis) {
     if (!items.length && !noteNodes.length) {
       // 整页都没有可重排的内容：扫描页、整页插图（大图 / 大表）。重排救不了它，
       // 但也不能让这一页在阅读视图里凭空消失 —— 整页裁一张图放进去，内容不丢。
-      const hasVisual = (page.images || []).length > 0 || (page.rawItems || 0) > 0;
+      const hasVisual = ((page.images || []).length > 0 || (page.rawItems || 0) > 0)
+        && !decorativePage;   // 纯封面 / 出版商页直接略过，重排里不该出现
       if (hasVisual) {
         const full = [
           round((page.x0 ?? 0) + 1, 2),
@@ -1025,7 +1236,7 @@ export function toReadingDoc(analysis) {
     //      vectorFigures（它只认填充色块），页面上又只有几个零散标签字。
     //      这种页在此前只剩一行刊名，图整个丢掉。判据是「可重排的文字极少、
     //      但这一页的原始文字片段很多」，补一张整页裁图，宁可多看一张图也不丢内容。
-    if (pageNodes.length && (page.rawItems || 0) >= 30) {
+    if (!decorativePage && pageNodes.length && (page.rawItems || 0) >= 30) {
       const chars = pageNodes.reduce((n, node) => n + (node.lines || []).reduce(
         (m, l) => m + l.runs.reduce((k, r) => k + r[2].length, 0), 0), 0);
       if (chars < 200 && !cropRects.length) {
@@ -1048,7 +1259,7 @@ export function toReadingDoc(analysis) {
     const prev = lastBodyNode(merged);
     if (prev && (prev._pageEnd === true || prev._colEnd === true)
       && canContinue(prev, cur, pageTops.get(cur.page))) {
-      mergeNodes(prev, cur);
+      mergeNodes(prev, cur, { continuation: true });
       prev._pageEnd = cur._pageEnd === true;
       prev._colEnd = cur._colEnd === true;
       continue;

@@ -2203,7 +2203,9 @@ export function createApp({
     const item = store.getLiterature(req.params.id);
     if (!item) return res.status(404).json({ error: '记录不存在' });
     const manifest = readManifestFor(store.getDataDir(), item.id);
-    if (!manifest) return res.status(404).json({ error: '还没有版面识别结果' });
+    // 「还没识别版面」是正常状态，不是错误：返回 align: null，前端据此走提示分支。
+    // 用 404 会让浏览器控制台留一条红色报错，看起来像坏了。
+    if (!manifest) return res.json({ ok: true, align: null });
     try {
       const lay = layoutFromManifest(manifest, { translateReferences: false });
       const align = buildAlignOutput(lay, {
@@ -2537,7 +2539,7 @@ export function createApp({
     res.json(item);
   });
 
-  const EDITABLE = [...FIELDS, 'readingProgress', 'rating', 'thumb', 'docType', 'annotations', 'collectionId', 'title', 'thoughts', 'cnkiUrl',
+  const EDITABLE = [...FIELDS, 'readingProgress', 'readingHeat', 'rating', 'thumb', 'docType', 'annotations', 'collectionId', 'title', 'thoughts', 'cnkiUrl',
     'journalRank', 'journalRankDetail', 'journalRankError', 'importedAt', 'fileKind', 'readPos'];
   app.patch('/api/literature/:id', (req, res) => {
     const item = store.getLiterature(req.params.id);
@@ -2564,6 +2566,24 @@ export function createApp({
           };
         })
         .filter((a) => a.target !== 'field' || (a.field && a.end > a.start));
+    }
+    // 阅读热力：按页停留秒数。夹住页码与秒数上限，别让前端把整本数据文件撑大。
+    if ('readingHeat' in patch) {
+      const rh = patch.readingHeat;
+      if (!rh || typeof rh !== 'object') patch.readingHeat = null;
+      else {
+        const pages = {};
+        for (const [p, sec] of Object.entries(rh.pages || {})) {
+          const n = Number(p);
+          if (!Number.isFinite(n) || n < 1 || n > 2000) continue;
+          pages[String(Math.floor(n))] = Math.max(0, Math.min(86400, Number(sec) || 0));
+        }
+        patch.readingHeat = {
+          pages,
+          total: Object.values(pages).reduce((a, b) => a + b, 0),
+          updatedAt: Number(rh.updatedAt) || Date.now(),
+        };
+      }
     }
     // 阅读位置：只收白名单字段，避免前端顺手塞进来的东西进数据文件
     if ('readPos' in patch) {

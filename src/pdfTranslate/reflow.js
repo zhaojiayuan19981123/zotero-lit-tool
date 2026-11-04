@@ -63,7 +63,12 @@ export function readingOrder(pageInfo) {
 
   const cols = pageInfo.columns || [];
   const mid = cols.length === 2 ? cols[0].x1 : null;
-  const spansAll = (b) => !mid || (b.x0 < mid - 4 && b.x1 > mid + 4);
+  // 通栏判据除「越过栏缝」外，再认「宽度超过 62% 页宽」：摘要、跨栏图注、
+  // 跨整页的小标题常常只差几个 pt 没有真正压到中线上，单靠 mid 会把它们
+  // 当成某一栏的内容，按 y 插进双栏正文中间（摘要跑到论文中段就是这个原因）。
+  const W = pageInfo.width || 0;
+  const spansAll = (b) => !mid || (b.x0 < mid - 4 && b.x1 > mid + 4)
+    || (W > 0 && (b.x1 - b.x0) > W * 0.62);
 
   const byY = blocks.slice().sort((a, b) => (b.y1 - a.y1) || (a.x0 - b.x0));
   const bands = [];
