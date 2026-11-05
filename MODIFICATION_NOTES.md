@@ -1,3 +1,87 @@
+## v1.37.0：阅读模式吃上版面解析结果、表格/公式整块原图、正文与长图注不再居中、目录跳转（2026-11-05）
+
+> 用户反馈（三张截图：表格被摊成一行行文字、一段短文字浮在栏中间、四行公式被拆成「图、字、图、字」）：
+> 「首先，在阅读模式中，表格还是要以图片方式展示」「为什么还是出现这种居中对齐」
+> 「而且在阅读模式下，为什么左边目录点击跳转不到相应的位置」
+> 「包括公式，都要以图片方式给出，不要出现这种情况」
+> 「需要先解析版面，然后阅读模式的重建需要利用解析版面的结果」。
+
+### 一、版面解析结果接进阅读重建（根因）
+
+v1.36 之前阅读模式是**纯规则**重建：`analyzePdf` 的块 → 规则拼块 → 裁图，`data/layout/<id>/manifest.json`
+里那份模型结果（块级 `label` + 归一化 `bounds`）根本没被读过。规则能认出的公式/表格有限，
+认不出的表体就退化成「一行行文字」，这正是截图里那张被摊平的表。
+
+修法（`src/readingMode.js`）：
+
+- `toReadingDoc(analysis, { layout })` 新增 `layout` 入参；每页先算 `layoutAssetsForPage()`，
+  把 `table` / `algorithm` → `table` 裁图，`chart` / `image` → `figure`，`display_formula` → `formula`。
+- 归一化 `bounds` 按「y 从页顶算」翻转回 PDF 坐标系：`oy + (1 - ny - nh) * H`。
+- 同一栏里纵向相邻的公式框先合并；`formula_number` 贴回最近的那条公式；表格/图**不再二次 pad**
+  （模型给的就是块的外框，再 pad 会把邻居吞进来），只有公式 `padRect(growWithInk(...), 1.5)`。
+- **有版面区域的页跳过规则兜底**（`collapseTableZones` / `collapseNumericTableZones`），
+  否则规则会把模型已经圈好的一张表再切碎一次；落在版面区域里的碎文字块直接丢弃。
+- 规则路径补两道兜底：`collapseNumericTableZones`（连续 ≥3 行「≥3 个数字且数字字符占比 >45%」
+  判表体，上下紧邻的标签行一起圈进来）、`formulaBands`（纵向紧邻 + 同栏的公式块连成一条带，
+  整条裁一张；用 `sideOf()` 保证左右两栏不误并）。
+- 处理顺序踩过一个坑：公式带必须**先于**逐块公式候选收集，否则整条带的大图会因为与逐块候选
+  重叠被 `accepted` 丢掉，而带内文字已经进了 `consumed` —— 文字和图一起消失。
+
+### 二、正文「莫名其妙居中」
+
+`detectAlign` 的判据是「每一行中心都与区域中心对齐」。两端对齐的正文段前几行顶满整栏，
+中心自然重合，只有最后一行短 —— 整段被判成 `center`，重排后就是截图里那段浮在中间的文字。
+
+- 居中只留给 `title` / `authors` / `kicker` / `caption`（`CENTER_OK`），其余一律 `left`。
+- 图注再收一道：`captionMayCenter()` —— 超过一行或超过 90 字（`CAPTION_CENTER_MAX`）的图注
+  按正文左对齐，只有一行短图题才居中。`blockText()` 同时兜住 `lines[].items[]`（analyze 的输出）
+  与 `lines[].runs[]`（结构树节点）两种形状；只认后一种时拿到空串，1427 字的长图注被当成
+  短标题判成了居中（本次真机验收就复现了这个坑）。
+- 样式侧：`.pr-reading[data-rm-align="body"] .rm-column > p[data-kind="caption"]` 这条
+  「图注无条件居中」的规则删掉，改为只认 `.rm-center`；裁剪图的 `<figcaption>` 超过 90 字
+  加 `.rm-cap-long` 左对齐。
+
+### 三、左侧目录点不动
+
+重排视图的块 id 是 `r1…rN`，PDF 侧是 `p8-b17`，两套编号没有交集，`cmpSelectBlock` 里
+「在重排视图里定位」这一步只能猜。
+
+- 新增 `PrReading.scrollToSource({ page, text, ny })`（`public/reader-mode.js`）：候选必须同页，
+  按「文字前缀匹配 +20 分、与目标纵向差每 20px 扣 1 分、序号每步微扣」取最优，滚动过去并用
+  `.rm-flash` 闪 1.4 秒。
+- `cmpSelectBlock` 在阅读模式打开时改走这条路径；`flushPendingBlock()` 让还没渲染的块
+  （分片懒加载）在渲染出来后补跳。
+- 版面解析晚于阅读模式完成时，`maybeUpgradeReadingWithLayout()` / `upgradeReadingDoc()` 自动
+  用带整块原图的稿替换当前稿，按 `anchor` 回位并 toast 提示。
+
+### 四、缓存
+
+阅读稿缓存键改成 `<baseKey>--<layoutSig>`：`baseKey = sha1(路径|大小|mtime|SCHEMA)`，
+`layoutSig = sha1(inputSHA256|blocks.length|pages|schemaVersion).slice(0,8)`，没有 manifest 时用 `nl`。
+版面解析完成前后是两份不同的稿，共用键会让「升级」永远读不到新稿。`READING_SCHEMA` 5 → 6。
+
+### 五、顺手修掉的崩溃
+
+真机验收时发现：同一篇 PDF 解析第二次，后端进程直接消失，报
+`ERR_TRAILING_JUNK_AFTER_STREAM_END`（zlib 在回调里抛，抛点在 pdf.js 的 try/catch 之外，
+成了未处理的 Promise 拒绝）。这类 PDF 的 FlateDecode 流结束标记后挂着垃圾字节。
+
+- `src/pdfTranslate/analyze.js`：`loadPdfJs()` 规格顺序改为 **legacy 优先**（Node 下官方推荐），
+  顺带消掉那条 `Please use the legacy build` 警告。
+- `server.js`：对 `ERR_TRAILING_JUNK_AFTER_STREAM_END` / `ERR_ZLIB_*` 单独放行（只记一次警告），
+  其余未处理拒绝仍按原样打印并退出。
+
+### 六、测试
+
+- `node --test` **681 / 681**（Node 20.10 与 Node 22.22 各跑一次；v1.36.0 为 673）。
+  新增 8 项：版面表格 → 一张表图；版面两段公式 → 并成一张；规则路径四行公式 → 一张且中间行
+  不进正文；连续 4 行数字 → 一张表图且无残留文字；正文 `align:'center'` → `left`；标题/作者
+  居中保留；多行图注 → `left`；一行短图题 → `center`。
+- 浏览器全量回归 **75 / 75**（隔离数据实例）。
+- 阅读模式专项真机 **14 / 14**：第 8 页四行公式 1 张图（`rect=355.4,57.2,567.7,199.7`）、
+  版面路径 `x0=308.98`、长段落居中 0、`scrollToSource` 使 `scrollTop 30 → 15045` 且命中
+  「Model Specification」、无 JS 运行时错误。
+
 ## v1.36.0：公式 / 图表按版面整块裁图、阅读热力上色、首页按标题作者摘要排序（2026-11-05）
 
 > 用户反馈（附两张截图，一张是公式被放大却只剩半截、一张是文献库的阅读热力列整列发灰）：
