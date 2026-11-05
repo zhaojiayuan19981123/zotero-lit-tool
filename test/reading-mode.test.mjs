@@ -650,3 +650,146 @@ test('首页顺序：标题 → 作者 → 单位 → 摘要 → 引言', () => 
   assert.ok(/Environmental penalties exert/.test(textsOf(doc.blocks[3]).join('')), '摘要要在引言前');
   assert.ok(/1\. Introduction/.test(textsOf(doc.blocks[4]).join('')), '引言在摘要之后');
 });
+
+// ---------------- 版面解析结果（manifest）优先 ----------------
+
+/** 归一化 bounds：给的是 PDF 的 y（向上），manifest 用的是从页顶算的比例 */
+function normBounds(x0, y0, x1, y1) {
+  return {
+    x: x0 / PW,
+    y: (PH - y1) / PH,
+    width: (x1 - x0) / PW,
+    height: (y1 - y0) / PH,
+  };
+}
+
+test('版面解析说是表格 → 整块裁图，里面的文字不再被摊成一行行', () => {
+  const p = page(1, [
+    block('body', [line('Modeling performance.', { x: 60, y: 700, size: 9, w: 120 })]),
+    block('body', [line('MSE 0.001 0.03 0.003 0.05 0.014', { x: 60, y: 680, size: 9, w: 260 })]),
+    block('body', [line('RMSE 0.036 0.172 0.06 0.223 0.117', { x: 60, y: 665, size: 9, w: 260 })]),
+  ]);
+  const layout = {
+    schemaVersion: 1,
+    pages: 1,
+    blocks: [{ page: 1, label: 'table', bounds: normBounds(55, 640, 330, 710) }],
+  };
+  const doc = toReadingDoc({ pages: [p], totalPages: 1, stats: { bodySize: 10 } }, { layout });
+  const crops = doc.blocks.filter((b) => b.t === 'crop');
+  assert.equal(crops.length, 1, '版面说是表格，就该只有一张表图');
+  assert.equal(crops[0].k, 'table');
+  assert.ok(Math.abs(crops[0].rect[0] - 55) < 2 && Math.abs(crops[0].rect[3] - 710) < 2,
+    `裁图应贴着模型给的区域，实际 ${crops[0].rect.join(',')}`);
+  const all = doc.blocks.filter((b) => b.t === 'text').flatMap(textsOf).join(' | ');
+  assert.ok(!/MSE 0\.001/.test(all), '表格里的数字不该再排成文字');
+});
+
+test('版面解析把一条四行公式框成两段 → 并成一张图', () => {
+  const p = page(1, [
+    block('formula', [line('L', { x: 300, y: 700, size: 9, w: 8 })]),
+    block('formula', [line('∑ βl ArtistShopFeaturesli', { x: 250, y: 680, size: 9, w: 200 })]),
+    block('formula', [line('∑ γm PaintingFeaturesmki', { x: 250, y: 640, size: 9, w: 200 })]),
+    block('body', [line('where the subscript m indexes the painting.', { x: 60, y: 600, size: 10, w: 400 })]),
+  ]);
+  const layout = {
+    schemaVersion: 1,
+    pages: 1,
+    blocks: [
+      { page: 1, label: 'display_formula', bounds: normBounds(240, 670, 460, 715) },
+      { page: 1, label: 'display_formula', bounds: normBounds(240, 630, 460, 665) },
+    ],
+  };
+  const doc = toReadingDoc({ pages: [p], totalPages: 1, stats: { bodySize: 10 } }, { layout });
+  const crops = doc.blocks.filter((b) => b.t === 'crop');
+  assert.equal(crops.length, 1, '两段公式框要并成一张');
+  assert.equal(crops[0].k, 'formula');
+  assert.ok(crops[0].rect[1] <= 631 && crops[0].rect[3] >= 714,
+    `裁图要覆盖整条公式，实际 ${crops[0].rect.join(',')}`);
+  assert.ok(!doc.blocks.some((b) => b.t === 'text' && /ArtistShopFeatures/.test(textsOf(b).join(''))),
+    '公式区域里的字不该再排成正文');
+});
+
+test('四行公式在纯规则路径下也合成一张（中间两行被判成正文）', () => {
+  const p = page(1, [
+    block('body', [line('The model is given as', { x: 60, y: 740, size: 10, w: 300 })]),
+    block('formula', [line(') = α + β ArtistShopFeatures', { x: 200, y: 700, size: 9, w: 220 })]),
+    block('body', [line('∑M + γm PaintingFeaturesmki', { x: 200, y: 676, size: 9, w: 200 })]),
+    block('formula', [line('∑ p=1 q=1', { x: 220, y: 652, size: 9, w: 120 })]),
+    block('body', [line('+ δp Interactp + ωq TitleTopicDensityq', { x: 200, y: 628, size: 9, w: 240 })]),
+    block('body', [line('The remainder of the paper is organized as follows', { x: 60, y: 560, size: 10, w: 420 })]),
+  ]);
+  const doc = docOf([p]);
+  const crops = doc.blocks.filter((b) => b.t === 'crop' && b.k === 'formula');
+  assert.equal(crops.length, 1, '整条公式只能有一张图');
+  assert.ok(crops[0].rect[1] <= 630 && crops[0].rect[3] >= 705,
+    `要覆盖从第一行到最后一行，实际 ${crops[0].rect.join(',')}`);
+  const all = doc.blocks.filter((b) => b.t === 'text').flatMap(textsOf).join(' | ');
+  assert.ok(!/PaintingFeaturesmki/.test(all), '公式中间那一行不该变成正文');
+  assert.ok(!/TitleTopicDensity/.test(all), '公式最后一行也不该变成正文');
+  assert.ok(/The remainder of the paper/.test(all), '真正的正文要留着');
+});
+
+test('连续多行数字 → 一张表格图，数字行不再当正文', () => {
+  const rows = [
+    'MSE 0.001 0.03 0.003 0.05 0.014',
+    'RMSE 0.036 0.172 0.06 0.223 0.117',
+    'MAE 0.018 0.057 0.034 0.103 0.057',
+    'R 0.993 0.794 0.988 0.839 0.915',
+  ];
+  const p = page(1, rows.map((t, i) => block('body', [line(t, { x: 60, y: 700 - i * 14, size: 9 })])));
+  const doc = docOf([p]);
+  const crops = doc.blocks.filter((b) => b.t === 'crop');
+  assert.equal(crops.length, 1, '四行数字应合成一张表图');
+  assert.equal(crops[0].k, 'table');
+  const all = doc.blocks.filter((b) => b.t === 'text').flatMap(textsOf).join(' | ');
+  assert.equal(all.trim(), '', '这些数字行不该再以文字出现');
+});
+
+// ---------------- 对齐：正文不许居中 ----------------
+
+test('正文段落被判成 center 也不居中（两端对齐的段尾短行会浮在中间）', () => {
+  const p = page(1, [
+    block('body', [
+      line('Fig. 6a summarizes the principal factors influencing the location choices', { x: 60, y: 700, size: 10, w: 480 }),
+      line('%) and nighttime light intensity (15.1 %). This pattern reflects a', { x: 60, y: 686, size: 10, w: 300 }),
+    ], { align: 'center' }),
+  ]);
+  const doc = docOf([p]);
+  const body = doc.blocks.find((b) => b.t === 'text');
+  assert.equal(body.align, 'left', '正文必须左对齐 / 两端对齐，不能整段居中');
+});
+
+test('大标题与作者行的居中保留', () => {
+  const p = page(1, [
+    block('title', [line('A Centered Paper Title', { x: 150, y: 740, size: 16, w: 300 })], { align: 'center' }),
+    block('authors', [line('Fang Dong, Weijia Liu', { x: 180, y: 700, size: 10, w: 240 })], { align: 'center' }),
+  ]);
+  const doc = docOf([p]);
+  const title = doc.blocks.find((b) => b.t === 'text' && b.kind === 'title');
+  assert.equal(title.align, 'center');
+});
+
+test('长图注（多行）即使被判成 center 也左对齐', () => {
+  // 期刊图注的典型形态：「Figure 8.」后面跟三五句说明，纸面上是两端对齐的段落。
+  const p = page(1, [
+    block('caption', [
+      line('Figure 8 shows the normalized relative importance of each of', { x: 60, y: 700, size: 8, w: 480 }),
+      line('the five feature families in our linear model, which confirms', { x: 60, y: 690, size: 8, w: 470 }),
+      line('that image count dominates the price explanation.', { x: 60, y: 680, size: 8, w: 260 }),
+    ], { align: 'center' }),
+  ]);
+  const doc = docOf([p]);
+  const cap = doc.blocks.find((b) => b.t === 'text' && b.kind === 'caption');
+  assert.equal(cap.align, 'left', '多行图注必须按正文左对齐，不能整段浮在中间');
+});
+
+test('一行短图题仍然居中', () => {
+  const p = page(1, [
+    block('caption', [
+      line('Table 1. Descriptive Statistics', { x: 220, y: 700, size: 8, w: 150 }),
+    ], { align: 'center' }),
+  ]);
+  const doc = docOf([p]);
+  const cap = doc.blocks.find((b) => b.t === 'text' && b.kind === 'caption');
+  assert.equal(cap.align, 'center');
+});

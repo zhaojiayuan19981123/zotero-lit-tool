@@ -51,6 +51,31 @@ import { UTD_JOURNALS, JOURNAL_PRESETS, createTopJournalState, syncJournals, che
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_UPLOAD_DIR = path.join(__dirname, 'uploads');
 
+// ---------- 压缩流尾部冗余：不要带走整个后端 ----------
+// 有些 PDF（增量更新过、或由非标准生成器导出）的 FlateDecode 流在正常结束标记后面
+// 还挂着一截垃圾字节。zlib 会在自己的回调里抛 ERR_TRAILING_JUNK_AFTER_STREAM_END，
+// 而这个抛出点在 pdf.js 的 try/catch 之外，于是变成「未处理的 Promise 拒绝」——
+// Node 的默认行为是**结束进程**。用户只是把同一篇论文又打开了一次（对照精读一次、
+// 阅读模式一次），后端就没了，界面上表现为整站失联。
+// pdf.js 对这种流是能继续解析的（只是丢掉那截尾巴），所以这类错误记录一次后忽略。
+let warnedZlibJunk = false;
+function isZlibJunk(reason) {
+  const code = String(reason?.code || '');
+  return code === 'ERR_TRAILING_JUNK_AFTER_STREAM_END' || code.startsWith('ERR_ZLIB_');
+}
+process.on('unhandledRejection', (reason) => {
+  if (isZlibJunk(reason)) {
+    if (!warnedZlibJunk) {
+      warnedZlibJunk = true;
+      console.warn('[pdf] 忽略压缩流尾部冗余（该 PDF 仍可正常解析）：', reason?.message || reason?.code);
+    }
+    return;
+  }
+  // 其余未处理拒绝保持原来的「打印 + 退出」语义，别把真正的 bug 吞掉
+  console.error('[未处理的 Promise 拒绝]', reason);
+  process.exit(1);
+});
+
 // ---------- 中文文件名编码修复 ----------
 // multer/busbboy 按 latin1 解码 multipart 的 filename，导致中文变成 "ç..." 乱码。
 // 检测到 latin1 高位字符时按 latin1 -> utf8 还原；还原失败或不含中文则保持原样。

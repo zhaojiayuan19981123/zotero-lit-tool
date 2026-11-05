@@ -6344,6 +6344,8 @@
         pr.layoutBusy = false;
         // done 事件本身不带 manifest（几十 KB 没必要塞进进度流），单独取一次
         loadLayoutFor(recordId);
+        // 阅读模式此刻拿的还是「规则版」：用版面结果重建一份替换掉
+        if (pr.reading.on && pr.recordId === recordId) upgradeReadingDoc();
         toast('版面解析完成，图表 / 公式区域可直接点开', 'success');
         return;
       }
@@ -7551,7 +7553,20 @@
     if (!cmp.blockById.has(id)) return;
     cmp.activeId = id;
     markCmpBlockActive(id, flash);
-    if (revealPdf) cmpRevealBlockInPdf(id);
+    if (revealPdf) {
+      // 阅读模式下原文栏是隐藏的：再把 #prPages 滚一遍等于什么都没发生（用户看到的
+      // 就是「点左侧目录没反应」）。改成按「页 + 文字」滚重排视图里的那一段。
+      const b = cmp.blockById.get(id);
+      if (pr.reading.on && b && Number(b.page)) {
+        window.PrReading?.scrollToSource?.({
+          page: Number(b.page),
+          text: b.text || '',
+          ny: Number(b.y) || 0,
+        });
+      } else {
+        cmpRevealBlockInPdf(id);
+      }
+    }
     cmpPaintPdfPick(id);
     // 「仅原文」视图下译文栏是隐藏的，滚动它没有意义
     if (scrollTrans && cmp.view !== 'pdf') {
@@ -8633,6 +8648,9 @@
       updateReadingHint();
       // 首屏已经能读了，剩下的页在后台续（不阻塞、不弹提示）
       continueReadingDoc();
+      // 没有版面解析结果时，阅读稿只能靠规则猜「这是表格还是几行字」。后台补一次
+      // 版面解析，完成后把这一篇换成用版面结果重建的版本（表格 / 公式整块原图）。
+      maybeUpgradeReadingWithLayout();
       $('prReadingBtn')?.classList.add('reading');
       const warn = (doc.warnings || [])[0];
       if (warn) toast(warn, 'info');
@@ -8643,6 +8661,57 @@
       pr.reading.busy = false;
       $('prReadingBtn')?.classList.remove('busy');
       $('rmLoading')?.classList.add('hidden');
+    }
+  }
+
+  /**
+   * 阅读模式与版面解析的衔接。
+   *
+   * 规则重建能读，但「这一块是表格 / 这是一条四行的公式」靠猜（实测会把表体摊成
+   * 一行行数字、把一条公式拆成「图、字、图、字」）。版面模型给的正是这些区域，
+   * 所以没有解析结果时在后台补一次；解析完调用 upgradeReadingDoc 换成版面版。
+   * 全过程不阻塞阅读，失败也只是继续用规则版。
+   */
+  async function maybeUpgradeReadingWithLayout() {
+    if (!pr.reading.on || pr.fileKind !== 'pdf') return;
+    if (!pr.recordId) return;                      // 成果附件没有版面解析能力
+    if (pr.reading.doc?.layout) return;            // 这篇已经是按版面结果建的
+    if (pr.layoutBusy) return;                     // 正在解析：watch 的回调会接上
+    if (pr.layoutFor === pr.recordId) {            // 已有结果但这一份稿是旧的 → 直接重建
+      upgradeReadingDoc();
+      return;
+    }
+    await waitReaderIdle();
+    if (!pr.reading.on || pr.reading.doc?.layout) return;
+    try { await startLayoutParse(); } catch (_) { /* 解析起不来就用规则版 */ }
+  }
+
+  /** 用「有版面结果」的阅读稿替换当前稿，并停在同一页 */
+  async function upgradeReadingDoc() {
+    if (!pr.reading.on || pr.reading.busy) return;
+    if (pr.reading.doc?.layout) return;
+    const anchor = window.PrReading?.anchor?.();
+    const key = readingKey();
+    pr.reading.upgrading = true;
+    try {
+      pr.reading.doc = null;
+      pr.reading.forKey = null;
+      const doc = await loadReadingDoc(true);
+      if (!pr.reading.on || readingKey() !== key) return;
+      if (!doc?.layout) return;                    // 解析结果没覆盖到这一篇，保持原样
+      installReadingHooks();
+      window.PrReading.setDoc(doc);
+      window.PrReading.mount();
+      if (anchor?.page) {
+        window.PrReading.scrollToSource({ page: anchor.page, y: anchor.y, text: '' });
+      }
+      updateReadingAiState();
+      updateReadingHint();
+      toast('版面解析完成：表格与公式已换成整块原图', 'success');
+    } catch (_) {
+      /* 升级失败就继续用规则版，用户正在读的内容不受影响 */
+    } finally {
+      pr.reading.upgrading = false;
     }
   }
 

@@ -19,11 +19,12 @@ import crypto from 'node:crypto';
 
 import { analyzePdf, mathScore } from './pdfTranslate/analyze.js';
 import { readingOrder } from './pdfTranslate/reflow.js';
+import { readManifestFor } from './layoutTranslate.js';
 import { getDataDir } from './store.js';
 import { refineReadingDoc } from './readingAi.js';
 
 /** 结构版本；结构变了就 +1，旧缓存自动失效 */
-export const READING_SCHEMA = 5;
+export const READING_SCHEMA = 6;
 
 /** 片段样式位（写进结构树的 run 第 4 位，前端据此出 <b>/<i>） */
 const STYLE_BOLD = 1;
@@ -43,6 +44,30 @@ const MIN_CROP_AREA = 420;
 const MIN_FIGURE_AREA = 2200;
 
 const TEXT_KINDS = new Set(['title', 'heading', 'caption', 'body', 'reference', 'abstract', 'footnote', 'authors', 'kicker']);
+
+/**
+ * 允许居中的块类型。
+ *
+ * analyzePdf 的 detectAlign 是「每一行的中心都和区域中心对齐」就算居中 —— 两端对齐的
+ * 正文段恰好满足：前几行顶满整栏，中心自然重合，只有最后一行短，于是整段被判成居中。
+ * 重排后那段文字前几行看着是「两端对齐」，最后一行却浮在中间，非常刺眼。
+ * 所以居中只留给真正会居中的类型（大标题、作者行、kicker、图注），正文一律左对齐。
+ *
+ * 图注还要再收一道：期刊里的图注往往是「Figure 8. 后面跟三五句说明」，在版面上
+ * 是左对齐/两端对齐的长段，只有图题那种一行短句才居中。所以超过一行量的图注
+ * 一律按左对齐处理 —— 见 captionMayCenter()。
+ */
+const CENTER_OK = new Set(['title', 'authors', 'kicker', 'caption']);
+
+/** 图注居中的字数上限（约一行半）：超过就当正文段处理 */
+const CAPTION_CENTER_MAX = 90;
+
+function captionMayCenter(raw, lineCount = 1) {
+  const t = String(raw || '').trim();
+  if (!t) return false;               // 拿不到文字就别赌，左对齐最安全
+  if (lineCount > 1) return false;    // 多行 = 段落式图注，期刊上也是左对齐
+  return t.length <= CAPTION_CENTER_MAX;
+}
 
 /** 正文块是否可重排（其余块走裁图） */
 function isTextBlock(b) {
@@ -214,15 +239,31 @@ function splitRunsByLinks(it, flags, links) {
   return out.length ? out : [base];
 }
 
+/**
+ * 块的原始文字（用于「这段有多长」这类判断）。
+ * analyzePdf 的块是 `lines[].items[].text`，结构树里的节点才是 `lines[].runs[]`；
+ * 两条都兜住，否则拿到空串会把「很长的图注」误判成短标题（曾经就这么漏了 1427 字的一段）。
+ */
+function blockText(block) {
+  if (typeof block?.text === 'string' && block.text) return block.text;
+  return (block?.lines || []).map((l) => {
+    if (Array.isArray(l.items)) return l.items.map((it) => String(it.text ?? '')).join('');
+    return (l.runs || []).map((r) => r[2]).join('');
+  }).join(' ');
+}
+
 /** 文字块 → 结构树节点 */
 function textNode(block, level, page, stamps) {
+  const kind = TEXT_KINDS.has(block.kind) ? block.kind : 'body';
+  const center = block.align === 'center' && CENTER_OK.has(kind)
+    && (kind !== 'caption' || captionMayCenter(blockText(block), (block.lines || []).length));
   return {
     t: 'text',
-    kind: TEXT_KINDS.has(block.kind) ? block.kind : 'body',
+    kind,
     level: level || 0,
     page: page.index,
     rect: rectOf(block),
-    align: block.align === 'center' ? 'center' : 'left',
+    align: center ? 'center' : 'left',
     bold: !!block.bold,
     col: Number.isFinite(block.column) ? block.column : -1,
     size: round(block.size, 1),
@@ -1087,6 +1128,339 @@ function collapseTableZones(page) {
   page.blocks = [...blocks.filter((b) => !consumed.has(b)), ...synth];
 }
 
+// ==================== 版面解析结果（manifest） ====================
+
+/**
+ * manifest 标签 → 阅读模式的裁图种类。
+ *
+ * 这是「先解析版面、再用版面结果重建阅读视图」的核心表：模型说是表格 / 公式 / 插图，
+ * 这里就整块裁图，一个字的规则判断都不做。规则路径最大的问题正是「判不准」——
+ * 表格被拆成一行行文字、一条四行的公式被拆成「图 + 字 + 图 + 字」，而模型给的是
+ * 一整块区域。有解析结果时，以模型为准。
+ */
+const LAYOUT_ASSET_KIND = {
+  table: 'table',
+  algorithm: 'table',      // 算法伪码：行号与缩进只有原图能表达
+  chart: 'figure',
+  image: 'figure',
+  display_formula: 'formula',
+};
+
+/** manifest 的归一化 bounds → 页内 pt 矩形（PDF 的 y 轴向上，归一化的是向下） */
+function layoutRect(bounds, page) {
+  const W = page.width || 1;
+  const H = page.height || 1;
+  const ox = page.x0 || 0;
+  const oy = page.y0 || 0;
+  const nx = Number(bounds?.x) || 0;
+  const ny = Number(bounds?.y) || 0;
+  const nw = Number(bounds?.width) || 0;
+  const nh = Number(bounds?.height) || 0;
+  return [
+    ox + nx * W,
+    oy + (1 - ny - nh) * H,
+    ox + (nx + nw) * W,
+    oy + (1 - ny) * H,
+  ];
+}
+
+/**
+ * 这一页由版面模型给出的「图表 / 表格 / 公式」区域。
+ *
+ * 公式常被框成好几段（一条写成三四行的模型公式），逐框裁还是碎图 ——
+ * 同栏、纵向相邻的公式框先并成一张。
+ */
+function layoutAssetsForPage(layout, page) {
+  const out = [];
+  const numbers = [];
+  for (const b of layout?.blocks || []) {
+    if (Number(b.page) !== page.index) continue;
+    // 公式编号 (1) 模型是单独一块。它自己既不够大也不该单独成图，先记下来，
+    // 稍后并进它上面那条公式 —— 否则重排后编号凭空消失。
+    if (b.label === 'formula_number') {
+      const r = layoutRect(b.bounds, page);
+      if (r[2] - r[0] >= 2 && r[3] - r[1] >= 2) numbers.push(r);
+      continue;
+    }
+    const kind = LAYOUT_ASSET_KIND[b.label];
+    if (!kind) continue;
+    const rect = layoutRect(b.bounds, page);
+    if (rect[2] - rect[0] < 6 || rect[3] - rect[1] < 4) continue;
+    out.push({ rect, kind, label: b.label, text: String(b.text || '') });
+  }
+  // y 向上：先处理靠上的（rect[3] 大的）
+  out.sort((a, b) => b.rect[3] - a.rect[3]);
+  const merged = [];
+  for (const item of out) {
+    if (item.kind !== 'formula') { merged.push(item); continue; }
+    const w = item.rect[2] - item.rect[0];
+    const h = item.rect[3] - item.rect[1];
+    const prev = merged.find((m) => m.kind === 'formula'
+      && Math.min(m.rect[2], item.rect[2]) - Math.max(m.rect[0], item.rect[0]) > w * 0.5
+      && m.rect[1] - item.rect[3] <= h * 1.2 + 6
+      && m.rect[1] >= item.rect[3] - h);
+    if (prev) { prev.rect = unionRect(prev.rect, item.rect); continue; }
+    merged.push({ ...item });
+  }
+  // 公式编号贴回最近的那条公式（同一栏、编号在公式右侧或正下方）
+  for (const num of numbers) {
+    const hit = merged
+      .filter((m) => m.kind === 'formula')
+      .map((m) => ({
+        m,
+        gap: Math.max(0, m.rect[1] - num[3]),          // 编号在公式下方时为正
+        overlap: Math.min(m.rect[2], num[2]) - Math.max(m.rect[0], num[0]),
+      }))
+      .filter((x) => x.overlap > 0 && x.gap < 14)
+      .sort((a, b) => a.gap - b.gap)[0];
+    if (hit) hit.m.rect = unionRect(hit.m.rect, num);
+  }
+  return merged;
+}
+
+/** a 是否把 b 整个包住（容差 2pt） */
+function containsRect(a, b, tol = 2) {
+  return a[0] <= b[0] + tol && a[1] <= b[1] + tol && a[2] >= b[2] - tol && a[3] >= b[3] - tol;
+}
+
+// ==================== 规则兜底：数字行表格 / 公式带 ====================
+
+const NUM_TOKEN = /^[-−–—]?(?:\d+[.,]?\d*|\.\d+)%?$/;
+
+/** 一行「标签 + 好几个数字」的表格行；不是这种就返回 null */
+function numericRow(b) {
+  const t = String(b.text || '').trim();
+  if (!t || t.length > 90) return null;
+  if ((b.y1 - b.y0) > 26) return null;                 // 多行块不是表格的一行
+  const tokens = t.split(/\s+/);
+  const nums = tokens.filter((x) => NUM_TOKEN.test(x)).length;
+  const chars = t.replace(/\s/g, '');
+  if (!chars.length) return null;
+  const numChars = (chars.match(/[\d.,%−–-]/g) || []).length;
+  if (nums < 3 || numChars / chars.length < 0.45) return null;
+  return { nums };
+}
+
+/** 「像表格里的标签行」：短、没有句子尾巴、不是正文 */
+function labelishRow(b) {
+  const t = String(b.text || '').trim();
+  if (!t || t.length > 40) return false;
+  if (/[.。;；]$/.test(t) && t.split(/\s+/).length > 4) return false;
+  if (b.kind === 'body' && t.split(/\s+/).length > 8) return false;
+  return !(b.y1 - b.y0 > 26);
+}
+
+/**
+ * 表格的第二道兜底：整行被抽成一块的「数字表」。
+ *
+ * collapseTableZones 认的是「一行里至少 3 个独立小块」，遇到 pdf.js 把每个单元格
+ * 并成一个文本行的表（MSE 0.001 0.03 0.003 0.05 0.014 这种）就完全看不见 ——
+ * 重排出来是一串孤零零的数字行，行列关系全丢。这里按「连续 3 行以上、每行 3 个以上
+ * 数字」判成表格区，再向上向下把紧邻的标签行（LightGBM / RF / Tr Te …）一起圈进来。
+ */
+function collapseNumericTableZones(page, bodySize = 10) {
+  const blocks = (page.blocks || []).filter((b) => b.kind !== 'furniture' && b.lines?.length);
+  if (blocks.length < 3) return;
+  const rows = blocks
+    .map((b) => ({ b, info: numericRow(b) }))
+    .filter((x) => x.info)
+    .sort((a, z) => z.b.y1 - a.b.y1);
+  if (rows.length < 3) return;
+
+  const zones = [];
+  let run = [];
+  const flush = () => { if (run.length >= 3) zones.push(run.slice()); run = []; };
+  for (const row of rows) {
+    const last = run[run.length - 1];
+    const gap = last ? last.b.y0 - row.b.y1 : 0;
+    const overlap = last
+      ? Math.min(last.b.x1, row.b.x1) - Math.max(last.b.x0, row.b.x0)
+      : 1;
+    const sameTable = last
+      ? gap <= bodySize * 2.6 && gap > -bodySize * 3
+        && overlap > Math.min(last.b.x1 - last.b.x0, row.b.x1 - row.b.x0) * 0.3
+      : true;
+    if (sameTable) run.push(row); else { flush(); run = [row]; }
+  }
+  flush();
+  if (!zones.length) return;
+
+  const consumed = new Set();
+  const flat = [];
+  for (const zone of zones) {
+    let y1 = Math.max(...zone.map((r) => r.b.y1));
+    let y0 = Math.min(...zone.map((r) => r.b.y0));
+    let x0 = Math.min(...zone.map((r) => r.b.x0));
+    let x1 = Math.max(...zone.map((r) => r.b.x1));
+    const inZone = new Set(zone.map((r) => r.b));
+    // 向上 / 向下把紧邻的标签行并进来（表头、模型名、Tr Te 这种列前缀）
+    for (const dir of ['up', 'down']) {
+      let edge = dir === 'up' ? y1 : y0;
+      for (let guard = 0; guard < 12; guard++) {
+        const next = blocks
+          .filter((b) => !inZone.has(b) && !consumed.has(b) && labelishRow(b))
+          .filter((b) => {
+            const cy = (b.y0 + b.y1) / 2;
+            if (dir === 'up' ? cy <= edge : cy >= edge) return false;
+            const gap = dir === 'up' ? edge - b.y1 : b.y0 - edge;
+            return gap <= bodySize * 2.4 && gap >= -bodySize * 1.2;
+          })
+          .filter((b) => Math.min(b.x1, x1) - Math.max(b.x0, x0) > 4)
+          .sort((a, c) => (dir === 'up' ? a.y1 - c.y1 : c.y0 - a.y0))[0];
+        if (!next) break;
+        inZone.add(next);
+        x0 = Math.min(x0, next.x0);
+        x1 = Math.max(x1, next.x1);
+        if (dir === 'up') { y1 = Math.max(y1, next.y1); edge = Math.min(edge, next.y0); }
+        else { y0 = Math.min(y0, next.y0); edge = Math.max(edge, next.y1); }
+      }
+    }
+    for (const b of inZone) consumed.add(b);
+    flat.push([x0, y0, x1, y1]);
+  }
+  if (!flat.length) return;
+
+  const synth = flat.map((rect, i) => syntheticZone(page, rect, i + 1, '数字表区（阅读模式整块裁图）'));
+  page.blocks = [...(page.blocks || []).filter((b) => !consumed.has(b)), ...synth];
+}
+
+/** 表格 / 公式区域合成块（kind=formula + tableLike，走裁图路径） */
+function syntheticZone(page, rect, n, reason, kind = 'formula') {
+  return {
+    id: `p${page.index}-tbl${n}`,
+    index: 0,
+    column: -1,
+    span: 0,
+    colX0: rect[0],
+    colX1: rect[2],
+    colWidth: rect[2] - rect[0],
+    lines: [],
+    lineCount: 0,
+    text: '',
+    rawText: '',
+    x0: rect[0], y0: rect[1], x1: rect[2], y1: rect[3],
+    width: rect[2] - rect[0],
+    height: rect[3] - rect[1],
+    size: 8,
+    lineHeight: 9,
+    align: 'left',
+    bold: false,
+    kind,
+    tableLike: true,
+    translatable: false,
+    reason,
+  };
+}
+
+const MATH_CHAR = /[=∑∏∫√±×÷≤≥≈≠∞∂∆∇α-ωΑ-Ω]/g;
+
+/**
+ * 这一行像公式而不是句子。
+ *
+ * 只在「单行、短」的块上用（见 formulaBands 的高度判据）：
+ * 正文里提一句 β1 是常事，不能因为出现一个希腊字母就把整句裁成图。
+ */
+function looksMathText(t) {
+  const raw = String(t || '').trim();
+  if (raw.length < 4 || raw.length > 90) return false;
+  const s = raw.replace(/\s+/g, '');
+  // 以运算符 / 求和号开头的行一定是续行（"∑M + γm…"、"+ δpInteract…"），
+  // 正常句子不会这么起头 —— 这条比比例判据可靠得多。
+  if (/^[=+−\-∑∏∫√±<>≤≥]/.test(s)) return true;
+  const math = (s.match(MATH_CHAR) || []).length;
+  if (!math) return false;
+  return math >= 3 || math / s.length >= 0.03;
+}
+
+/**
+ * 公式带：把「一条写成好几行」的显示公式看成一整块。
+ *
+ * 纯规则路径最典型的破相就是本函数要解决的问题：四行的嵌套模型公式，中间两行被
+ * analyze 判成 formula（→ 裁图），另两行因为字母多被判成 body（→ 排成文字），
+ * 于是重排结果是「图、字、图、字」交替，∑ 和等号被切在两张图之间。
+ * 做法：把公式块与「像公式的正文块」按栏、按纵向间距连成一条带，整条裁一张。
+ */
+function formulaBands(page, ordered, bodySize = 10) {
+  // 2.2 倍行高：被换行拆开的公式行会有将近两行的框高，卡太紧会把它们漏在带外
+  const lineH = Math.max(10, bodySize * 2.2);
+  // 分栏边界：公式带绝不能跨栏缝 —— 左右两栏同一基线上的两条公式各是各的。
+  const cols = page.columns || [];
+  const mid = cols.length === 2 ? (cols[0].x1 + cols[1].x0) / 2 : null;
+  const sideOf = (b) => {
+    if (b.column === 0 || b.column === 1) return b.column;
+    if (Number.isFinite(b.column) && b.column > 1) return 1;
+    if (mid == null) return -1;
+    return ((b.x0 + b.x1) / 2 < mid) ? 0 : 1;
+  };
+  const atoms = ordered.filter((b) => {
+    if (b.kind === 'furniture' || b.tableLike || !b.lines?.length) return false;
+    if (b.kind === 'formula') return true;
+    // 只有「单行短块」才可能是公式里的续行；整段正文里出现一个 β 不算
+    if ((b.y1 - b.y0) > lineH) return false;
+    return TEXT_KINDS.has(b.kind) && looksMathText(b.text);
+  });
+  if (atoms.length < 2) return [];
+  atoms.sort((a, b) => b.y1 - a.y1);
+  const bands = [];
+  let cur = [];
+  for (const b of atoms) {
+    const last = cur[cur.length - 1];
+    const gap = last ? last.y0 - b.y1 : 0;
+    const overlap = last ? Math.min(last.x1, b.x1) - Math.max(last.x0, b.x0) : 1;
+    const narrow = last ? Math.min(last.x1 - last.x0, b.x1 - b.x0) : 1;
+    // 只看「同一列」+「上下紧邻」：不比较 column 字段 —— 同一列里公式块与文字块的
+    // column 经常一个是 -1、一个是 1，比了反而把一条公式拆成两段。
+    // 同一行的两块（分子上的 "p=1" 和 "q=1" 分处左右）横向不重叠也是同一条公式
+    const sameLine = !!last
+      && Math.abs((last.y0 + last.y1) / 2 - (b.y0 + b.y1) / 2)
+        < Math.min(last.y1 - last.y0, b.y1 - b.y0) * 0.8;
+    const sameSide = !!last
+      && (sideOf(last) < 0 || sideOf(b) < 0 || sideOf(last) === sideOf(b));
+    const adjoining = last
+      && sameSide
+      && gap <= Math.max(18, bodySize * 2.2)
+      && gap > -bodySize * 4
+      && (overlap > narrow * 0.3 || sameLine);
+    if (adjoining) cur.push(b);
+    else { if (cur.length) bands.push(cur); cur = [b]; }
+  }
+  if (cur.length) bands.push(cur);
+
+  const area = (r) => Math.max(0, r[2] - r[0]) * Math.max(0, r[3] - r[1]);
+
+  const out = [];
+  for (const band of bands) {
+    if (band.length < 2 || !band.some((b) => b.kind === 'formula')) continue;
+    // 数字占比过半的一串「公式」其实是表格里的一列列数字（analyze 常把表体判成
+    // formula）。这种不该按公式交付，按表格交付才和用户的预期一致。
+    const chars = band.reduce((n, b) => n + String(b.text || '').replace(/\s/g, '').length, 0);
+    const digits = band.reduce(
+      (n, b) => n + (String(b.text || '').match(/[\d.,%]/g) || []).length, 0);
+    const numeric = chars > 0 && digits / chars > 0.55;
+    const item = {
+      rect: band.reduce((r, b) => unionRect(r, rectOf(b)), rectOf(band[0])),
+      blocks: band.slice(),
+      size: Math.max(0, ...band.map((b) => Number(b.size) || 0)) || bodySize,
+      kind: numeric ? 'table' : 'formula',
+    };
+    // 相邻两条带被判定切开、矩形却压在一起时并回一条，避免同一处出现两张叠着的图
+    const hit = out.find((m) => {
+      const w = Math.min(m.rect[2], item.rect[2]) - Math.max(m.rect[0], item.rect[0]);
+      const h = Math.min(m.rect[3], item.rect[3]) - Math.max(m.rect[1], item.rect[1]);
+      if (w <= 0 || h <= 0) return false;
+      return (w * h) > Math.min(area(m.rect), area(item.rect)) * 0.2;
+    });
+    if (hit) {
+      hit.rect = unionRect(hit.rect, item.rect);
+      hit.blocks.push(...item.blocks);
+      hit.size = Math.max(hit.size, item.size);
+      continue;
+    }
+    out.push(item);
+  }
+  return out;
+}
+
 // ==================== 矢量插图 ====================
 
 /** 两矩形外扩 tol 后是否相交 */
@@ -1391,8 +1765,13 @@ function isAuthorLine(b, text, idx) {
  * analyzePdf 的版面结构 → 阅读模式文档树。
  *
  * 纯函数（不碰文件系统、不读 PDF），测试可以直接喂构造的 pages 进来断言。
+ *
+ * @param {object} analysis analyzePdf 的结果
+ * @param {{layout?:object}} [opts] layout = 版面解析的 manifest（有就优先用它的区域）
  * @returns {{v:number,pages:number,blocks:object[],stats:object,warnings:string[]}}
- */export function toReadingDoc(analysis) {
+ */
+export function toReadingDoc(analysis, opts = {}) {
+  const layout = opts.layout && Array.isArray(opts.layout.blocks) ? opts.layout : null;
   const pages = Array.isArray(analysis?.pages) ? analysis.pages : [];
   const totalPages = analysis?.totalPages || pages.length;
   const bodySize = Number(analysis?.stats?.bodySize) || 0;
@@ -1406,10 +1785,18 @@ function isAuthorLine(b, text, idx) {
   const pageTops = new Map();
   for (const page of pages) pageTops.set(page.index, (page.y1 ?? page.height) - (page.height || 0) * 0.08);
 
-  const stats = { text: 0, figures: 0, tables: 0, formulas: 0, chars: 0, emptyPages: 0, footnotes: 0 };
+  const stats = { text: 0, figures: 0, tables: 0, formulas: 0, chars: 0, emptyPages: 0, footnotes: 0, layoutPages: 0 };
 
   for (const page of pages) {
-    collapseTableZones(page);
+    // 有版面解析结果的页：区域以模型为准，规则兜底（表格区 / 数字表）不再插手 ——
+    // 规则是用来补模型缺席的，两套同时上只会互相抢区域。
+    const layoutAssets = layout ? layoutAssetsForPage(layout, page) : null;
+    const layoutCovered = !!layoutAssets && layoutAssets.length > 0;
+    if (layoutCovered) stats.layoutPages++;
+    if (!layoutCovered) {
+      collapseTableZones(page);
+      collapseNumericTableZones(page, bodySize || 10);
+    }
     const pageBlocks = (page.blocks || []).filter((b) => b && b.kind !== 'furniture');
     // 出版商的封面 / 下载信息页（INFORMS 那种整页 "This article was downloaded by…"）：
     // 标题与作者在下一页还会完整出现一遍，整页跳过，免得 boilerplate 插进正文顺序里
@@ -1429,18 +1816,45 @@ function isAuthorLine(b, text, idx) {
     //    先集中收集再统一判定，是因为「图注」要跟着裁图一起处理 —— 图注的文字
     //    由裁图节点的 <figcaption> 呈现，若同时再排一遍文字块，图注会重复出现一次。
     const cands = [];
+    const consumed = new Set();
+    // 0) 版面解析给出的区域：表格 / 公式 / 插图，一律整块裁图。
+    //    这是「用版面解析结果重建阅读视图」的落点 —— 表格不再被摊成一行行文字，
+    //    四行的公式也不再被拆成「图、字、图、字」。
+    if (layoutCovered) {
+      for (const a of layoutAssets) {
+        // 表格 / 插图这里不加内边距：后面统一会 padRect(1)，加两次会多吃掉一圈邻居。
+        // 公式则要吸收矢量墨迹（分数线、根号）再多留 1.5pt。
+        const rect = a.kind === 'formula'
+          ? padRect(growWithInk(a.rect, page), 1.5, page)
+          : a.rect;
+        cands.push({ rect, kind: a.kind, block: null, layout: true });
+      }
+    }
     for (const b of ordered) {
       // 表格伪块：整块保留（表格的行列关系只有原图能表达）
       if (b.kind !== 'formula' || !b.tableLike || isTextBlock(b) || !isCropBlock(b)) continue;
+      if (layoutCovered && layoutAssets.some((a) => containsRect(a.rect, rectOf(b), 4))) continue;
       cands.push({ rect: rectOf(b), kind: 'table', block: b });
     }
-    // 公式：先按版面把碎片并成整条公式，再裁一次图。逐块裁会把同一行公式切成
-    // "PS=" / 中间那一大串 / "(1)" 三张图，小的因面积不足被丢掉，剩下的半截
-    // 再被拉满整栏 —— 就是「公式只显示一部分、还特别大」的来源。
+    // 公式带：一条公式写成好几行时，中间几行会被判成正文（字母占比高）——
+    // 单看每一块都「像文字」，连起来才是公式。整条带裁一张，这些块不再排成文字。
+    // 必须先于「逐块公式」收集：否则逐块裁出来的小图会先占位，整条带的图因为
+    // 重叠被 accepted 丢掉，而那几个文字块已经进了 consumed —— 结果是最难看的一种：
+    // 文字消失、图也没有。
+    if (!layoutCovered) {
+      for (const band of formulaBands(page, ordered, bodySize || 10)) {
+        const rect = padRect(growWithInk(band.rect, page), 1.5, page);
+        const rank = Math.min(...band.blocks.map((b) => rankOf.get(b) ?? 0));
+        cands.push({ rect, kind: band.kind || 'formula', rank, block: null, size: band.size });
+        for (const b of band.blocks) consumed.add(b);
+      }
+    }
     const formulaParts = [];
     for (const b of ordered) {
       if (b.kind !== 'formula' || b.tableLike || isTextBlock(b)) continue;
       if (!b.lines?.length) continue;
+      if (consumed.has(b)) continue;
+      if (layoutCovered && layoutAssets.some((a) => containsRect(a.rect, rectOf(b), 4))) continue;
       formulaParts.push({ rect: rectOf(b), block: b, text: String(b.text || '').trim() });
     }
     for (const g of groupEquationParts(formulaParts, page, bodySize)) {
@@ -1455,6 +1869,15 @@ function isAuthorLine(b, text, idx) {
     }
     for (const rect of vectorFigures(page, ordered.filter(isTextBlock))) {
       cands.push({ rect, kind: 'figure', block: null, vector: true });
+    }
+    // 版面已判过是图表的区域：规则再算出来的小块（图里的一条柱子、一行坐标标签）
+    // 都该被那张大图吸收，否则同一张图会被裁成「整图 + 几个碎片」。
+    if (layoutCovered) {
+      for (let i = cands.length - 1; i >= 0; i--) {
+        const c = cands[i];
+        if (c.layout) continue;
+        if (layoutAssets.some((a) => containsRect(a.rect, c.rect, 4))) cands.splice(i, 1);
+      }
     }
     // 分片存储的插图（大图切成几条、图例单独一张图）先并回整张
     cands.splice(0, cands.length, ...mergeFigureTiles(cands, bodySize));
@@ -1483,7 +1906,7 @@ function isAuthorLine(b, text, idx) {
       if (accepted.some((a) => overlapRatio(a.rect, cand.rect))) continue;
       // 图像 XObject 常被当作页底色块铺在文字下面：与正文高度重叠的不算插图。
       // 矢量插图区由 vectorFigures 自己按「簇内文字占比」判过，不再重复挡。
-      if (cand.kind === 'figure' && !cand.vector
+      if (cand.kind === 'figure' && !cand.vector && !cand.layout
         && ordered.some((b) => isTextBlock(b) && overlapRatio(rectOf(b), cand.rect, 0.3))) continue;
       accepted.push(cand);
     }
@@ -1491,7 +1914,6 @@ function isAuthorLine(b, text, idx) {
     // 图注归位：被裁图「吃掉」的图注块不再单独排成一行文字。
     // 一张图注只能归一张图 —— 同一页里上方插图和下方表格挨得近时，按「距离最近」
     // 贪心分配，否则表格会抢走上一张图的图注（figcaption 张冠李戴）。
-    const consumed = new Set();
     const pairs = [];
     for (const cand of accepted) {
       const cap = findCaption({ rect: cand.rect }, pageBlocks, page.height);
@@ -1533,6 +1955,9 @@ function isAuthorLine(b, text, idx) {
       if (decorText.has(b)) continue;              // 页顶刊名 / journal homepage
       if (b.x1 - b.x0 < MIN_TEXT_W || b.y1 - b.y0 < MIN_TEXT_H) continue;
       if (consumed.has(b)) continue;
+      // 版面说是表格 / 公式 / 插图的区域：里面的字已经画在裁图里了。
+      // 不拦这一步，表格就会被「裁一张图 + 旁边再摊一遍逐行文字」双重呈现。
+      if (layoutCovered && layoutAssets.some((a) => centerIn(b, a.rect))) continue;
       // 落在插图里的短文字（坐标轴标签、图例）已经画在裁图里了，再排一遍就是重复
       if (cropRects.some((r) => centerIn(b, r))) continue;
       // 角标（作者单位编号 1 2 3、脚注星号）：几个 pt 的数字，裁成图毫无意义
@@ -1658,11 +2083,29 @@ function isAuthorLine(b, text, idx) {
 
 // ==================== 缓存 ====================
 
-function cacheKey(filePath) {
+/** 不随版面解析结果变化的基键（清缓存时按它扫前缀） */
+function baseKey(filePath) {
   let st = null;
   try { st = fs.statSync(filePath); } catch (_) { return null; }
   const raw = `${path.resolve(filePath)}|${st.size}|${Math.round(st.mtimeMs)}|${READING_SCHEMA}`;
   return crypto.createHash('sha1').update(raw).digest('hex').slice(0, 24);
+}
+
+/**
+ * 版面解析结果的指纹。
+ *
+ * 同一篇 PDF 在「解析前 / 解析后」是**两份不同的阅读稿**（后者表格公式是整块图），
+ * 缓存必须分开存，否则用户解析完版面回到阅读模式还是旧的碎文字版本。
+ */
+function layoutSig(layout) {
+  if (!layout) return 'nl';
+  const raw = `${layout.inputSHA256 || ''}|${layout.blocks?.length || 0}|${layout.pages || 0}|${layout.schemaVersion || 0}`;
+  return crypto.createHash('sha1').update(raw).digest('hex').slice(0, 8);
+}
+
+function cacheKey(filePath, layout) {
+  const base = baseKey(filePath);
+  return base ? `${base}--${layoutSig(layout)}` : null;
 }
 
 function cachePath(key) {
@@ -1670,8 +2113,8 @@ function cachePath(key) {
 }
 
 /** 读缓存；结构版本不符或文件被替换过都算未命中 */
-export function readCachedDoc(filePath) {
-  const key = cacheKey(filePath);
+export function readCachedDoc(filePath, layout = null) {
+  const key = cacheKey(filePath, layout);
   if (!key) return null;
   try {
     const data = JSON.parse(fs.readFileSync(cachePath(key), 'utf8'));
@@ -1707,7 +2150,7 @@ const progress = new Map();
 
 /** 查询某篇的分析进度；没有在跑就返回 null（前端据此判断能不能显示进度条） */
 export function getReadingProgress(filePath) {
-  const key = cacheKey(filePath);
+  const key = baseKey(filePath);
   if (!key) return null;
   const p = progress.get(key);
   if (!p) return null;
@@ -1726,7 +2169,8 @@ export function getReadingProgress(filePath) {
  *   · 分段缓存（<key>--p1-12.json）：只算过一段时存这里，第二次打开同一段仍是秒开。
  *
  * @param {string} filePath PDF 绝对路径
- * @param {{force?:boolean, fromPage?:number, toPage?:number}} [opts]
+ * @param {{force?:boolean, fromPage?:number, toPage?:number, layoutId?:string, layout?:object, dataDir?:string}} [opts]
+ *        layoutId：文献 id，有版面解析结果时优先用它（表格 / 公式 / 插图按模型区域整块裁图）
  */
 export async function buildReadingDoc(filePath, opts = {}) {
   if (!filePath || !fs.existsSync(filePath)) {
@@ -1734,16 +2178,22 @@ export async function buildReadingDoc(filePath, opts = {}) {
     e.code = 'ENOENT_PDF';
     throw e;
   }
+  // 版面解析结果：优先用显式传入的 manifest（测试），否则按文献 id 去数据目录读
+  let layout = opts.layout && Array.isArray(opts.layout.blocks) ? opts.layout : null;
+  if (!layout && opts.layoutId) {
+    try { layout = readManifestFor(opts.dataDir || getDataDir(), opts.layoutId); } catch (_) { layout = null; }
+  }
   // 整篇缓存优先级最高：有了它，分段请求也直接给整篇（前端会一次拿全，不再续拉）
   if (!opts.force) {
-    const cached = readCachedDoc(filePath);
+    const cached = readCachedDoc(filePath, layout);
     if (cached) return { doc: cached, cached: true };
   }
   const from = Math.max(1, Math.floor(Number(opts.fromPage) || 1));
   const to = Math.max(0, Math.floor(Number(opts.toPage) || 0));
   const partial = to > 0 || from > 1;
-  const key = cacheKey(filePath) || path.resolve(filePath);
+  const key = cacheKey(filePath, layout) || path.resolve(filePath);
   const slot = partial ? `${key}--p${from}-${to || 'end'}` : key;
+  const progKey = baseKey(filePath) || key;
 
   if (running.has(slot)) {
     const doc = await running.get(slot);
@@ -1757,25 +2207,27 @@ export async function buildReadingDoc(filePath, opts = {}) {
   }
 
   const task = (async () => {
-    progress.set(key, { page: partial ? from - 1 : 0, total: 0, percent: 0, startedAt: Date.now() });
+    progress.set(progKey, { page: partial ? from - 1 : 0, total: 0, percent: 0, startedAt: Date.now() });
     try {
       const bytes = await fs.promises.readFile(filePath);
       const analysis = await analyzePdf(bytes, {
         ...(partial ? { fromPage: from, toPage: to } : {}),
         onProgress: (p) => {
-          const cur = progress.get(key);
+          const cur = progress.get(progKey);
           if (!cur) return;
           cur.page = p?.page || 0;
           cur.total = p?.total || 0;
           cur.percent = p?.percent || 0;
         },
       });
-      const doc = toReadingDoc(analysis);
+      const doc = toReadingDoc(analysis, { layout });
       doc.source = {
         name: path.basename(filePath),
         bytes: bytes.byteLength,
         generatedAt: new Date().toISOString(),
       };
+      // 前端据此判断「这篇的表格 / 公式是不是按版面解析结果给的整块图」
+      if (layout) doc.layout = { pages: Number(layout.pages) || 0, blocks: layout.blocks.length };
       if (partial) {
         const pages = Array.isArray(analysis.pages) ? analysis.pages : [];
         const firstPage = pages[0]?.index || from;
@@ -1787,7 +2239,7 @@ export async function buildReadingDoc(filePath, opts = {}) {
       else writeCacheFile(partCachePath(key, from, to), doc);
       return doc;
     } finally {
-      progress.delete(key);
+      progress.delete(progKey);
     }
   })();
   running.set(slot, task);
@@ -1799,11 +2251,30 @@ export async function buildReadingDoc(filePath, opts = {}) {
   }
 }
 
-/** 清掉某篇的缓存（PDF 被替换 / 用户手动重排时用） */
+/**
+ * 清掉某篇的缓存（PDF 被替换 / 用户手动重排 / 版面解析刚跑完时用）。
+ * 一篇可能同时存在「无版面结果」与「有版面结果」两份稿，按基键前缀一并清掉。
+ */
 export function dropCachedDoc(filePath) {
-  const key = cacheKey(filePath);
-  if (!key) return false;
-  try { fs.rmSync(cachePath(key), { force: true }); return true; } catch (_) { return false; }
+  const base = baseKey(filePath);
+  if (!base) return false;
+  let ok = false;
+  try {
+    for (const name of fs.readdirSync(readingCacheDir())) {
+      if (!name.startsWith(base)) continue;
+      try { fs.rmSync(path.join(readingCacheDir(), name), { force: true }); ok = true; } catch (_) { /* 单个失败不影响其余 */ }
+    }
+  } catch (_) { /* 目录不存在 = 本来就没缓存 */ }
+  return ok;
+}
+
+/** 某篇（含版面解析状态）的缓存文件键；外部写回精修结果时用 */
+export function readingCacheKeyFor(filePath, layoutId) {
+  let layout = null;
+  if (layoutId) {
+    try { layout = readManifestFor(getDataDir(), layoutId); } catch (_) { layout = null; }
+  }
+  return cacheKey(filePath, layout);
 }
 
 /** 首屏先算多少页。12 页足够铺满几屏，也足够让页眉页脚的「跨页重复」判定有样本 */
@@ -1835,7 +2306,8 @@ export function registerReadingRoutes(app, deps) {
       const item = store.listLiterature().find((x) => x.id === body.literatureId);
       if (!item) return { error: '找不到该文献' };
       if (!item.filePath || !fs.existsSync(item.filePath)) return { error: '该文献没有 PDF 附件，或附件已丢失' };
-      return { path: item.filePath, name: item.originalName || item.filename || 'paper.pdf' };
+      // id 一并带出去：阅读稿要按它去找版面解析结果（<dataDir>/layout/<id>/manifest.json）
+      return { path: item.filePath, name: item.originalName || item.filename || 'paper.pdf', id: item.id };
     }
     if (body?.fileName) {
       const safe = path.basename(String(body.fileName));
@@ -1856,6 +2328,7 @@ export function registerReadingRoutes(app, deps) {
       const toPage = Number(req.body?.toPage) || 0;
       const { doc, cached } = await buildReadingDoc(found.path, {
         force: !!req.body?.force,
+        layoutId: found.id,
         ...(fromPage || toPage ? { fromPage: fromPage || 1, toPage } : {}),
       });
       // 整篇都没有文字层（纯扫描件）：明确告诉前端「这个模式救不了」，别让它显示空白
@@ -1889,7 +2362,7 @@ export function registerReadingRoutes(app, deps) {
     const found = resolve(req.body);
     if (found.error || !/\.pdf$/i.test(found.path)) return res.json({ ok: false });
     try {
-      const { doc, cached } = await buildReadingDoc(found.path, { force: false, fromPage: 1, toPage: FIRST_PAGES });
+      const { doc, cached } = await buildReadingDoc(found.path, { force: false, fromPage: 1, toPage: FIRST_PAGES, layoutId: found.id });
       res.json({ ok: true, cached, blocks: doc.blocks.length });
     } catch (e) {
       res.json({ ok: false, error: String(e?.message || e) });
@@ -1913,13 +2386,13 @@ export function registerReadingRoutes(app, deps) {
     if (found.error) return res.status(400).json({ error: found.error });
     if (!/\.pdf$/i.test(found.path)) return res.status(400).json({ error: '阅读模式目前只支持 PDF' });
     try {
-      const { doc } = await buildReadingDoc(found.path, {});
+      const { doc } = await buildReadingDoc(found.path, { layoutId: found.id });
       if (doc.ai && !req.body?.force) {
         return res.json({ ok: true, cached: true, doc, summary: doc.ai, model: doc.ai.model || '' });
       }
       const settings = store?.getSettings ? store.getSettings() : {};
       const out = await refineReadingDoc(doc, settings, {});
-      const key = cacheKey(found.path);
+      const key = readingCacheKeyFor(found.path, found.id);
       if (key) writeCacheFile(cachePath(key), out.doc);
       res.json({ ok: true, cached: false, doc: out.doc, summary: out.summary, model: out.model || '' });
     } catch (e) {

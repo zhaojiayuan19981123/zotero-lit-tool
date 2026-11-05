@@ -22,7 +22,13 @@ let pdfjsModule = null;
 
 async function loadPdfJs() {
   if (pdfjsModule !== null) return pdfjsModule;
-  const specs = ['pdfjs-dist', 'pdfjs-dist/legacy/build/pdf.mjs', 'pdfjs-dist/build/pdf.mjs', 'unpdf'];
+  // 顺序有讲究：Node / Electron 主进程里**必须优先用 legacy 构建**。
+  // 标准构建在 Node 下会打印 "Please use the `legacy` build in Node.js environments"，
+  // 更糟的是它对 FlateDecode 走 node:zlib 的流式解压，同一份 PDF 被解析两次（例如
+  // 阅读稿先生成一遍、有了版面解析结果再重建一遍）时会抛
+  // ERR_TRAILING_JUNK_AFTER_STREAM_END —— 这是**未被捕获的 Promise 拒绝**，会直接把
+  // 后端进程带走。legacy 构建用纯 JS 的 inflate，没有这条路径。
+  const specs = ['pdfjs-dist/legacy/build/pdf.mjs', 'pdfjs-dist', 'pdfjs-dist/build/pdf.mjs', 'unpdf'];
   for (const spec of specs) {
     try {
       const m = await import(spec);

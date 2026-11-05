@@ -78,6 +78,7 @@
     rendering: false,
     renderRaf: 0,
     pendingScrollPage: null, // 渲染未完成时请求跳页 → 补完再跳
+    pendingScrollBlock: null, // 同上，按「原页 + 文字」定位的块
     scrollRaf: 0,
     page: 1,
     noteSeq: 0,
@@ -247,6 +248,9 @@
     if (block.caption) {
       const cap = document.createElement('figcaption');
       cap.textContent = block.caption;
+      // 长图注按左对齐段落排（与正文一致）；只有一行短图题才居中，
+      // 否则「Figure 8. 后面跟三句话」会整段浮在栏中间。
+      if (String(block.caption).trim().length > 90) cap.classList.add('rm-cap-long');
       fig.appendChild(cap);
     }
     return fig;
@@ -391,6 +395,7 @@
 
   /** 首屏之后逐帧补齐；补完再处理「挂载时就想跳页」的请求 */
   function scheduleNextChunks() {
+    flushPendingBlock();
     if (state.renderIndex >= state.blocks.length) {
       state.rendering = false;
       state.renderRaf = 0;
@@ -398,6 +403,7 @@
       if (state.pendingScrollPage != null) {
         const target = state.pendingScrollPage;
         state.pendingScrollPage = null;
+    state.pendingScrollBlock = null;
         scrollToPage(target);
       }
       return;
@@ -409,6 +415,17 @@
       state.hooks.onRenderProgress?.(state.renderIndex, state.blocks.length);
       scheduleNextChunks();
     });
+  }
+
+  /** 目标块已经铺好了就立刻滚过去（分帧渲染期间可能晚几帧才轮到它） */
+  function flushPendingBlock() {
+    const id = state.pendingScrollBlock;
+    if (!id) return;
+    const el = state.byId.get(id);
+    if (!el) return;
+    state.pendingScrollBlock = null;
+    scrollToEl(el);
+    flashBlock(el);
   }
 
   function render(options = {}) {
@@ -903,6 +920,74 @@
     return true;
   }
 
+  /** 归一化一段文字：去掉所有空白，只比「前十几个字」。中英混排也能对上。 */
+  function normKey(t) {
+    return String(t || '').replace(/\s+/g, '').toLowerCase();
+  }
+
+  /** 块在本页的「顶部」坐标（PDF 坐标，向上为正）：裁图用 bbox 上沿，文字用首行 */
+  function topOfBlockOnPage(b, pg) {
+    if (b.t === 'crop') return b.page === pg ? b.rect[3] : NaN;
+    const lines = (b.lines || []).filter((l) => l.p === pg);
+    return lines.length ? Math.max(...lines.map((l) => l.y1)) : NaN;
+  }
+
+  /**
+   * 按「原页 + 纵向位置 + 文字」定位到重排视图里的那一段。
+   *
+   * 对照精读左侧目录、批注列表点过来时手里只有 PDF 的页码与坐标，而重排视图是另一套
+   * 块 id（r1…rN），两边没有任何共享 id —— 以前这种情况会把已经隐藏的 PDF 页滚一下，
+   * 用户看到的就是「点了没反应」。这里按「同页 + 文字前缀」先认，认不出再按纵向位置取最近。
+   */
+  function scrollToSource(info = {}) {
+    const pg = Number(info.page) || 0;
+    if (!pg || !state.blocks.length) return false;
+    const want = normKey(info.text);
+    const wantHead = want.slice(0, 16);
+    let y = Number(info.y);
+    // 调用方手里常是「归一化的 y（从页顶算）」—— 换算成 PDF 的 y（向上为正）
+    if (!(y > 0)) {
+      const ny = Number(info.ny);
+      const h = pageHeight(pg);
+      if (Number.isFinite(ny) && h) y = h * (1 - ny);
+    }
+    let best = null;
+    let bestScore = -Infinity;
+    state.blocks.forEach((b, i) => {
+      const top = topOfBlockOnPage(b, pg);
+      if (!Number.isFinite(top)) return;
+      let score = 0;
+      if (wantHead && b.t === 'text') {
+        const have = normKey(b._text).slice(0, 16);
+        if (have && (have.startsWith(wantHead.slice(0, 8)) || wantHead.startsWith(have.slice(0, 8)))) score += 20;
+      }
+      if (Number.isFinite(y) && y > 0) score -= Math.abs(top - y) / 20;
+      // 同分时往前取（目录标题多半就是那一段的开头），序号越小越靠前
+      score -= i * 1e-6;
+      if (score > bestScore) { bestScore = score; best = b; }
+    });
+    if (!best) return false;
+    const el = state.byId.get(best.id);
+    if (!el) {
+      // 分帧渲染还没轮到这一块：记下来，铺到它时再跳
+      state.pendingScrollBlock = best.id;
+      if (!state.rendering) render();
+      return true;
+    }
+    scrollToEl(el);
+    flashBlock(el);
+    return true;
+  }
+
+  /** 跳过去之后闪一下，明确告诉用户「就是这一段」 */
+  function flashBlock(el) {
+    if (!el) return;
+    el.classList.remove('rm-flash');
+    void el.offsetWidth;           // 强制重排，连点同一段也要能重放
+    el.classList.add('rm-flash');
+    setTimeout(() => el.classList.remove('rm-flash'), 1400);
+  }
+
   /** 滚动时把当前页回传给调用方（更新页码输入框 / 侧栏） */
   function onScroll() {
     if (state.scrollRaf) return;
@@ -1155,6 +1240,7 @@
     currentPage,
     scrollToPage,
     scrollToBlock,
+    scrollToSource,
     focusBlock,
     get doc() { return state.doc; },
     get typography() { return state.typo; },

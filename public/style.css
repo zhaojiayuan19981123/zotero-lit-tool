@@ -1770,6 +1770,13 @@ mark.anno-c-purple { color: var(--primary); background: none; }
 }
 /* 译文块点回原文时的定位闪烁 */
 .rm-block.rm-focus { outline: 2px solid var(--primary); outline-offset: 3px; border-radius: 3px; background: var(--primary-soft); transition: background .3s; }
+/* 从左侧目录 / 批注跳过来时闪一下：不给反馈的话，长文档里看不出「跳到哪了」 */
+.rm-block.rm-flash, .rm-crop.rm-flash { animation: rm-flash 1.4s ease-out; border-radius: 4px; }
+@keyframes rm-flash {
+  0% { background: var(--primary-soft); box-shadow: 0 0 0 4px var(--primary-soft); }
+  60% { background: var(--primary-soft); box-shadow: 0 0 0 4px var(--primary-soft); }
+  100% { background: transparent; box-shadow: 0 0 0 4px transparent; }
+}
 .rm-bar {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 7px 14px; background: var(--surface); border-bottom: 1px solid var(--border-soft);
@@ -1816,7 +1823,9 @@ mark.anno-c-purple { color: var(--primary); background: none; }
 /* 对齐策略（默认 body）：只有正文段落两端对齐，标题/作者/关键词/脚注/图注各按纸面习惯。
    之前 .rm-column 一把 justify 扣到底，短标题和关键词都被拉出夸张词间距。 */
 .pr-reading[data-rm-align="body"] .rm-column > :not(p[data-kind="body"]) { text-align: left; hyphens: manual; }
-.pr-reading[data-rm-align="body"] .rm-column > p[data-kind="caption"],
+/* 图注不再一律居中：长图注（Figure 8. + 若干句说明）在纸面上是左对齐的段落，
+   强制居中会整段浮在栏中间，和上下文完全脱节。只有结构树标了 align=center 的
+   短图题才居中 —— 那就是下面的 .rm-center。 */
 .pr-reading[data-rm-align="body"] .rm-column > .rm-center { text-align: center; }
 .pr-reading[data-rm-align="all"] .rm-column > * { text-align: justify; hyphens: auto; }
 .pr-reading[data-rm-align="left"] .rm-column > * { text-align: left; hyphens: manual; }
@@ -1854,7 +1863,12 @@ mark.anno-c-purple { color: var(--primary); background: none; }
 .rm-column h3 { font-size: 1.06em; margin-top: 1.3em; }
 .rm-column h4, .rm-column h5 { font-size: 1em; margin-top: 1.15em; }
 .rm-column > h1:first-child, .rm-column > h2:first-child { margin-top: 0; }
-.rm-block[data-kind="caption"] { text-align: center; font-size: .86em; color: var(--text-2); }
+/* 图注：字号与颜色固定，**对齐交给块自己的 align**。
+   早年这里写死 text-align:center，结果「Figure 8. + 三五句说明」这种长图注整段浮在
+   中间，和正文完全脱节 —— 期刊版面上的图注其实是左对齐/两端对齐的，只有一行的图题
+   才居中。居中由结构树里的 align（captionMayCenter）决定，这里不再强加。 */
+.rm-block[data-kind="caption"] { font-size: .86em; color: var(--text-2); }
+.rm-block[data-kind="caption"].rm-center { text-align: center; }
 .rm-block.rm-ref {
   font-size: .92em; color: var(--text-2); text-align: left;
   padding-left: 1.5em; text-indent: -1.5em;
@@ -1876,6 +1890,7 @@ mark.anno-c-purple { color: var(--primary); background: none; }
 .rm-crop-canvas { display: block; width: 100%; height: auto; }
 .rm-crop-ph { font-size: 12px; letter-spacing: .1em; color: var(--text-3); }
 .rm-crop figcaption { margin-top: 7px; font-size: .82em; line-height: 1.55; color: var(--text-2); text-align: center; }
+.rm-crop figcaption.rm-cap-long { text-align: left; }
 /* 高亮 / 下划线 / 笔记：与 PDF 视图共用同一份批注数据，这里只是另一种呈现 */
 .rm-hl { border-radius: 2px; cursor: pointer; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
 .rm-underline {
