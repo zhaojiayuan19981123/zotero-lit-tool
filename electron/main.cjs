@@ -443,7 +443,10 @@ function verifyDataDir(dir) {
 // 动态加载 ESM 后端（server.js），启动 Express，返回端口
 async function startBackend() {
   const serverEntry = path.join(__dirname, '..', 'server.js');
-  const { startServer } = await import(pathToFileURL(serverEntry).href);
+  const { startServer, installPdfCrashGuard } = await import(pathToFileURL(serverEntry).href);
+  // 某些 PDF 的压缩流尾部挂着垃圾字节，zlib 会在回调里抛（抛点在 pdf.js 之外），
+  // 变成未处理的 Promise 拒绝。桌面版在入口装一道保护，别让整站失联。
+  installPdfCrashGuard?.();
 
   const userData = app.getPath('userData');
   const defaultDataDir = resolveDefaultDataDir(userData);

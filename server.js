@@ -58,23 +58,35 @@ const DEFAULT_UPLOAD_DIR = path.join(__dirname, 'uploads');
 // Node 的默认行为是**结束进程**。用户只是把同一篇论文又打开了一次（对照精读一次、
 // 阅读模式一次），后端就没了，界面上表现为整站失联。
 // pdf.js 对这种流是能继续解析的（只是丢掉那截尾巴），所以这类错误记录一次后忽略。
+//
+// ⚠️ 只允许在**进程入口**安装（CLI 启动 / Electron 主进程）。不要在模块加载时就装：
+// `node --test` 会给每个测试文件起子进程，测试里冒出的未处理拒绝本来由测试运行器
+// 归到具体用例上；一旦模块加载期就加了监听并调用 process.exit，整轮测试会被直接杀掉，
+// CI 上表现为「Run tests」失败而看不出是哪条（v1.37.0 第一次发版就撞上了）。
 let warnedZlibJunk = false;
 function isZlibJunk(reason) {
   const code = String(reason?.code || '');
   return code === 'ERR_TRAILING_JUNK_AFTER_STREAM_END' || code.startsWith('ERR_ZLIB_');
 }
-process.on('unhandledRejection', (reason) => {
-  if (isZlibJunk(reason)) {
-    if (!warnedZlibJunk) {
-      warnedZlibJunk = true;
-      console.warn('[pdf] 忽略压缩流尾部冗余（该 PDF 仍可正常解析）：', reason?.message || reason?.code);
+
+/** 安装「PDF 压缩流尾部冗余不拖垮进程」的保护；只应由进程入口调用，可重复调用 */
+export function installPdfCrashGuard() {
+  if (installPdfCrashGuard.installed) return;
+  installPdfCrashGuard.installed = true;
+  process.on('unhandledRejection', (reason) => {
+    if (isZlibJunk(reason)) {
+      if (!warnedZlibJunk) {
+        warnedZlibJunk = true;
+        console.warn('[pdf] 忽略压缩流尾部冗余（该 PDF 仍可正常解析）：', reason?.message || reason?.code);
+      }
+      return;
     }
-    return;
-  }
-  // 其余未处理拒绝保持原来的「打印 + 退出」语义，别把真正的 bug 吞掉
-  console.error('[未处理的 Promise 拒绝]', reason);
-  process.exit(1);
-});
+    // 其余未处理拒绝保持原来的语义：没有别的监听者时按 Node 默认「抛出并终止」，
+    // 有的话（Electron 自己会装）就交给它们，别把真正的 bug 吞掉。
+    if (process.listenerCount('unhandledRejection') > 1) return;
+    process.nextTick(() => { throw reason; });
+  });
+}
 
 // ---------- 中文文件名编码修复 ----------
 // multer/busbboy 按 latin1 解码 multipart 的 filename，导致中文变成 "ç..." 乱码。
@@ -4789,6 +4801,7 @@ export async function startServer(options = {}) {
 // ---------- CLI 独立运行 ----------
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
+  installPdfCrashGuard();
   const port = Number(process.env.PORT) || 3000;
   startServer({ port, startGateway: true }).then(({ port: p }) => {
     console.log('');

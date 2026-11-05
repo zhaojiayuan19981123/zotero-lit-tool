@@ -68,15 +68,27 @@ v1.36 之前阅读模式是**纯规则**重建：`analyzePdf` 的块 → 规则�
 
 - `src/pdfTranslate/analyze.js`：`loadPdfJs()` 规格顺序改为 **legacy 优先**（Node 下官方推荐），
   顺带消掉那条 `Please use the legacy build` 警告。
-- `server.js`：对 `ERR_TRAILING_JUNK_AFTER_STREAM_END` / `ERR_ZLIB_*` 单独放行（只记一次警告），
-  其余未处理拒绝仍按原样打印并退出。
+- `server.js`：新增导出 `installPdfCrashGuard()`，对 `ERR_TRAILING_JUNK_AFTER_STREAM_END` /
+  `ERR_ZLIB_*` 单独放行（只记一次警告），其余未处理拒绝仍按 Node 默认抛出。
+  **只由进程入口调用**（CLI 的 `isMain` 分支、`electron/main.cjs` 的 `startBackend()`）。
+
+  第一版是「模块加载时就 `process.on('unhandledRejection')` + 非白名单直接 `process.exit(1)`」，
+  结果 Windows CI 的 `Run tests` 红了：`node --test` 给每个测试文件起子进程，测试里冒出来的
+  未处理拒绝本来由运行器归到具体用例（甚至只是收尾噪声），被监听器抢走后整轮进程直接退出。
+  本地 Node 20.10 / 20.19 / 22.22 都复现不出来（时序差异），所以现在的约束是：
+  **任何「改变进程级行为」的东西都不许在模块加载期安装**，且加了 `test/pdf-crash-guard.test.mjs`
+  守住这条线。
+- `.github/workflows/release.yml`：`npm test` 改成 `shell: bash` + `tee test-output.log`，
+  失败时再跑一步把 `not ok` / `AssertionError` 摘成 `::error::` 注解 —— 作业日志只有仓库管理员
+  能下载，注解是公开可读的，以后 CI 红了不用再靠猜。
 
 ### 六、测试
 
-- `node --test` **681 / 681**（Node 20.10 与 Node 22.22 各跑一次；v1.36.0 为 673）。
-  新增 8 项：版面表格 → 一张表图；版面两段公式 → 并成一张；规则路径四行公式 → 一张且中间行
+- `node --test` **683 / 683**（Node 20.19 / 20.10 / 22.22 各跑一次；v1.36.0 为 673）。
+  新增 10 项：版面表格 → 一张表图；版面两段公式 → 并成一张；规则路径四行公式 → 一张且中间行
   不进正文；连续 4 行数字 → 一张表图且无残留文字；正文 `align:'center'` → `left`；标题/作者
-  居中保留；多行图注 → `left`；一行短图题 → `center`。
+  居中保留；多行图注 → `left`；一行短图题 → `center`；另两项守 `installPdfCrashGuard`
+  （导入 server.js 不得改动全局未处理拒绝监听、装上后 zlib 尾部冗余不结束进程）。
 - 浏览器全量回归 **75 / 75**（隔离数据实例）。
 - 阅读模式专项真机 **14 / 14**：第 8 页四行公式 1 张图（`rect=355.4,57.2,567.7,199.7`）、
   版面路径 `x0=308.98`、长段落居中 0、`scrollToSource` 使 `scrollTop 30 → 15045` 且命中

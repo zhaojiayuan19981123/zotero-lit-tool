@@ -26,7 +26,21 @@ jobs:
         run: npm ci
 
       - name: Run tests
-        run: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.log
+
+      # 作业日志只有仓库管理员能下载；注解是公开可读的，把失败的用例摘成注解发出去，
+      # 这样在没登录的机器上也能看出是哪一条挂了（v1.37.0 第一次发版就卡在这里）。
+      - name: Annotate test failures
+        if: failure()
+        shell: bash
+        run: |
+          grep -E "^not ok |^# fail |AssertionError|Error:|error:" test-output.log | tail -25 | while IFS= read -r line; do
+            echo "::error::${line//$'\r'/}"
+          done
+          exit 1
 
       - name: Build Windows installer
         run: npx electron-builder --win --publish never
