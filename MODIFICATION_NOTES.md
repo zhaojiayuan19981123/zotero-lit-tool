@@ -1,3 +1,54 @@
+## v1.38.0：搜索输入不再卡顿（base64 缩略图 / 四遍搜索 / 同步渲染）、选中文献导出 PDF（2026-11-06）
+
+> 用户反馈：「搜索文献的搜索逻辑，首先，用户在输入的时候，会存在输入卡顿，就是在搜索框里打字的时候，
+> 打字动作发生到看见字，中间延时很长，同时删除也是一样，按下删除键到真正删除字的时候延时很长」
+> 「选中文献后，支持导出 pdf，就是将选中的几个pdf再下载一遍，便于分享」。
+
+### 一、输入卡顿：三个叠加的根因
+
+1. **`thumb` 字段是被当正文搜的 base64**（`public/lib-search.js`）
+   记录里的 `thumb` 是 `data:image/jpeg;base64,…`，单条平均 1.9 万字符、最长 2.6 万。
+   `fields()` 无白名单地遍历所有字符串字段 → 每按一个键，每条记录都要把这串 base64 从头扫到尾，
+   精确匹配不到还要走 `fuzzyIn()`（逐位锚点 + 编辑距离）。副作用还有**假命中**：
+   base64 里凑巧出现的 `a` / `tr` 会让"搜短词出来一堆不相关文献"。
+   - `SKIP_KEYS` 增补 `thumb` / `thumbnail` / `cover` / `avatar` / `preview`；
+   - 新增 `isBlob()`：凡 `data:` / `blob:` 开头、或超长且像 base64 的值，**不依赖字段名**一律不参与匹配；
+   - `fields()` 结果按记录对象存 `WeakMap`，`resetCache()` 供 `loadItems()` 调用。
+2. **一次按键跑了四遍搜索**（`public/app.js`）
+   `render()` 里 `renderHead()` / `renderBody()` / `renderBulkBar()` 各调一次 `filteredItems()`，
+   `render()` 自己又调一次 —— 四次「全库过滤 + 相关性排序」。改为 `render()` 算一次、往下传
+   （三个函数签名加可选 `list` 参数，不传时仍自行计算，向后兼容）。
+3. **同步渲染挡住了字符上屏**（`public/app.js`）
+   `input` 回调里直接 `render()`，主线程被占用期间浏览器画不出输入框里的新字符。
+   改为防抖：`input` 只同步「×」按钮状态并 `setTimeout(render, 110)`；
+   `compositionstart/end` 期间不渲染（中文输入法拼音阶段不跑全库搜索）；
+   Esc / 清空按钮走 `flushSearch()` 立即渲染。
+
+### 二、容错匹配收口（`public/lib-search.js`）
+
+`hit(text, token, allowFuzzy)` 增加第三个参数；`score()` 只对**权重 ≥ 3** 的字段开容错
+（标题/关键词/作者/期刊/年份/研究问题…），摘要/研究空白这类长文本只做精确子串；
+单字段超过 `FUZZY_TEXT_MAX = 4000` 字符不参与容错扫描。拼写容错的能力保留在用户真正用来
+定位的字段上，"摘要里拼错一个字母"不再触发全文编辑距离计算。
+
+### 三、选中文献 → 导出 PDF
+
+- 服务端 `POST /api/literature/export-pdfs`（`server.js`，复用 `src/zip.js` 的 `createZip`）：
+  单篇 → `application/pdf` + 标题命名；多篇 → `文献原文-YYYY-MM-DD.zip`，条目名用标题、
+  同名 `uniqueName()` 加 `(2)`；中文名带 UTF-8 标志位（`0x0800`）。
+  没有附件 / 不是 PDF / 文件已丢失 → 计入 `X-Skipped-Count` 跳过；合计 > 800 MB → 413 提示分批。
+- 前端（`public/index.html` 批量栏 + `public/app.js`）：新增「导出 PDF」按钮与 `exportSelectedPdfs()`；
+  按钮点击期间禁用并显示「打包中…」；按 `Content-Disposition` 取名，toast 汇报导出/跳过篇数。
+
+### 四、验证
+
+- `node --test --test-concurrency=1` **692 / 692**（Node 20.10 与 Node 22.22 各一次；v1.37.0 为 683）。
+  新增 9 项：`lib-search` 4 项、`export-pdfs` 5 项（多篇 zip / 单篇 PDF / 同名去重 / 缺附件跳过 / 空选报错）。
+- 浏览器全量回归 **75 / 75**（隔离数据实例，含「无 JS 运行时错误」）。
+- 专项真机 **13 / 13**（Playwright + 真实数据 30 篇 / 65 万字符）：
+  单次按键阻塞 30–58 ms → **0.1 ms**；连打 11 字 1669 ms → **343 ms**；11 次退格 1542 ms → **15 ms**；
+  打字期间长任务 11 次 → **0 次**；多篇导出 zip 3 个 PDF / 6.3 MB / 中文条目名正确；单篇直接给 PDF。
+
 ## v1.37.0：阅读模式吃上版面解析结果、表格/公式整块原图、正文与长图注不再居中、目录跳转（2026-11-05）
 
 > 用户反馈（三张截图：表格被摊成一行行文字、一段短文字浮在栏中间、四行公式被拆成「图、字、图、字」）：
