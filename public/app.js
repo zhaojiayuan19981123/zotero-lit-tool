@@ -518,6 +518,7 @@
 
   async function loadItems() {
     items = await api('/api/literature');
+    window.LibSearch?.resetCache?.();   // 记录是整批换新对象，字段缓存跟着清掉
     window.ReadingHeat?.sync(items);   // 服务端热力与本地离线缓存取较大值
     render();
   }
@@ -775,8 +776,11 @@
   }
 
   function render() {
-    renderHead(); renderBody(); renderBulkBar();
+    // filteredItems() 里是一次完整的「过滤 + 打分排序」，之前 renderHead / renderBody /
+    // renderBulkBar 各调一次、render 自己再调一次 —— 一次按键要跑四遍。现在只算一遍，
+    // 结果往下传（列表页最常见的操作就是打字，这一下省掉 3/4 的搜索开销）。
     const scope = filteredItems();
+    renderHead(scope); renderBody(scope); renderBulkBar(scope);
     const done = scope.filter((i) => i.status === 'done').length;
     const libName = lib.collectionId
       ? collections.find((c) => c.id === lib.collectionId)?.name || '分类'
@@ -794,10 +798,10 @@
   // ============ 批量选择 ============
   // 选中集合跨分类/筛选保留（用户勾选后再切 tab，勾选不会莫名丢失）；
   // 但渲染时只反映当前可见列表的选中情况。
-  function renderBulkBar() {
+  function renderBulkBar(list) {
     if (!el.bulkBar) return;
-    const list = filteredItems();
-    const visiblePicked = list.filter((i) => selectedIds.has(i.id)).length;
+    const scope = list || filteredItems();
+    const visiblePicked = scope.filter((i) => selectedIds.has(i.id)).length;
     el.bulkBar.classList.toggle('hidden', selectedIds.size === 0);
     if (el.bulkCount) el.bulkCount.textContent = String(selectedIds.size);
     if (el.bulkHint) {
@@ -810,7 +814,7 @@
   function invertVisible() { filteredItems().forEach((i) => { if (selectedIds.has(i.id)) selectedIds.delete(i.id); else selectedIds.add(i.id); }); render(); }
   function clearSelection() { selectedIds.clear(); render(); }
 
-  function renderHead() {
+  function renderHead(list) {
     const cols = buildColumns();
     // table-layout: fixed + colgroup：列宽完全由用户设置（可放大也可缩小，不受内容撑开）
     const grid = el.theadRow.closest('table');
@@ -824,9 +828,9 @@
     colgroup.innerHTML = widths.map((w) => `<col style="width:${w}px" />`).join('');
     grid.style.width = widths.reduce((a, b) => a + b, 0) + 'px';
     // 表头复选框反映当前「已选中 / 全选 / 半选」状态
-    const list = filteredItems();
-    const picked = list.filter((i) => selectedIds.has(i.id)).length;
-    const allChecked = list.length > 0 && picked === list.length;
+    const scope = list || filteredItems();
+    const picked = scope.filter((i) => selectedIds.has(i.id)).length;
+    const allChecked = scope.length > 0 && picked === scope.length;
     const indeterminate = picked > 0 && !allChecked;
     el.theadRow.innerHTML =
       `<th class="cell-check"><input type="checkbox" id="chkAll" title="全选 / 取消全选当前列表"${allChecked ? ' checked' : ''} /></th>` +
@@ -847,11 +851,11 @@
     }[t] || '⃝';
   }
 
-  function renderBody() {
-    const list = filteredItems();
+  function renderBody(list) {
+    const scope = list || filteredItems();
     const cols = buildColumns();
     el.tbody.innerHTML = '';
-    el.emptyState.classList.toggle('hidden', list.length > 0);
+    el.emptyState.classList.toggle('hidden', scope.length > 0);
     // 搜索无结果 ≠ 文库是空的，两种空状态要说不一样的话，否则用户会以为文献丢了
     const searching = !!searchQuery();
     const emptyTitle = el.emptyState?.querySelector('p');
@@ -862,8 +866,8 @@
         ? '搜索覆盖标题、作者、关键词、摘要以及该文库的全部字段，且支持模糊匹配；试试更短的词或清空搜索框'
         : '点击「批量上传 PDF」或把 PDF 直接拖入窗口；也可拖动行到上方分类进行归类';
     }
-    if (!list.length) return;
-    list.forEach((it, idx) => {
+    if (!scope.length) return;
+    scope.forEach((it, idx) => {
       const tr = document.createElement('tr');
       tr.dataset.id = it.id;
       tr.draggable = true;
@@ -1263,6 +1267,53 @@
     const ids = [...selectedIds];
     if (ids.length < (minCount || 1)) { toast('请先勾选要操作的文献', 'error'); return null; }
     return ids;
+  }
+
+  /**
+   * 导出选中文献的 PDF 原文（分享 / 备份用）。
+   *
+   * 一篇 → 直接下载 PDF；多篇 → 后端打成一个 zip（浏览器对「一次触发多个下载」会拦截，
+   * 所以必须打包成一个文件，不能循环 a.click()）。没有附件的记录由后端跳过，
+   * 这里提前按本地已知的 filePath 给出提示，免得用户以为漏了几篇。
+   */
+  async function exportSelectedPdfs() {
+    const picked = items.filter((i) => selectedIds.has(i.id));
+    if (!picked.length) { toast('请先勾选要导出的文献', 'error'); return; }
+    const withPdf = picked.filter((i) => i.filePath && /\.pdf$/i.test(i.filePath));
+    if (!withPdf.length) { toast('选中的文献都没有 PDF 附件', 'error'); return; }
+
+    const btn = $('btnBulkExportPdf');
+    const label = btn?.innerHTML;
+    if (btn) { btn.disabled = true; btn.textContent = '打包中…'; }
+    try {
+      const res = await fetch('/api/literature/export-pdfs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: picked.map((i) => i.id) }),
+      });
+      if (!res.ok) {
+        const msg = await res.json().catch(() => ({}));
+        throw new Error(msg.error || '导出失败');
+      }
+      const blob = await res.blob();
+      // 文件名以后端给的为准（多篇是带日期的 zip 名），取不到再本地拼一个
+      const disp = res.headers.get('Content-Disposition') || '';
+      const matched = /filename\*=UTF-8''([^;]+)/i.exec(disp);
+      const single = withPdf.length === 1;
+      const fallback = single
+        ? `${(withPdf[0].title || '文献').replace(/[\\/:*?"<>|]/g, '_').slice(0, 100)}.pdf`
+        : `文献原文-${new Date().toISOString().slice(0, 10)}.zip`;
+      let filename = fallback;
+      if (matched) { try { filename = decodeURIComponent(matched[1].trim()); } catch (_) { /* 用兜底名 */ } }
+      downloadBlob(blob, filename);
+      const exported = Number(res.headers.get('X-Exported-Count') || withPdf.length);
+      const missing = picked.length - exported;
+      toast(`已导出 ${exported} 篇 PDF${missing > 0 ? `（${missing} 篇没有附件，已跳过）` : ''}`, 'success');
+    } catch (e) {
+      toast('导出失败：' + (e.message || e), 'error');
+    } finally {
+      if (btn) { btn.disabled = false; if (label) btn.innerHTML = label; }
+    }
   }
 
   // 批量删除：真实删除记录 + 各自的 PDF 文件，删完清空选中
@@ -3019,10 +3070,37 @@
       if (el.searchInput) el.searchInput.value = value;
       if (libSearch) libSearch.value = value;
       syncSearchClear();
-      render();
+      flushSearch();
     };
+    /* 输入防抖：先把字画出来，再把「过滤 + 相关性排序 + 重建表格」放到停顿后做一次。
+     *
+     * 之前是 input 里直接 render()：搜索要把每条记录的每个字段都比一遍、再按相关性排序，
+     * 一次按键几十毫秒起步（库大、字段多时上百毫秒）。主线程被占着，浏览器连输入框里
+     * 那个字符都来不及画 —— 表现为「按下键到看见字」和「按退格到字消失」都有明显延迟。
+     * 现在 input 回调只做两件极轻的事（同步"×"按钮状态、安排一次延后渲染），
+     * 打字立即响应；表格在停顿 110ms 后更新一次，连续输入时不会排队卡顿。
+     *
+     * 中文输入法要额外照顾：组合期间（拼音还没上屏）不渲染，compositionend 再补一次，
+     * 否则每敲一个拼音字母都会跑一遍全库搜索。 */
+    const SEARCH_DEBOUNCE_MS = 110;
+    let searchTimer = 0;
+    let composing = false;
+    function flushSearch() {
+      if (searchTimer) { clearTimeout(searchTimer); searchTimer = 0; }
+      render();
+    }
+    function scheduleSearch() {
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => { searchTimer = 0; render(); }, SEARCH_DEBOUNCE_MS);
+    }
     if (libSearch) {
-      libSearch.addEventListener('input', () => { syncSearchClear(); render(); });
+      libSearch.addEventListener('input', () => {
+        syncSearchClear();
+        if (composing) return;   // 拼音/五笔组合中，等上屏
+        scheduleSearch();
+      });
+      libSearch.addEventListener('compositionstart', () => { composing = true; });
+      libSearch.addEventListener('compositionend', () => { composing = false; scheduleSearch(); });
       libSearch.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); applySearch(''); } });
       libSearchClear?.addEventListener('click', () => { applySearch(''); libSearch.focus(); });
       syncSearchClear();
@@ -3064,6 +3142,7 @@
       const ids = pickIdsOrWarn();
       if (ids) openClassModal(ids);
     });
+    $('btnBulkExportPdf').addEventListener('click', exportSelectedPdfs);
     $('btnBulkRank').addEventListener('click', batchRank);
     $('btnBulkDelete').addEventListener('click', batchDelete);
     $('btnBulkInvert').addEventListener('click', invertVisible);

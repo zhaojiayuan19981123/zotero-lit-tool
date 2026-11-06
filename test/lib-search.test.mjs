@@ -87,8 +87,29 @@ test('搜索范围不含 id / 本地路径 / 分类 id（搜到也没意义，�
   }
   assert.deepEqual(
     [...Search.SKIP_KEYS].sort(),
-    ['collectionId', 'coverPath', 'filePath', 'id', 'journalRankDetail', 'pdfPath', 'thumbPath'].sort(),
+    ['collectionId', 'cover', 'coverPath', 'filePath', 'id', 'journalRankDetail', 'pdfPath',
+      'thumb', 'thumbPath', 'thumbnail', 'avatar', 'preview'].sort(),
   );
+});
+
+test('base64 缩略图不参与搜索：既不会假命中，也不会把每键都拖慢', () => {
+  // thumb 是 data:image/jpeg;base64,... 的二十来 KB 字符串。以前它会被当成普通文本扫描，
+  // 于是「搜 'a' 命中全库」这种假阳性会出现，而且每次按键都要把每个 base64 过一遍。
+  const item = paper({ thumb: 'data:image/jpeg;base64,' + 'QUJD'.repeat(5000) });
+  assert.equal(Search.fields(item).some(([k]) => k === 'thumb'), false, 'thumb 不该进可搜索字段');
+  assert.equal(Search.rank([item], 'QUJD').length, 0, 'base64 内容不该命中');
+
+  // 换个字段名也不放过：只要是内嵌 data: URI 就跳过
+  const sneaky = paper({ cover2: 'data:image/png;base64,' + 'QUJD'.repeat(5000) });
+  assert.equal(Search.rank([sneaky], 'QUJD').length, 0, 'data: URI 一律不搜');
+});
+
+test('字段解析结果按记录对象缓存（同一对象不重复小写化）', () => {
+  const item = paper();
+  assert.equal(Search.fields(item), Search.fields(item), '同一对象应复用同一份字段数组');
+  const copy = { ...item };
+  assert.notEqual(Search.fields(copy), Search.fields(item), '换对象要重新算');
+  Search.resetCache();
 });
 
 test('数组字段（标签）也能搜', () => {
@@ -126,6 +147,23 @@ test('容错不吃不相干的文本：毫不相干的摘要不会硬凑成命�
   const unrelated = only({ id: 'b', title: '扩散模型综述', abstract: '本文讨论扩散过程与去噪得分匹配。' });
   assert.equal(Search.rank([unrelated], 'attention').length, 0);
   assert.equal(Search.rank([unrelated], 'transformer').length, 0);
+});
+
+test('容错只开在"定位字段"上：摘要里拼错不硬凑，拼对了照样命中', () => {
+  // 标题（w=12）、关键词（w=9）这类字段拼错一个字母仍要能搜到
+  const t = only({ id: 't', title: 'Transformer 架构详解' });
+  assert.equal(Search.rank([t], 'transfromer').length, 1);
+  // 摘要（w=1.5）只做精确子串：容错匹配要扫全文算编辑距离，是最贵的一步，
+  // 而"摘要里拼错一个字母"基本不是用户本意。精确命中不受影响。
+  const a = only({ id: 'a', title: '无关', abstract: '本文讨论 transformer 的变体。' });
+  assert.equal(Search.rank([a], 'transformer').length, 1, '摘要里拼对要能命中');
+  assert.equal(Search.rank([a], 'transfromer').length, 0, '摘要里拼错不硬凑');
+});
+
+test('超长字段不参与容错扫描（避免一篇长文把每次按键拖慢）', () => {
+  const long = 'x'.repeat(Search.FUZZY_TEXT_MAX + 500);
+  assert.equal(Search.hit(`${long} transformer`, 'transfromer', false), 0, '关掉容错后只做子串');
+  assert.equal(Search.hit(`${long} transformer`, 'transformer', false), 1.35, '子串命中不受长度影响（空格后=词首命中）');
 });
 
 // ==================== 3) 相关性 ====================

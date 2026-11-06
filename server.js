@@ -26,6 +26,8 @@ import {
 } from './src/parseRunner.js';
 import * as store from './src/store.js';
 import * as layout from './src/layout.js';
+// 极简 ZIP（store 方式）。此前只有「导出成果含附件」用它，现在批量导出 PDF 也走同一份实现。
+import { createZip, uniqueName } from './src/zip.js';
 // 版面识别结果 → 翻译管线结构 / 逐块对照数据（见 src/layoutTranslate.js）：
 // 「对照精读」在还没做过全文翻译时也要能立刻铺出大纲与原文流。
 import { readManifestFor, layoutFromManifest, buildAlignOutput } from './src/layoutTranslate.js';
@@ -4692,6 +4694,69 @@ export function createApp({
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="literature.csv"');
     res.send('\uFEFF' + lines.join('\r\n'));
+  });
+
+  // ---------- 导出选中文献的 PDF 原文 ----------
+  // 场景：选中几篇 → 想把原文一次性打包下载下来发给别人（分享 / 备份）。
+  // 一篇就直接给 PDF（浏览器另存为体验最自然）；多篇打成一个 zip。
+  // 用 store 方式不压缩：PDF 本身已经压缩过，再压一遍只费 CPU 不省体积。
+  app.post('/api/literature/export-pdfs', (req, res) => {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map((x) => String(x)) : [];
+    if (!ids.length) return res.status(400).json({ error: '没有选中任何文献' });
+
+    const picked = [];
+    const skipped = [];
+    let totalBytes = 0;
+    for (const id of ids) {
+      const item = store.getLiterature(id);
+      if (!item) continue;
+      const file = item.filePath;
+      const missing = !file || !fs.existsSync(file);
+      // 只导 PDF：EPUB / 其它格式不在这项功能的范围内（按钮文案也写的是「导出 PDF」）
+      const notPdf = !missing && !/\.pdf$/i.test(file) && String(item.fileKind || '') !== 'pdf';
+      if (missing || notPdf) { skipped.push(item.title || item.originalName || id); continue; }
+      try {
+        totalBytes += fs.statSync(file).size;
+      } catch (_) { skipped.push(item.title || id); continue; }
+      picked.push({ item, file });
+    }
+    if (!picked.length) {
+      return res.status(400).json({ error: '选中的文献都没有 PDF 附件', skipped: skipped.length });
+    }
+    // 全在内存里拼 zip，给一个上限兜底：超过就明确报错，别让进程被几 GB 的附件拖死
+    const MAX_TOTAL_BYTES = 800 * 1024 * 1024;
+    if (totalBytes > MAX_TOTAL_BYTES) {
+      return res.status(413).json({ error: '选中的 PDF 合计超过 800 MB，请分批导出' });
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    if (picked.length === 1) {
+      const { item, file } = picked[0];
+      const filename = safeFileStem(item.title || item.originalName || path.basename(file, '.pdf'), 'paper') + '.pdf';
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+      res.setHeader('X-Exported-Count', '1');
+      res.setHeader('X-Skipped-Count', String(skipped.length));
+      return res.sendFile(path.resolve(file));
+    }
+
+    const used = new Set();
+    const entries = picked.map(({ item, file }) => {
+      const stem = safeFileStem(item.title || item.originalName || path.basename(file, '.pdf'), 'paper');
+      const date = item.importedAt ? new Date(item.importedAt) : new Date();
+      return {
+        name: uniqueName(`${stem}.pdf`, used),
+        data: fs.readFileSync(file),
+        date: Number.isNaN(date.getTime()) ? new Date() : date,
+      };
+    });
+    const zip = createZip(entries);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition',
+      `attachment; filename="literature-pdfs-${today}.zip"; filename*=UTF-8''${encodeURIComponent(`文献原文-${today}.zip`)}`);
+    res.setHeader('X-Exported-Count', String(picked.length));
+    res.setHeader('X-Skipped-Count', String(skipped.length));
+    res.send(zip);
   });
 
   // ---------- 学位论文阅读（独立模块：表格管理 + 章节书签 + 检索增强问答） ----------

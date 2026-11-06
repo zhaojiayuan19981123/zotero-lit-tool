@@ -25,8 +25,19 @@
   const SKIP_KEYS = Object.freeze([
     'id', 'filePath', 'pdfPath', 'coverPath', 'thumbPath',
     'collectionId', 'journalRankDetail',
+    // 缩略图 / 封面：值是 data:image/...;base64 的几十 KB 二进制串。
+    // 以前它们会被当成普通文本参与匹配，后果是双份的：
+    //   ① 每敲一个键都要把每个 base64 扫一遍（20KB × N 篇 → 输入直接卡住）；
+    //   ② 随机命中的概率不为零，搜 "a" "ab" 这类短词会冒出莫名其妙的"命中"。
+    'thumb', 'thumbnail', 'cover', 'avatar', 'preview',
   ]);
   const SKIP = new Set(SKIP_KEYS);
+
+  /** 极长的内嵌数据（data: URI / base64）一律不参与搜索——即使字段名没被预料到 */
+  function isBlob(value) {
+    return value.length > 512 && (value.startsWith('data:') || value.startsWith('blob:')
+      || (value.length > 4096 && /^[A-Za-z0-9+/=]{512}/.test(value)));
+  }
 
   /* 字段权重：标题/关键词/作者这类"一眼定位"的字段给高权重；
    * 摘要、背景这类长文本给低权重 —— 否则一篇长文随便出现一个词就顶到第一行。
@@ -48,22 +59,35 @@
     return q.split(/\s+/).filter(Boolean);
   }
 
+  /* 字段缓存：把「取字段 + 转小写」的结果按记录对象存一次。
+   * 为什么要有：一次搜索会把每条记录的每个字段都小写化一遍，几十篇 × 三十来个字段，
+   * 每敲一个键都重做一次纯属浪费；而记录对象在 loadItems() 里是整体替换的，
+   * 用对象引用做键天然跟着数据刷新（见 app.js 的 loadItems）。 */
+  let FIELD_CACHE = new WeakMap();
+
   /** 记录 → 可搜索字段列表；数组字段（如标签）按空格拼接，对象字段跳过 */
   function fields(item) {
+    if (!item || typeof item !== 'object') return [];
+    const cached = FIELD_CACHE.get(item);
+    if (cached) return cached;
     const out = [];
-    if (!item || typeof item !== 'object') return out;
     for (const key of Object.keys(item)) {
       if (SKIP.has(key)) continue;
       const v = item[key];
-      if (typeof v === 'string') { if (v) out.push([key, v.toLowerCase()]); }
-      else if (typeof v === 'number') out.push([key, String(v)]);
+      if (typeof v === 'string') {
+        if (v && !isBlob(v)) out.push([key, v.toLowerCase()]);
+      } else if (typeof v === 'number') out.push([key, String(v)]);
       else if (Array.isArray(v)) {
-        const s = v.filter((x) => typeof x === 'string' || typeof x === 'number').join(' ');
+        const s = v.filter((x) => (typeof x === 'string' || typeof x === 'number') && String(x).length < 4096).join(' ');
         if (s) out.push([key, s.toLowerCase()]);
       }
     }
+    FIELD_CACHE.set(item, out);
     return out;
   }
+
+  /** 数据换了对象却没换引用时（极少见）由调用方显式清一次 */
+  function resetCache() { FIELD_CACHE = new WeakMap(); }
 
   /** 词边界：命中紧跟在分隔符后面，比命中在词中间更相关（"learning" vs "machine learning"） */
   const BOUNDARY = /[\s\-_/（(,，.。:：;；、"'“”‘’\[\]【】]/;
@@ -121,8 +145,12 @@
    *   1    词中片段命中
    *   0.3  拼写容错命中（换位 / 漏字 / 错字，见 fuzzyIn）
    *   0    不命中
+   *
+   * `allowFuzzy` 为 false 时只做子串匹配。容错匹配是最贵的一步（要扫全文 + 算编辑距离），
+   * 所以只在「用来定位的字段」上开（见 score 里的 FUZZY_MIN_WEIGHT）；摘要、研究空白
+   * 这类长文本只做精确子串 —— 在那里拼错一个字母基本不可能是用户的本意。
    */
-  function hit(text, token) {
+  function hit(text, token, allowFuzzy = true) {
     if (!text || !token) return 0;
     const at = text.indexOf(token);
     if (at >= 0) {
@@ -130,8 +158,14 @@
       if (at === 0) return 1.6;
       return BOUNDARY.test(text[at - 1] || '') ? 1.35 : 1;
     }
-    return fuzzyIn(text, token);
+    if (!allowFuzzy) return 0;
+    return fuzzyIn(text.length > FUZZY_TEXT_MAX ? text.slice(0, FUZZY_TEXT_MAX) : text, token);
   }
+
+  /** 容错匹配只在这些字段上开：权重 >= 3（标题/关键词/作者/期刊/年份/研究问题…） */
+  const FUZZY_MIN_WEIGHT = 3;
+  /** 单个字段参与容错匹配的最大字符数（超出部分只看精确子串） */
+  const FUZZY_TEXT_MAX = 4000;
 
   /**
    * 相关性得分。多个关键词时要求**每个词都命中**（AND）：
@@ -148,7 +182,7 @@
         // 对象里的键名固定来自本地数据，这里只做查表，不做字符串拼接
         const w = WEIGHTS[list[i][0]] === undefined ? DEFAULT_WEIGHT : WEIGHTS[list[i][0]];
         if (w <= 0) continue;
-        const s = hit(list[i][1], token) * w;
+        const s = hit(list[i][1], token, w >= FUZZY_MIN_WEIGHT) * w;
         if (s > best) best = s;
       }
       if (best <= 0) return 0;
@@ -232,7 +266,10 @@
     return out + esc(raw.slice(cursor));
   }
 
-  const api = { SKIP_KEYS, WEIGHTS, DEFAULT_WEIGHT, tokens, fields, hit, score, rank, highlightRanges, highlight };
+  const api = {
+    SKIP_KEYS, WEIGHTS, DEFAULT_WEIGHT, FUZZY_MIN_WEIGHT, FUZZY_TEXT_MAX,
+    tokens, fields, isBlob, hit, score, rank, highlightRanges, highlight, resetCache,
+  };
   if (typeof window !== 'undefined') window.LibSearch = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
