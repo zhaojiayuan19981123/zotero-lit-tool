@@ -56,10 +56,14 @@ jobs:
             dist/latest.yml
 
   macos:
-    runs-on: macos-14
-    # macOS 构建机自 2026-11-01 起在**分配阶段**就被平台取消（作业 0 秒结束、没有步骤、
-    # runner_name 为空，GitHub 状态页却显示一切正常）。它不参与发版也不该把整条流水线判红，
-    # 所以既从 release 的 needs 里摘掉，也标成允许失败。
+    # ★ 2026-11-02 起 macos-14 镜像被 GitHub **正式退役**（10 月是分时段 brownout，
+    #   11 月 2 日之后彻底不可用）。表现是作业在**分配阶段**就结束、0 秒、没有步骤、
+    #   runner_name 为空，注解写着 `The configuration 'macos-14-arm64-us-default' is not supported`
+    #   —— v1.38.0 第一次发版就因此少了两份 dmg。改用受支持的 macos-15（arm64 宿主，
+    #   x64 由 electron-builder 交叉打包）。
+    runs-on: macos-15
+    # macOS 构建仍是「尽力而为」：平台偶发取消不该把整条流水线判红，所以标成允许失败，
+    # 并且 release 作业用 always() 保证 Windows 那条链路照常发版。
     continue-on-error: true
     strategy:
       fail-fast: false
