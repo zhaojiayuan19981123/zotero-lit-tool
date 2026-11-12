@@ -119,3 +119,137 @@ test('译文页脚本已挂进 index.html，且带独立的调试快照', () => 
     assert.ok(k in snap, `CmpPages.debug() 缺少 ${k}`);
   }
 });
+
+// ==================== 译文两种样式（版面还原 / 文本重排） ====================
+
+test('译文栏两种样式：切换按钮齐备，两个渲染容器各就各位', () => {
+  const styles = [...html.matchAll(/data-cmpstyle="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(styles.sort(), ['flow', 'page'], '译文栏必须同时提供「版面还原」与「文本重排」两种样式');
+  // page 用 #cmpTransFlow（CmpPages 的宿主），flow 用 #cmpTransHtml（连续文本流）
+  assert.match(html, /class="cmp-flow ctp-scroll" id="cmpTransFlow"/, '#cmpTransFlow 必须仍是 ctp 滚动容器');
+  assert.match(html, /class="cmp-flow cmp-flow-html" id="cmpTransHtml"/, '缺少文本重排容器 #cmpTransHtml');
+  // 谁显示由 data-style 决定，切换时不用动 DOM 结构
+  assert.match(css, /\[data-style="flow"\] #cmpTransFlow\s*\{\s*display:\s*none !important/, '切到文本重排时必须藏掉版面还原那一栏');
+  assert.match(css, /\[data-style="page"\] #cmpTransHtml\s*\{\s*display:\s*none !important/, '切到版面还原时必须藏掉文本重排那一栏');
+});
+
+test('译文两种样式共用一套选中 / 定位 / 单块刷新', () => {
+  // 两种样式的块选择器都要能命中（回归时最容易只改一边）
+  const fn = appJs.match(/function transBlockEl\(id\)\s*\{([\s\S]*?)\n  \}/);
+  assert.ok(fn, '找不到 transBlockEl()');
+  assert.match(fn[1], /cmp-block\[data-block-id/, 'transBlockEl 要能命中文本重排的块');
+  assert.match(fn[1], /ctp-block\[data-id/, 'transBlockEl 要能命中版面还原的块');
+  // 定位：版面还原走 CmpPages.focus，文本重排自己滚
+  assert.match(appJs, /function cmpFocusTrans\(id\)/, '缺少 cmpFocusTrans()：两种样式的定位方式不同');
+  assert.match(appJs, /window\.CmpPages\?\.focus\(id, \{ flash: false \}\)/, 'cmpFocusTrans 应当把版面还原交给 CmpPages.focus');
+  // 点译文栏 / 点原文段落都要走同一条 cmpSelectBlock
+  assert.match(appJs, /cmpEl\('cmpTransHtml'\)\?\.addEventListener\('click'/, '文本重排的块也要能点（点段落 → 原文定位）');
+  // 单块翻译完成后两种样式都要刷新
+  assert.match(appJs, /function cmpRefreshHtmlBlock\(b\)/, '缺少 cmpRefreshHtmlBlock()：单段翻译后文本重排不会更新');
+  assert.match(appJs, /window\.CmpPages\?\.refreshBlock\(b\.id\);[\s\S]{0,200}cmpRefreshHtmlBlock\(b\)/, '单段翻译完成后要同时刷新两种样式');
+  // renderCmp 必须把数据同时喂给两个渲染器
+  const rc = appJs.match(/function renderCmp\(\)\s*\{([\s\S]*?)\n  \}/);
+  assert.ok(rc, '找不到 renderCmp()');
+  assert.match(rc[1], /window\.CmpPages\?\.setBlocks\(blocks\)/, 'renderCmp 要把块交给版面还原');
+  assert.match(rc[1], /renderCmpHtml\(blocks\)/, 'renderCmp 要把块交给文本重排');
+  assert.match(appJs, /const CMP_STYLE_KEY = 'sciterminal\.cmpTransStyle'/, '译文样式的选择要能记住');
+});
+
+// ==================== 字体与字号统一 ====================
+
+test('译文只有一套字体：西文 Times New Roman + 中文宋体', () => {
+  const fam = cmpJs.match(/const SERIF = "([^"]+)"/);
+  assert.ok(fam, 'cmp-pages.js 里找不到统一的字体族常量 SERIF');
+  // 顺序很重要：Times New Roman 不含汉字，必须排在宋体前面，否则英文会变成宋体的样子
+  const tnr = fam[1].indexOf('Times New Roman');
+  const sim = fam[1].indexOf('SimSun');
+  assert.ok(tnr >= 0, 'SERIF 必须包含 Times New Roman（西文）');
+  assert.ok(sim >= 0, 'SERIF 必须包含 SimSun（中文宋体）');
+  assert.ok(tnr < sim, 'Times New Roman 必须排在 SimSun 前面');
+  // 标题与正文共用同一族（旧版标题走黑体，是「字体不统一」的来源）
+  assert.ok(!/'PingFang SC'/.test(cmpJs), '译文层不能再出现 PingFang 之类无衬线回退');
+  assert.match(cmpJs, /textEl\.style\.fontFamily = SERIF/, '落笔时必须用统一的 SERIF');
+  // 文本重排那一栏也用同一套字，两种样式看起来才是一份文档
+  assert.match(css, /\.cmp-block-text\s*\{[^}]*font-family:\s*'Times New Roman',\s*SimSun/, '文本重排的正文也要用宋体 + Times');
+});
+
+test('译文页字号：每页一个基准，最多往下两档，不再一块一个值', () => {
+  assert.match(cmpJs, /function pickBase\(jobs\)/, '缺少 pickBase()：本页基准字号要按「字数加权中位数」定');
+  // 加权：小字块（作者单位 / 脚注）不能把整页基准拖到最低档
+  const pb = cmpJs.match(/function pickBase\(jobs\)\s*\{([\s\S]*?)\n  \}/)[1];
+  assert.match(pb, /Math\.min\(400, j\.len \|\| 1\)/, 'pickBase 必须按字数加权');
+  assert.match(pb, /BASE_LO, BASE_HI/, '基准字号必须夹在可读区间内');
+  // 降档只有 0.5px 一档、最多三档
+  const as = cmpJs.match(/function applySize\(j, base\)\s*\{([\s\S]*?)\n  \}/)[1];
+  assert.match(as, /step < 3/, '降档最多三档（base / base-0.5 / base-1）');
+  assert.match(as, /fs - step \* 0\.5/, '降档步长必须是 0.5px');
+  assert.ok(!/toFixed\(2\)/.test(as), '不能再出现二分出来的任意字号（6.69px 那种），那正是「字号不统一」');
+  // 先长高后降档：长高只多吃留白，降档会破坏统一
+  assert.match(as, /growTo\(/, 'applySize 必须先尝试长高');
+});
+
+// ==================== 译文页缩放 ====================
+
+test('译文页支持 Ctrl + 滚轮缩放，且缩放后仍读得下去', () => {
+  assert.match(cmpJs, /addEventListener\('wheel', onWheel, \{ passive: false \}\)/, '译文页必须监听 wheel（Ctrl + 滚轮）');
+  const wheel = cmpJs.match(/function onWheel\(e\)\s*\{([\s\S]*?)\n  \}/)[1];
+  assert.match(wheel, /!e\.ctrlKey && !e\.metaKey.*return/, '只在按住 Ctrl / ⌘ 时缩放，否则会抢掉正常滚动');
+  assert.match(wheel, /e\.preventDefault\(\)/, '必须 preventDefault，否会触发整个应用缩放');
+  assert.match(cmpJs, /function setZoom\(z\)/, '缺少 setZoom()');
+  assert.match(cmpJs, /ZOOM_LO, ZOOM_HI/, '缩放要夹在合理区间内');
+  // 缩放要按「选中的那一块」做锚点，免得缩一次就跳回页首
+  assert.match(cmpJs, /function refit\(\)[\s\S]{0,400}anchor/, '缩放重铺必须带锚点块');
+  // 放大后要能横向滚到右边（align-items:center 会把左边缘滚没了）
+  assert.match(css, /\.cmp-flow\.ctp-scroll\s*\{[^}]*align-items:\s*flex-start/, '页面比容器宽时必须用 flex-start + margin auto，否则左边滚不到');
+  assert.match(css, /\.ctp-page\s*\{[^}]*margin:\s*0 auto/, '页面要自己居中，滚动容器的 align-items 只负责溢出方向');
+  // 百分比回显
+  assert.match(html, /id="cmpTransZoom"/, '缺少缩放百分比回显（点一下回到适应宽度）');
+  assert.match(appJs, /onZoom: \(z\) => setCmpZoomLabel\(z\)/, 'CmpPages 缩放变化要回显到界面');
+});
+
+// ==================== 目录抽屉 / 三栏 ====================
+
+test('大纲改成抽屉：不占列，展开时盖在原文栏上', () => {
+  assert.match(css, /\.cmp-outline\s*\{[^}]*position:\s*absolute/, '大纲必须是抽屉（绝对定位），不再占一列');
+  assert.match(css, /\.cmp-outline\s*\{[^}]*transform:\s*translateX\(-10\d%\)/, '抽屉默认要收在屏幕外');
+  assert.match(css, /\.pr-cmp-mode\[data-drawer="on"\] \.cmp-outline\s*\{\s*transform:\s*none/, '展开态要能滑回来');
+  assert.match(html, /id="cmpDrawerMask"/, '抽屉要有遮罩（点空白处收起）');
+  assert.match(html, /id="cmpOutlineToggle"/, '工具条上要有大纲开关');
+  assert.match(appJs, /function toggleCmpDrawer\(force\)/, '缺少 toggleCmpDrawer()');
+  // 抽屉不再可拖宽
+  assert.ok(!/data-cmpresize="outline"/.test(html), '大纲已是抽屉，不该再有拖宽分隔条');
+  assert.match(css, /\[data-cmpresize="outline"\]\s*\{\s*display:\s*none/, '大纲的分隔条要藏掉');
+});
+
+test('三栏宽度必须铺满：flex-grow 要归一到 1', () => {
+  const fn = appJs.match(/function applyCmpRatios\(\)\s*\{([\s\S]*?)\n  \}/);
+  assert.ok(fn, '找不到 applyCmpRatios()');
+  assert.match(fn[1], /const panes = \['src', 'trans', 'assist'\]/, '参与分配的是原文 / 译文 / 助读三栏（大纲是抽屉）');
+  assert.match(fn[1], /\/ sum\) \* 1000/, 'flex-grow 之和必须归一到 1，否则右边会空出一条');
+});
+
+// ==================== 解析结果打印：紧凑排版 ====================
+
+test('解析结果打印稿：不能再用 pre-wrap（Markdown 的换行会变成大片空行）', () => {
+  const v = css.match(/\.pd-sec-v\s*\{([^}]*)\}/);
+  assert.ok(v, 'style.css 缺少 .pd-sec-v');
+  assert.match(v[1], /white-space:\s*normal/, '.pd-sec-v 必须是 normal：marked 输出的块间换行在 pre-wrap 下会画成真空行');
+  assert.ok(!/white-space:\s*pre-wrap/.test(v[1]), '.pd-sec-v 不能回到 pre-wrap');
+});
+
+test('解析结果打印稿：节允许跨页，只有标题 / 表格 / 代码块不拆', () => {
+  const sec = css.match(/\.pd-sec\s*\{([^}]*)\}/);
+  assert.ok(sec, 'style.css 缺少 .pd-sec');
+  assert.ok(!/break-inside:\s*avoid/.test(sec[1]), '整节 break-inside:avoid 会让上一页留半页空白');
+  assert.match(css, /\.pd-sec-h\s*\{[^}]*break-after:\s*avoid/, '节标题不能单独留在页底');
+  assert.match(css, /\.pd-sec-v table|\.pd-sec-v tr,/, '表格要有不拆行的规则');
+  assert.match(css, /@media print\s*\{\s*\.print-doc\s*\{\s*padding:\s*0/, '打印时页边距交给 @page，稿子不再叠一层内边距');
+});
+
+test('解析结果里「关键词」只出现一次（基本信息与独立一节不再重复）', () => {
+  const fn = appJs.match(/function analysisSections\(it\)\s*\{([\s\S]*?)\n  \}/);
+  assert.ok(fn, '找不到 analysisSections()');
+  assert.ok(!/\['关键词', it\.keywords\]/.test(fn[1]), '基本信息里不能再列关键词：它会与「关键词」一节重复');
+  assert.match(fn[1], /pd-facts/, '基本信息要用 .pd-facts 的紧凑两栏排版');
+  assert.ok(/\.pd-fact\b/.test(css), 'style.css 缺少 .pd-fact 样式');
+});

@@ -3666,14 +3666,16 @@
     const sections = [];
     // 「基本信息」单独成块展示（这些是元数据，不适合当作解析结果条目）
     const META_KEYS = new Set(['importedAt', 'title', 'authors', 'journal', 'year', 'doi']);
+    // 关键词不进这里：它在内容字段里自成一节（列表长，塞进基本信息会撑成一坨）。
+    // 早先两边都放，打印稿上「关键词」连着出现两遍，是肉眼可见的重复。
     const basics = [
       ['作者', it.authors], ['期刊/会议', it.journal], ['年份', it.year],
-      ['DOI', it.doi], ['关键词', it.keywords],
+      ['DOI', it.doi],
     ].filter(([, v]) => String(v || '').trim());
     if (basics.length) {
       sections.push({
         label: '基本信息', icon: '',
-        html: basics.map(([k, v]) => `<div style="margin-bottom:3px"><b style="color:var(--text-3);font-weight:600">${esc(k)}：</b>${esc(v)}</div>`).join(''),
+        html: `<div class="pd-facts">${basics.map(([k, v]) => `<div class="pd-fact"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join('')}</div>`,
       });
     }
     // 其余内容字段按当前文库类型的顺序展示（我的思考已在 TYPE_ORDER 内，不重复追加）
@@ -6729,6 +6731,7 @@
     footnote: '脚注', reference: '参考文献', figure: '图表', table: '表格', formula: '公式',
   };
   const CMP_RATIO_KEY = 'sciterminal.cmpRatios';
+  const CMP_STYLE_KEY = 'sciterminal.cmpTransStyle';
 
   const cmp = {
     on: false,
@@ -6740,6 +6743,9 @@
     job: null,              // 正在跟踪的翻译作业
     stream: null,           // 作业进度 EventSource
     view: 'split',          // pdf(仅原文) | split(原文+译文) | trans(仅译文)
+    style: 'page',          // page(版面还原，译文填回原 PDF 页) | flow(文本重排，连续文本流)
+    drawer: false,          // 目录抽屉是否展开（目录不再占一列）
+    transZoom: 1,           // 译文页缩放倍数（Ctrl + 滚轮）
     ratios: { outline: 0.15, src: 0.34, trans: 0.32, assist: 0.30 },
     activeId: null,
     transCache: new Map(),  // 单段翻译结果：blockId -> 译文（另有 localStorage 持久缓存）
@@ -6798,19 +6804,28 @@
     try { localStorage.setItem(CMP_RATIO_KEY, JSON.stringify(cmp.ratios)); } catch (_) { /* ignore */ }
   }
 
+  /**
+   * 分配三栏宽度。
+   *
+   * 目录改成抽屉后不再参与布局，参与分配的就是 原文 / 译文 / 助读 三栏。两条硬约束：
+   *   1) flex-grow 之和必须归一到 1 —— CSS 规定 Σgrow < 1 时每栏只分到 grow×自由空间、
+   *      剩下的留白，隐藏一栏就会在右边空出一条（实测 1760px 下空出 ~370px）；
+   *   2) 被隐藏那一栏的份额要并给同侧的可见栏，否则「仅译文」时右边永远缺一块。
+   */
   function applyCmpRatios() {
-    // 三档视图下，被隐藏那一栏的份额必须并给可见的中间栏，否则右侧会留一条空白：
-    // 各栏 flex-basis 全是 0，而 CSS 规定 Σflex-grow < 1 时每栏只分到 grow×自由空间、
-    // 剩余不用 —— 隐藏一栏等于把它那份宽度直接从屏上拿走（实测 1760px 下空出 ~370px）。
-    // 把隐藏栏并回去后 Σgrow 回到 1.11，按比例正常铺满。
-    const hiddenPane = cmp.view === 'pdf' ? 'trans' : cmp.view === 'trans' ? 'src' : null;
-    const midPane = hiddenPane ? (hiddenPane === 'trans' ? 'src' : 'trans') : null;
-    const midRatio = hiddenPane ? cmp.ratios.src + cmp.ratios.trans : 0;
-    for (const name of ['outline', 'src', 'trans', 'assist']) {
-      const el = cmpPane(name);
-      if (!el) continue;
-      const r = name === midPane ? midRatio : cmp.ratios[name];
-      el.style.flex = `${r} 1 0`;
+    const panes = ['src', 'trans', 'assist'];
+    const w = {};
+    for (const n of panes) w[n] = Number(cmp.ratios[n]) > 0.02 ? Number(cmp.ratios[n]) : 1 / 3;
+    const hidden = cmp.view === 'pdf' ? 'trans' : cmp.view === 'trans' ? 'src' : null;
+    if (hidden) {
+      const other = hidden === 'trans' ? 'src' : 'trans';
+      w[other] += w[hidden];
+      w[hidden] = 0;
+    }
+    const sum = panes.reduce((s, n) => s + w[n], 0) || 1;
+    for (const n of panes) {
+      const el = cmpPane(n);
+      if (el) el.style.flex = `${(w[n] / sum) * 1000} 1 0`;
     }
   }
 
@@ -6858,11 +6873,14 @@
     if (cmp.srcRO) { try { cmp.srcRO.disconnect(); } catch (_) { /* ignore */ } cmp.srcRO = null; }
   }
 
-  function initCmpResizers() {    const panes = cmpEl('cmpPanes');
+  function initCmpResizers() {
+    const panes = cmpEl('cmpPanes');
     if (!panes || panes.dataset.resizersBound === '1') return;
     panes.dataset.resizersBound = '1';
-    // 每根分隔条调整它左右相邻的两栏：把宽度增量从右边搬到左边（或反之）
-    const PAIRS = { outline: ['outline', 'src'], trans: ['src', 'trans'], assist: ['trans', 'assist'] };
+    // 每根分隔条调整它左右相邻的两栏：把宽度增量从右边搬到左边（或反之）。
+    // 目录已是抽屉（不占列），那根分隔条在 CSS 里也被藏掉了，这里不再配对 ——
+    // 否则拖它会把 ratios.outline 改成一个永远用不到的值。
+    const PAIRS = { trans: ['src', 'trans'], assist: ['trans', 'assist'] };
     panes.querySelectorAll('[data-cmpresize]').forEach((bar) => {
       bar.addEventListener('pointerdown', (e) => {
         const pair = PAIRS[bar.dataset.cmpresize];
@@ -6908,6 +6926,10 @@
     if (pn.on) { try { await closePnNoteMode(); } catch (_) { /* ignore */ } }
     cmp.on = true;
     loadCmpRatios();
+    try {
+      const saved = localStorage.getItem(CMP_STYLE_KEY);
+      if (saved === 'flow' || saved === 'page') cmp.style = saved;
+    } catch (_) { /* ignore */ }
     applyCmpRatios();
     // 栏宽一变就要重新适配 PDF 宽度（拖分隔条 / 切视图都不会触发 window.resize）
     watchCmpPdfWidth();
@@ -6915,6 +6937,9 @@
     adoptCmpPdfHost();
     // 译文页宿主先挂好：等 loadCmpAlign 拿到块就能直接铺页
     mountCmpPages();
+    // 上次选的译文样式（版面还原 / 文本重排）+ 目录抽屉一律收起（三栏铺满）
+    bindCmpStyle(cmp.style);
+    toggleCmpDrawer(false);
     // 已经开着阅读模式进来的：原文栏直接装重排面板，别让用户以为「重排被关掉了」
     if (pr.reading.on) {
       adoptCmpReadingPane();
@@ -7089,7 +7114,21 @@
       pageCount: () => pr.totalPages,
       pageSize: (n) => pr.pageSizes?.[n - 1] || null,
       onPick: (id, meta) => cmpPickFromTransPage(id, meta),
+      onZoom: (z) => setCmpZoomLabel(z),
     });
+    setCmpZoomLabel(window.CmpPages.getZoom?.() || 1);
+  }
+
+  /** 译文页缩放百分比（只在「版面还原」下显示；点它回到适应宽度） */
+  function setCmpZoomLabel(z) {
+    const n = Math.round((Number(z) || 1) * 100);
+    cmp.transZoom = (Number(z) || 1);
+    const el = cmpEl('cmpTransZoom');
+    if (!el) return;
+    el.textContent = n + '%';
+    el.title = n === 100
+      ? '适应宽度（Ctrl + 滚轮可缩放译文页）'
+      : '当前 ' + n + '%，点击回到「适应宽度」';
   }
 
   /** 点了译文页上的某一块：原文定位过去，按需翻译由调用方决定 */
@@ -7486,26 +7525,117 @@
   /**
    * 铺译文页。
    *
-   * 与旧版「文本流」的区别：这里只把块交给 CmpPages，由它渲染**和原页同版面的页面**——
-   * 每个文字块在原坐标上被白底覆盖并填译文，图表 / 表格 / 公式原样保留。
-   * 所以「按原样保留」不再是一句占位文字，而是页面上那张真实的图。
+   * 两种读法都给用户：
+   *   - page（版面还原）：交给 CmpPages，按原坐标把译文填回 PDF 页面，图表 / 表格 / 公式原样保留；
+   *   - flow（文本重排）：连续文本流，字号统一、不分栏，适合顺着读一遍。
+   * 两种同时铺好（各自都很便宜），切换时只换谁显示 —— 用户来回比着看不会有一点等待。
    */
   function renderCmp() {
     renderCmpOutline();
     const mode = cmpEl('prCmpMode');
-    // 视图属性写回 DOM：CSS 靠 prCmpMode[data-view] 决定「原文 / 译文 / 助读」谁显示
-    if (mode) mode.dataset.view = cmp.view;
+    // 视图 / 样式属性写回 DOM：CSS 靠 prCmpMode[data-view][data-style] 决定谁显示
+    if (mode) { mode.dataset.view = cmp.view; mode.dataset.style = cmp.style; }
     const blocks = Array.isArray(cmp.data?.blocks) ? cmp.data.blocks : [];
     window.CmpPages?.setBlocks(blocks);
+    renderCmpHtml(blocks);
     refreshCmpCounts();
     // 数据换版（整篇翻译跑完）后，之前选中的块要重新点亮，否则页面上的框会「掉色」
     if (cmp.activeId && cmp.blockById.has(cmp.activeId)) {
-      window.CmpPages?.setActive(cmp.activeId);
+      markCmpBlockActive(cmp.activeId);
       cmpPaintPdfPick(cmp.activeId);
       cmpUpdateBlockBar(cmp.activeId);
     } else {
       cmpUpdateBlockBar(null);
     }
+  }
+
+  /**
+   * 文本重排版里的一个块。
+   *
+   * 原文由中间的 PDF 直接呈现，所以这里只渲染译文侧。译文缺失时分两种文案：
+   * translatable === false（图表 / 表格 / 公式）本来就按原样保留，其余是「还没翻」。
+   * 一律写「未翻译」会让人以为图表也能翻，所以这两种必须分开说。
+   */
+  function cmpBlockHtml(b) {
+    const kind = b.kind || 'body';
+    const label = cmpBlockLabel(b);
+    const id = String(b.id || '');
+    const tr = String(b.translation || '').trim() || String(cmp.transCache.get(id) || '').trim();
+    const parts = [];
+    parts.push('<div class="cmp-block-meta">'
+      + `<span class="cmp-block-tag" data-kind="${esc(kind)}">${esc(label)}</span>`
+      + (b.page ? `<span class="cmp-block-page">P${esc(String(b.page))}</span>` : '')
+      + '</div>');
+
+    // 无译文且有裁图（图表 / 表格 / 公式）：把裁图放上来，否则这一块只剩一句
+    // 「按原样保留」，读者会以为漏了内容。
+    if (!tr && b.image && pr.recordId) {
+      parts.push(`<img class="cmp-block-img" data-cmp-img="${esc(id)}" src="${esc(layoutAssetUrl(pr.recordId, b.image))}" alt="${esc(label)}" loading="lazy" />`);
+    }
+
+    if (tr) {
+      parts.push(window.CompareUtils
+        ? window.CompareUtils.translationHtml(b.text, tr)
+        : `<div class="cmp-block-text">${esc(tr)}</div>`);
+    } else if (b.translatable) {
+      parts.push('<div class="cmp-block-text cmp-block-missing">—（未翻译）点这一段只翻这里</div>');
+    } else {
+      parts.push(`<div class="cmp-block-text cmp-block-missing">—（${esc(label)}，按原样保留）</div>`);
+    }
+    return `<div class="cmp-block" data-block-id="${esc(id)}" data-kind="${esc(kind)}">${parts.join('')}</div>`;
+  }
+
+  /** 文本重排里单块重绘（按需翻译完成后只动这一段，不重铺整篇） */
+  function cmpRefreshHtmlBlock(b) {
+    const box = cmpEl('cmpTransHtml');
+    if (!box || !b?.id) return;
+    const old = box.querySelector(`.cmp-block[data-block-id="${CSS.escape(String(b.id))}"]`);
+    if (!old) return;
+    const holder = document.createElement('div');
+    holder.innerHTML = cmpBlockHtml(b);
+    const el = holder.firstElementChild;
+    if (!el) return;
+    if (cmp.activeId === b.id) el.classList.add('active');
+    old.replaceWith(el);
+  }
+
+  function renderCmpHtml(blocks) {
+    const box = cmpEl('cmpTransHtml');
+    if (!box) return;
+    const list = Array.isArray(blocks) ? blocks : (Array.isArray(cmp.data?.blocks) ? cmp.data.blocks : []);
+    if (!list.length) {
+      box.innerHTML = '<div class="cmp-flow-empty">还没有对照数据。<br />先点工具条上的「整篇翻译」，在弹出的面板里跑一次<b>版面识别</b>。</div>';
+      return;
+    }
+    // 滚动位置跟着重排走：数据换版时用户读的仍是同一段
+    const ratio = box.scrollTop / Math.max(1, box.scrollHeight);
+    box.innerHTML = list.map(cmpBlockHtml).join('');
+    if (ratio > 0.02) box.scrollTop = ratio * Math.max(0, box.scrollHeight - box.clientHeight);
+  }
+
+  /** 切换译文样式（版面还原 / 文本重排）。用户的选择记在 localStorage 里。 */
+  function bindCmpStyle(style) {
+    cmp.style = style === 'flow' ? 'flow' : 'page';
+    try { localStorage.setItem(CMP_STYLE_KEY, cmp.style); } catch (_) { /* ignore */ }
+    cmpEl('cmpStyleSeg')?.querySelectorAll('[data-cmpstyle]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.cmpstyle === cmp.style);
+    });
+    cmpEl('prCmpMode')?.setAttribute('data-style', cmp.style);
+    // 缩放百分比只对「版面还原」有意义（文本重排本身是流式排版，没有页面可比）
+    cmpEl('cmpTransZoom')?.classList.toggle('hidden', cmp.style !== 'page');
+    if (cmp.style === 'page') {
+      // 版面还原刚从 display:none 出来：宽度是 0 的时候铺过一版，必须按真实宽度重排
+      requestAnimationFrame(() => window.CmpPages?.refit());
+    }
+    if (cmp.activeId) markCmpBlockActive(cmp.activeId);
+  }
+
+  /** 目录抽屉（目录不再占一列：收起时正文拿满整屏，展开时盖在原文栏上） */
+  function toggleCmpDrawer(force) {
+    cmp.drawer = force === undefined ? !cmp.drawer : !!force;
+    const mode = cmpEl('prCmpMode');
+    if (mode) mode.dataset.drawer = cmp.drawer ? 'on' : 'off';
+    cmpEl('cmpOutlineToggle')?.classList.toggle('active', cmp.drawer);
   }
 
   /** 重算块数与已译段数（整篇翻译、单段按需翻译后都要跟着变） */
@@ -7555,24 +7685,49 @@
   // ---------- 选中 / 定位（只有点击同步，没有滚动同步） ----------
 
   /**
-   * 译文页里某一块的 DOM。
-   * 注意选择器是 `.ctp-block[data-id]`：译文页的块按版面坐标绝对定位，
-   * 不再是旧版文本流里的 `.cmp-block[data-block-id]`。
+   * 译文栏里某一块的 DOM —— 两种样式各有一套选择器：
+   *   · 版面还原：`.ctp-block[data-id]`（按版面坐标绝对定位）
+   *   · 文本重排：`.cmp-block[data-block-id]`（文本流里的一个段落）
    */
   function transBlockEl(id) {
-    return cmpEl('cmpTransFlow')?.querySelector(`.ctp-block[data-id="${CSS.escape(String(id || ''))}"]`) || null;
+    const key = CSS.escape(String(id || ''));
+    return cmpEl('cmpTransHtml')?.querySelector(`.cmp-block[data-block-id="${key}"]`)
+      || cmpEl('cmpTransFlow')?.querySelector(`.ctp-block[data-id="${key}"]`)
+      || null;
   }
 
-  /** 译文页里把某一块标成选中（其余清除）。flash = 闪一下，明确告诉用户「跳到这儿了」 */
+  /** 译文栏里把某一块标成选中（其余清除）。flash = 闪一下，明确告诉用户「跳到这儿了」 */
   function markCmpBlockActive(id, flash = false) {
+    // 文本重排：流里的块自己带高亮
+    const html = cmpEl('cmpTransHtml');
+    if (html) {
+      html.querySelectorAll('.cmp-block.active').forEach((el) => el.classList.remove('active'));
+      if (id) html.querySelector(`.cmp-block[data-block-id="${CSS.escape(String(id))}"]`)?.classList.add('active');
+    }
+    // 版面还原：页面上的块由 CmpPages 管
     window.CmpPages?.setActive(id);
     if (!flash) return;
     const el = transBlockEl(id);
     if (!el) return;
-    el.classList.remove('ctp-flash');
+    el.classList.remove('ctp-flash', 'flash');
     void el.offsetWidth;   // 强制重排：连点同一个块也要能重放动画
-    el.classList.add('ctp-flash');
-    setTimeout(() => el.classList.remove('ctp-flash'), 900);
+    el.classList.add(cmp.style === 'flow' ? 'flash' : 'ctp-flash');
+    setTimeout(() => el.classList.remove('ctp-flash', 'flash'), 900);
+  }
+
+  /** 把译文栏滚到某一块（两种样式各自的滚动容器不同） */
+  function cmpFocusTrans(id) {
+    if (cmp.style === 'flow') {
+      const box = cmpEl('cmpTransHtml');
+      const el = transBlockEl(id);
+      if (!box || !el) return;
+      const br = box.getBoundingClientRect();
+      const er = el.getBoundingClientRect();
+      const fully = er.top >= br.top + 12 && er.bottom <= br.bottom - 12;
+      if (!fully) box.scrollTop += (er.top - br.top) - Math.max(24, br.height * 0.22);
+      return;
+    }
+    window.CmpPages?.focus(id, { flash: false });
   }
 
   /**
@@ -7705,9 +7860,9 @@
     if (!cmp.blockById.has(id)) return;
     cmp.activeId = id;
     markCmpBlockActive(id, flash);
-    // 译文页定位：只在「点原文」时发生；从译文页点回原文时传 scrollTrans:false，
+    // 译文定位：只在「点原文」时发生；从译文栏点回原文时传 scrollTrans:false，
     // 否则会把用户刚点的那一段又滚一遍，看起来像「点一下跳两下」。
-    if (scrollTrans && cmp.view !== 'pdf') window.CmpPages?.focus(id, { flash: false });
+    if (scrollTrans && cmp.view !== 'pdf') cmpFocusTrans(id);
     if (revealPdf) {
       // 阅读模式下原文栏是重排文本流：把 PDF 滚一遍等于什么都没发生（用户看到的
       // 就是「点左侧目录没反应」）。改成按「页 + 文字」滚重排视图里的那一段。
@@ -7836,6 +7991,8 @@
         cmp.transCache.set(b.id, piece);
         CU?.cacheSet(String(b.text || ''), target, provider, profileId, piece);
         window.CmpPages?.refreshBlock(b.id);
+        // 文本重排那一栏也要跟着换：只重画这一块，不重铺整篇（209 块重铺会闪一下）
+        cmpRefreshHtmlBlock(b);
       });
       refreshCmpCounts();
       if (cmp.activeId) cmpUpdateBlockBar(cmp.activeId);
@@ -8103,8 +8260,8 @@
     const hint = cmpEl('cmpSyncHint');
     if (hint) {
       hint.textContent = cmp.view === 'split'
-        ? '点原文段落 → 译文页定位 · 滚动不联动'
-        : cmp.view === 'pdf' ? '只看原文 · 点段落仍会翻译到右栏' : '只看译文页 · 点段落可跳回原文';
+        ? '点原文段落 → 译文定位 · 滚动不联动'
+        : cmp.view === 'pdf' ? '只看原文 · 点段落仍会翻译到右栏' : '只看译文 · 点段落可跳回原文';
     }
     // 「仅原文」下译文栏隐藏，选中框照旧留在 PDF 上；「仅译文」下 PDF 隐藏，把框收掉
     if (cmp.view === 'trans') clearPdfPick();
@@ -8113,11 +8270,11 @@
       // 容器宽度变了，等一帧再量（display 刚从 none 切回来时 clientWidth 还是 0）
       requestAnimationFrame(() => { try { fitWidth(); } catch (_) { /* 还没加载 PDF 时忽略 */ } });
     } else if (cmp.activeId) {
-      // 译文页刚重新显形（宽度从 0 变回来），等一帧再定位
-      requestAnimationFrame(() => window.CmpPages?.focus(cmp.activeId, { flash: false }));
+      // 译文栏刚重新显形（宽度从 0 变回来），等一帧再定位
+      requestAnimationFrame(() => cmpFocusTrans(cmp.activeId));
     }
-    // 译文栏宽度变了，译文页要按新宽度重排一次（字号是跟着块宽算的）
-    requestAnimationFrame(() => window.CmpPages?.refit());
+    // 译文栏宽度变了：版面还原要按新宽度重排（字号跟着块宽算），文本重排不需要
+    if (cmp.style === 'page') requestAnimationFrame(() => window.CmpPages?.refit());
   }
 
   /** 按当前配对方式导出对照笔记（原文引用 + 译文的 Markdown）。 */
@@ -8139,6 +8296,40 @@
   function bindCmpEvents() {
     initCmpResizers();
     bindCmpView(cmp.view);
+    bindCmpStyle(cmp.style);
+    toggleCmpDrawer(false);
+
+    // 译文样式：版面还原 / 文本重排
+    cmpEl('cmpStyleSeg')?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-cmpstyle]');
+      if (b) bindCmpStyle(b.dataset.cmpstyle);
+    });
+
+    // 缩放百分比 → 回到适应宽度
+    cmpEl('cmpTransZoom')?.addEventListener('click', () => window.CmpPages?.fitWidth?.());
+
+    // 目录抽屉
+    cmpEl('cmpOutlineToggle')?.addEventListener('click', () => toggleCmpDrawer());
+    cmpEl('cmpDrawerClose')?.addEventListener('click', () => toggleCmpDrawer(false));
+    cmpEl('cmpDrawerMask')?.addEventListener('click', () => toggleCmpDrawer(false));
+    // Esc 先收抽屉（它是个浮层，关它比关别的更符合直觉）
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !cmp.on || !cmp.drawer) return;
+      toggleCmpDrawer(false);
+      e.stopPropagation();
+    }, true);
+
+    // 文本重排：点某一段 → 原文定位（与版面还原的点击行为一致）
+    cmpEl('cmpTransHtml')?.addEventListener('click', (e) => {
+      if (window.getSelection()?.toString().trim()) return;
+      if (e.target.closest('[data-cmp-img]')) return;   // 点裁图开大图，由原有逻辑接管
+      const el = e.target.closest('.cmp-block[data-block-id]');
+      if (!el) return;
+      const id = el.dataset.blockId;
+      const b = cmp.blockById.get(id);
+      const missing = b && b.translatable && !String(b.translation || '').trim() && !cmp.transCache.has(id);
+      cmpSelectBlock(id, { revealPdf: true, scrollTrans: false, flash: true, translate: !!missing });
+    });
 
     const pairSel = cmpEl('cmpPairMode');
     if (pairSel) {

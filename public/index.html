@@ -1831,7 +1831,7 @@
            ① 版面识别一跑完，就能先看「结构」（大纲 + 原文流，译文留空）—— GET /layout/align
            ② 跑过全文翻译后换成「已翻译」版（GET /jobs 里 kind==='align' 的产物）
          所以从结构切到已翻译不会错位，用户点哪一段就按需翻哪一段（走 /api/translate）。 -->
-    <div id="prCmpMode" class="pr-cmp-mode hidden">
+    <div id="prCmpMode" class="pr-cmp-mode hidden" data-view="split" data-style="page" data-drawer="off">
       <!-- 启动面板：选翻译引擎整篇翻译。四区已经就绪时它是可收起的浮层（右上关闭按钮）。 -->
       <div class="cmp-start" id="cmpStart">
         <div class="cmp-start-card">
@@ -1879,6 +1879,7 @@
            刻意放在四区之上，而不是某一栏的栏头里 —— 若挂在「原文」栏头上，
            切到「仅译文」时原文栏连同切换按钮一起被隐藏，用户就被卡死在那个视图里。 -->
       <div class="cmp-bar" id="cmpBar">
+        <button id="cmpOutlineToggle" class="cmp-bar-btn cmp-bar-btn-ghost" title="展开 / 收起本文大纲（抽屉形式：收起后正文拿满三栏宽度）"><svg class="ico ico" aria-hidden="true"><use href="#i-list"/></svg>大纲</button>
         <div class="pn-seg pn-seg-sm" id="cmpViewSeg">
           <button class="pn-seg-btn" data-cmpview="pdf" title="只看原文 PDF">仅原文</button>
           <button class="pn-seg-btn active" data-cmpview="split" title="左原文页、右译文页；滚动不同步，点段落互相定位">原文译文</button>
@@ -1899,15 +1900,19 @@
       </div>
 
       <div class="cmp-panes" id="cmpPanes">
-        <!-- ---------- 最左：本文大纲 ---------- -->
+        <div class="cmp-drawer-mask" id="cmpDrawerMask"></div>
+
+        <!-- ---------- 本文大纲（抽屉：默认收起，盖在原文栏上；不再长期占一列） ---------- -->
         <aside class="cmp-pane cmp-outline" data-cmp="outline">
           <div class="cmp-pane-head">
-            <span class="cmp-pane-title">目录</span>
-            <input id="cmpOutlineSearch" class="cmp-outline-search" type="search" placeholder="搜索" />
+            <span class="cmp-pane-title">大纲</span>
+            <button class="cmp-drawer-x" id="cmpDrawerClose" title="收起大纲"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button>
+          </div>
+          <div class="cmp-drawer-search">
+            <input id="cmpOutlineSearch" class="cmp-outline-search" type="search" placeholder="搜索章节" />
           </div>
           <div class="cmp-outline-list" id="cmpOutlineList"></div>
         </aside>
-        <div class="pn-resizer" data-cmpresize="outline" title="拖动调整目录宽度"></div>
 
         <!-- ---------- 中左：原文 PDF。宿主容器：进入对照精读时把 #prPages 整个搬进来，
              退出时搬回 .pr-main —— 与笔记模式复用 #prPages 是同一个手法。
@@ -1924,10 +1929,18 @@
              滚动与原文栏**不联动**（只有点段落才互相定位），避免两边抢滚动条。 ---------- -->
         <section class="cmp-pane cmp-trans" data-cmp="trans">
           <div class="cmp-pane-head">
-            <span class="cmp-pane-title">译文页</span>
+            <span class="cmp-pane-title">译文</span>
             <span class="side-count" id="cmpTransCount">0</span>
+            <div class="pn-seg pn-seg-sm ctp-style-seg" id="cmpStyleSeg">
+              <button class="pn-seg-btn active" data-cmpstyle="page" title="把译文按原坐标填回 PDF 页面：图表 / 表格 / 公式保持原样，读起来和原文同一版式">版面还原</button>
+              <button class="pn-seg-btn" data-cmpstyle="flow" title="把译文排成连续文本流：字号统一、不分栏，适合一口气读">文本重排</button>
+            </div>
+            <button class="ctp-zoom hidden" id="cmpTransZoom" title="点击回到「适应宽度」（Ctrl + 滚轮可缩放）">100%</button>
           </div>
+          <!-- 版面还原：底图 + 按原坐标覆盖的译文块 -->
           <div class="cmp-flow ctp-scroll" id="cmpTransFlow"></div>
+          <!-- 文本重排：连续文本流（旧版读法，保留给「只想顺着读一遍」的场景） -->
+          <div class="cmp-flow cmp-flow-html" id="cmpTransHtml"></div>
           <!-- 选中块的操作条：贴在译文栏底部，只在选中某一块时出现 -->
           <div class="cmp-block-bar hidden" id="cmpBlockBar">
             <span class="cmp-block-tag" id="cmpBarKind" data-kind="body">正文</span>

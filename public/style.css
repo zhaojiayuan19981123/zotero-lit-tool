@@ -4015,11 +4015,23 @@ body.pn-resizing * { cursor: col-resize !important; }
 .cmp-bar-spacer { flex: 1; }
 /* 工具条上的「整篇翻译」：黑胶囊 —— reader 的主操作就是这个观感 */
 .cmp-bar-btn {
+  /* inline-flex：.ico 是 display:block，光靠默认的 button 排版会把图标和文字
+     挤成上下两行（按钮看着只剩一个图标）。这里统一压成一行。 */
+  display: inline-flex; align-items: center; gap: 5px;
   flex-shrink: 0; border: 1px solid var(--pill); background: var(--pill);
   color: var(--pill-text); border-radius: 999px;
-  font-family: inherit; font-size: 12px; font-weight: 600;
+  font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1.5;
   padding: 5px 14px; cursor: pointer; white-space: nowrap;
   transition: background .14s, border-color .14s, transform .1s;
+}
+.cmp-bar-btn > .ico { width: 14px; height: 14px; display: block; }
+/* 次要动作（目录抽屉开关）：浅色描边，不跟主操抢注意力 */
+.cmp-bar-btn-ghost {
+  background: var(--surface); color: var(--ink-2); border-color: var(--border);
+}
+.cmp-bar-btn-ghost:hover { background: var(--row-hover); border-color: var(--ink-3); color: var(--ink); }
+.cmp-bar-btn-ghost.active {
+  background: var(--primary-soft); border-color: var(--primary); color: var(--primary);
 }
 .cmp-bar-btn:hover { background: var(--pill-hover); border-color: var(--pill-hover); }
 .cmp-bar-btn:active { transform: scale(.97); }
@@ -4034,10 +4046,28 @@ body.pn-resizing * { cursor: col-resize !important; }
   border: 1px solid var(--hair); border-radius: 6px; background: var(--surface); color: var(--text);
 }
 
-/* ---------- 四区容器 ---------- */
-.cmp-panes { flex: 1; display: flex; align-items: stretch; overflow: hidden; min-height: 0; }
+/* ---------- 三栏容器（目录改成抽屉，不再占列） ---------- */
+.cmp-panes { flex: 1; display: flex; align-items: stretch; overflow: hidden; min-height: 0; position: relative; }
 .cmp-pane { display: flex; flex-direction: column; overflow: hidden; min-width: 0; background: var(--surface); min-height: 0; }
-.cmp-outline { background: var(--side-1); border-right: 1px solid var(--hair); }
+/* 目录抽屉：默认收起（移出左边缘），点工具条上的「目录」滑出，盖在原文栏上——
+   这样正文永远拿满三栏宽度，不再被一条 260px 的大纲长期占着。 */
+.cmp-outline {
+  position: absolute; left: 0; top: 0; bottom: 0; z-index: 45;
+  width: 300px; max-width: 82%;
+  background: var(--side-1); border-right: 1px solid var(--hair);
+  box-shadow: 8px 0 28px rgba(0, 0, 0, .16);
+  transform: translateX(-101%); transition: transform .22s cubic-bezier(.3, .7, .3, 1);
+  will-change: transform;
+}
+.pr-cmp-mode[data-drawer="on"] .cmp-outline { transform: none; }
+/* 抽屉下面垫一层半透明遮罩：点空白处就收起 */
+.cmp-drawer-mask {
+  position: absolute; inset: 0; z-index: 40; background: rgba(12, 14, 18, .28);
+  opacity: 0; pointer-events: none; transition: opacity .22s ease;
+}
+.pr-cmp-mode[data-drawer="on"] .cmp-drawer-mask { opacity: 1; pointer-events: auto; }
+/* 抽屉不可拖宽，原来那根分隔条一并收掉 */
+.pn-resizer[data-cmpresize="outline"] { display: none !important; }
 .cmp-src { background: var(--panel-soft); }
 .cmp-trans { border-left: 1px solid var(--hair); position: relative; }
 .cmp-assist { border-left: 1px solid var(--hair); }
@@ -4090,10 +4120,17 @@ body.pn-resizing * { cursor: col-resize !important; }
 }
 .cmp-pane-head .side-count { margin-left: auto; font-variant-numeric: tabular-nums; }
 
-/* ---------- 最左：本文大纲 ---------- */
-.cmp-outline .cmp-pane-head { flex-wrap: wrap; row-gap: 6px; }
+/* ---------- 目录抽屉 ---------- */
+.cmp-outline .cmp-pane-head { flex-wrap: nowrap; row-gap: 6px; }
+.cmp-drawer-x {
+  flex-shrink: 0; width: 22px; height: 22px; display: inline-flex;
+  align-items: center; justify-content: center;
+  border: 0; border-radius: 5px; background: transparent; color: var(--ink-3); cursor: pointer;
+}
+.cmp-drawer-x:hover { background: var(--row-hover); color: var(--ink); }
+.cmp-drawer-search { padding: 0 10px 8px; }
 .cmp-outline-search {
-  flex: 1 1 100%; width: 100%;
+  width: 100%;
   border: 1px solid var(--border); border-radius: 7px; background: var(--surface);
   font-family: inherit; font-size: 12px; color: var(--text);
   padding: 4px 8px; outline: none; transition: border-color .13s;
@@ -4168,7 +4205,9 @@ body.pn-resizing * { cursor: col-resize !important; }
 .cmp-act:hover { background: var(--pill); border-color: var(--pill); color: var(--pill-text); }
 .cmp-act:disabled { opacity: .5; cursor: not-allowed; }
 
-.cmp-block-text { font-size: 13.5px; line-height: 1.85; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+.cmp-block-text { font-size: 13.5px; line-height: 1.85; color: var(--ink); white-space: pre-wrap; word-break: break-word;
+  /* 与「版面还原」同一套字：西文 Times New Roman、中文宋体（两种译文样式看起来才是一份文档） */
+  font-family: 'Times New Roman', SimSun, 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', serif; }
 /* 逐句配对：原文句在上（淡）、译文句在下，一一并列。请求仍按整段发。 */
 .cmp-block-text.cmp-pairs { padding: 2px 0; }
 .cmp-pair { padding: 5px 0 6px; border-bottom: 1px dashed var(--border-soft); }
@@ -4193,13 +4232,15 @@ body.pn-resizing * { cursor: col-resize !important; }
    底图仍是原 PDF 那一页，文字块在原坐标上被白底覆盖、填上译文；
    图表 / 表格 / 公式不遮不翻，原样留在页面上。
    两栏滚动**不联动**，只有点击块才互相定位。 */
+/* align-items 用 flex-start + 每页 margin:auto 居中，而不是 align-items:center：
+   放大后页面比容器宽，center 会让左边那一截滚不到（溢出部分对称地跑出容器）。 */
 .cmp-flow.ctp-scroll {
-  display: flex; flex-direction: column; align-items: center;
+  display: flex; flex-direction: column; align-items: flex-start;
   gap: 18px; padding: 18px 16px 58px; overflow: auto;
   background: var(--panel-2);
 }
 .ctp-page {
-  position: relative; flex: 0 0 auto; background: #fff; overflow: hidden;
+  position: relative; flex: 0 0 auto; margin: 0 auto; background: #fff; overflow: hidden;
   border-radius: 3px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, .10), 0 6px 18px rgba(0, 0, 0, .06);
 }
@@ -4273,6 +4314,22 @@ body.pn-resizing * { cursor: col-resize !important; }
   pointer-events: none; user-select: none;
 }
 .ctp-empty { padding: 48px 18px; text-align: center; font-size: 12.5px; color: var(--ink-3); line-height: 2; }
+
+/* ---------- 译文样式二选一：版面还原（嵌回 PDF 页）/ 文本重排（连续文本流） ---------- */
+.pr-cmp-mode[data-style="flow"] #cmpTransFlow { display: none !important; }
+.pr-cmp-mode[data-style="page"] #cmpTransHtml { display: none !important; }
+.cmp-trans .cmp-pane-head { flex-wrap: wrap; row-gap: 6px; }
+.ctp-style-seg { margin-left: auto; }
+.ctp-style-seg .pn-seg-btn { padding: 4px 8px; font-size: 11.5px; }
+/* 缩放百分比：只在「版面还原」下有意义，点一下回到适应宽度 */
+.ctp-zoom {
+  flex-shrink: 0; height: 22px; padding: 0 7px; margin-left: 6px;
+  border: 1px solid var(--hair); border-radius: 5px; background: var(--surface);
+  font: 500 11px/20px -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: var(--ink-2); font-variant-numeric: tabular-nums; cursor: pointer;
+}
+.ctp-zoom:hover { border-color: var(--ink-3); color: var(--ink); }
+.ctp-zoom.hidden { display: none; }
 
 /* 选中块的操作条：贴译文栏底部，只在选中时出现（旧版是每条译文头上挂一排按钮） */
 .cmp-block-bar {
@@ -4352,10 +4409,9 @@ body.pn-resizing * { cursor: col-resize !important; }
   .cmp-bar .cmp-hint { display: none; }
   .cmp-bar .cmp-engine-state { max-width: 46%; }
 }
-/* 大纲先让位，保证原文 / 译文 / 助读三条流都还在 */
+/* 窄屏：目录改成抽屉后不再占列，就没必要整块隐藏了 —— 只把抽屉收窄一点 */
 @media (max-width: 1240px) {
-  .cmp-outline { display: none !important; }
-  .cmp-outline + .pn-resizer { display: none !important; }
+  .cmp-outline { width: 268px; }
   .cmp-flow { padding: 14px 14px 80px; }
 }
 @media (max-width: 940px) {
@@ -4476,34 +4532,68 @@ body.pn-resizing * { cursor: col-resize !important; }
   color: #6b7280; padding: 4px 2px 10px;
 }
 
-/* ---------- 解析结果文稿（预览与打印共用一套版式） ---------- */
+/* ---------- 解析结果文稿（预览与打印共用一套版式） ----------
+   排版目标：**紧凑**。一份解析结果通常 8~12 节、四五千字，如果按网页那套
+   1em 段间距 + 20px 节间距排，就会散成十几页、中间夹着大片空白。
+   这里按「期刊稿」的口径压：正文 10.5pt / 行高 1.62 / 段间距 0.4em。 */
 .print-doc {
-  padding: 26px 30px 30px; color: #111827; background: #fff;
-  font: 11pt/1.78 'Songti SC', 'Source Han Serif SC', 'Noto Serif CJK SC', SimSun, serif;
+  padding: 22px 26px 24px; color: #111827; background: #fff;
+  font: 10.5pt/1.62 'Times New Roman', SimSun, 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', serif;
 }
 .pd-title {
-  font: 700 17pt/1.42 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  margin: 0 0 8px; letter-spacing: .2px;
+  font: 700 16pt/1.36 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  margin: 0 0 6px; letter-spacing: .2px;
 }
 .pd-meta {
-  font: 9.5pt/1.7 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  color: #4b5563; padding-bottom: 8px; margin-bottom: 14px; border-bottom: 1px solid #d8dbe0;
+  font: 9pt/1.6 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: #4b5563; padding-bottom: 6px; margin-bottom: 10px; border-bottom: 1px solid #d8dbe0;
 }
-.pd-sec { margin: 0 0 13px; break-inside: avoid; }
+/* 不在整节上加 break-inside:avoid —— 一节动辄上千字，强行不拆会把前面那页
+   剩半页留白。改成「节可以跨页，但标题不单独留在页底」（.pd-sec-h 的 break-after）。 */
+.pd-sec { margin: 0 0 10px; }
+.pd-sec:last-of-type { margin-bottom: 6px; }
 .pd-sec-h {
-  font: 700 11pt/1.6 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  color: #0f172a; margin: 0 0 4px; padding-left: 8px; border-left: 3px solid #2f6feb;
+  font: 700 10.5pt/1.5 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: #0f172a; margin: 0 0 3px; padding-left: 7px; border-left: 3px solid #2f6feb;
+  break-after: avoid; page-break-after: avoid;
 }
-.pd-sec-v { white-space: pre-wrap; word-break: break-word; }
-.pd-sec-v table { border-collapse: collapse; width: 100%; font-size: 10pt; }
-.pd-sec-v th, .pd-sec-v td { border: 1px solid #ccd1d8; padding: 4px 7px; text-align: left; }
-.pd-sec-v h1, .pd-sec-v h2, .pd-sec-v h3 { font-size: 11.5pt; margin: 8px 0 4px; }
-.pd-sec-v ul, .pd-sec-v ol { padding-left: 1.6em; margin: 4px 0; }
-.pd-sec-v code { font: 9.5pt/1.5 'Cascadia Mono', Consolas, monospace; background: #f3f4f6; padding: 1px 4px; border-radius: 3px; }
-.pd-sec-v pre { background: #f6f7f9; border: 1px solid #e2e5ea; border-radius: 6px; padding: 8px 10px; overflow: auto; }
+/* 注意这里是 normal 而不是 pre-wrap：
+   Markdown 渲染出来的 HTML（marked）块与块之间带换行符，pre-wrap 会把这些
+   换行当成真空行画出来 —— 一篇文章立刻多出几十行空白，正是「大篇幅空白」的来源。
+   纯文本字段在生成时已经用 <br /> 换行了，不需要 pre-wrap 兜底。 */
+.pd-sec-v { white-space: normal; word-break: break-word; }
+.pd-sec-v p { margin: 0 0 .4em; }
+.pd-sec-v p:last-child { margin-bottom: 0; }
+.pd-sec-v h1, .pd-sec-v h2, .pd-sec-v h3,
+.pd-sec-v h4, .pd-sec-v h5, .pd-sec-v h6 {
+  font: 700 11pt/1.5 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  margin: .7em 0 .3em; break-after: avoid; page-break-after: avoid;
+}
+.pd-sec-v h1:first-child, .pd-sec-v h2:first-child, .pd-sec-v h3:first-child { margin-top: 0; }
+.pd-sec-v ul, .pd-sec-v ol { padding-left: 1.5em; margin: .2em 0 .4em; }
+.pd-sec-v li { margin: 0 0 .12em; }
+.pd-sec-v li > p { margin: 0; }
+.pd-sec-v table { border-collapse: collapse; width: 100%; font-size: 9.5pt; margin: .3em 0 .6em; }
+.pd-sec-v th, .pd-sec-v td { border: 1px solid #ccd1d8; padding: 3px 6px; text-align: left; vertical-align: top; }
+.pd-sec-v blockquote { margin: .3em 0; padding: 2px 0 2px 10px; border-left: 3px solid #d8dbe0; color: #374151; }
+.pd-sec-v hr { border: 0; border-top: 1px solid #e2e5ea; margin: .6em 0; }
+.pd-sec-v code { font: 9pt/1.5 'Cascadia Mono', Consolas, monospace; background: #f3f4f6; padding: 1px 4px; border-radius: 3px; }
+.pd-sec-v pre { background: #f6f7f9; border: 1px solid #e2e5ea; border-radius: 5px; padding: 6px 9px; margin: .35em 0 .5em; overflow: auto; break-inside: avoid; }
 .pd-sec-v pre code { background: none; padding: 0; }
-.pd-empty { color: #6b7280; font-size: 10.5pt; }
+/* 表格 / 代码块 / 图片不拆在页的两半，其余块允许拆（拆开才不会留整页空白） */
+.pd-sec-v tr, .pd-sec-v img, .pd-sec-v blockquote { break-inside: avoid; page-break-inside: avoid; }
+/* 基本信息：一行一条，标签定宽、值自动换行（不用 grid，打印与右栏两头都稳） */
+.pd-facts { margin: 0; }
+.pd-fact { display: flex; gap: 6px; margin: 0 0 2px; }
+.pd-fact b { flex: 0 0 auto; font-weight: 600; color: #6b7280; }
+.pd-fact span { min-width: 0; overflow-wrap: anywhere; }
+.pd-empty { color: #6b7280; font-size: 10pt; }
 .pd-foot {
-  margin-top: 18px; padding-top: 8px; border-top: 1px dashed #d8dbe0;
-  font: 8.5pt/1.6 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; color: #6b7280;
+  margin-top: 12px; padding-top: 6px; border-top: 1px dashed #d8dbe0;
+  font: 8pt/1.5 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; color: #6b7280;
+}
+/* 打印时页边距交给 @page，稿子自身不再叠一圈内边距 */
+@media print {
+  .print-doc { padding: 0; }
+  .pd-sec-v a { color: inherit; text-decoration: none; }
 }

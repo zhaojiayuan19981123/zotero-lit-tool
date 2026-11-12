@@ -17,12 +17,17 @@
  * 页面被用户旋转过时，块也要跟着转，换算统一走 PdfReaderUtils.toDisplayRect ——
  * 与 reader-blocks.js 用的是同一套（否则译文和原文会差 90°）。
  *
- * ============================ 文字怎么塞进原块 ============================
+ * ============================ 字体与字号（用户明确要求「统一」） ============================
  *
- * 译文长度和原文不可能一样，所以字号是**按块算出来的**：二分找「能完整放进块里」
- * 的最大字号（下限 MIN_FONT）。中文译文通常是英文原文字符数的 0.55~0.7 倍，
- * 绝大多数块在 10~14px 就能放下；实在放不下时让底色跟着长高（宁可压到下一块的
- * 留白，也不要把句子截断 —— 截断的译文比排版不齐更糟）。
+ * 字体只有一套：西文 Times New Roman、中文宋体。写法就是把 Times New Roman 放
+ * 最前面 —— 它没有汉字字形，浏览器逐个字符回退，于是拉丁字母落在 TNR、汉字落到
+ * 宋体（macOS 上退到 Songti SC），标题与正文共用同一族，不再出现「标题黑体、正文
+ * 宋体」的割裂感。
+ *
+ * 字号也**不再一块一个值**：先量出本页每块「不改框时能放下的最大字号」，取 60%
+ * 分位作为本页基准（base），全页正文统一用这个字。放不下的块依次走
+ * 「长高（不压下一块）→ 缩号（最后手段）→ 截断」，所以少数超长段落会比别处小
+ * 半号到一号字，但绝大多数文字是同一个尺寸 —— 这正是「统一」要的效果。
  */
 (function () {
   'use strict';
@@ -34,9 +39,22 @@
 
   const MIN_FONT = 6;
   const MAX_FONT = 30;
+  /** 本页统一字号的可读区间。下限就是本页原文字号附近：版面还原的译文不该比原文更小 */
+  const BASE_LO = 7;
+  const BASE_HI = 14;
+  /**
+   * 唯一一套字体：西文 Times New Roman + 中文宋体。
+   *
+   * Times New Roman 不含汉字，浏览器按字符回退 —— 字母落在 TNR，汉字落到 SimSun；
+   * macOS 上 SimSun 不存在，继续退到 Songti SC。顺序不能颠倒：SimSun 自己带拉丁
+   * 字形，放前面会让英文也变成宋体那副瘦硬的样子。
+   */
+  const SERIF = "'Times New Roman',SimSun,'Songti SC','Noto Serif CJK SC','Source Han Serif SC',serif";
   const PAGE_PAD = 20;      // 滚动容器左右留白（与 CSS 保持一致）
   const MAX_RENDERED = 5;   // 同时保留几页画布（多了内存吃不消）
   const DPR_BUDGET = 16e6;  // 单页画布像素预算，和主 PDF 视图同一口径
+  const ZOOM_LO = 0.5;
+  const ZOOM_HI = 3;
 
   const KIND_LABEL = {
     title: '大标题', heading: '小节标题', body: '正文', caption: '图题',
@@ -63,6 +81,10 @@
     errors: new Map(),      // id -> 错误信息
     docRetry: null,         // 等 pdf.js 文档就位的定时器
     docWait: 0,
+    zoom: 1,                // 用户缩放倍数（适应宽度 = 1）
+    zoomTimer: 0,           // 滚轮缩放的防抖句柄
+    base: new Map(),        // page -> 本页统一字号
+    wheelBound: false,
   };
 
   function U() { return window.PdfReaderUtils; }
@@ -94,12 +116,12 @@
     return { w: 612, h: 792, rotation: 0 };
   }
 
-  /** 译文页的缩放：铺满容器宽度（每页各算各的，极少见的不等宽页也能贴边） */
+  /** 译文页的缩放：铺满容器宽度（每页各算各的，极少见的不等宽页也能贴边），再乘用户缩放 */
   function computeScale(n = 1) {
     const host = state.host;
     const avail = Math.max(160, (host?.clientWidth || 0) - PAGE_PAD * 2 - 4);
     const size = pageSize(n);
-    return clamp(avail / Math.max(1, size.w), 0.35, 2.6);
+    return clamp((avail / Math.max(1, size.w)) * state.zoom, 0.2, 4);
   }
 
   // ==================== 装配 ====================
@@ -117,6 +139,12 @@
       host.addEventListener('click', onClick, true);
       state.clickBound = true;
     }
+    if (!state.wheelBound) {
+      // Ctrl / ⌘ + 滚轮（触控板捏合在 Chromium 里也带 ctrlKey）缩放译文页。
+      // passive:false 才能 preventDefault 掉「整个应用被缩放」的默认行为。
+      host.addEventListener('wheel', onWheel, { passive: false });
+      state.wheelBound = true;
+    }
     if (typeof ResizeObserver === 'function') {
       state.resizeObserver = new ResizeObserver(() => {
         if (state.destroyed || !state.blocks.length) return;
@@ -125,6 +153,42 @@
       });
       state.resizeObserver.observe(host);
     }
+  }
+
+  function onWheel(e) {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    const step = e.deltaY > 0 ? 1 / 1.1 : 1.1;
+    setZoom(state.zoom * step);
+  }
+
+  /**
+   * 设置缩放。
+   *
+   * 重铺整页要重建十几个占位节点，60Hz 的滚轮连发会把主线程打满，所以：
+   * 百分比立刻更新（用户看得见反馈），真正的重排防抖 90ms 一次。
+   */
+  function setZoom(z) {
+    const next = clamp(Number(z) || 1, ZOOM_LO, ZOOM_HI);
+    if (Math.abs(next - state.zoom) < 0.001) return;
+    state.zoom = next;
+    state.opts.onZoom?.(next);
+    if (state.zoomTimer) clearTimeout(state.zoomTimer);
+    state.zoomTimer = setTimeout(() => {
+      state.zoomTimer = 0;
+      refit();
+    }, 90);
+  }
+
+  function getZoom() { return state.zoom; }
+
+  /** 回到「适应宽度」 */
+  function fitWidth() {
+    if (Math.abs(state.zoom - 1) < 0.001) return;
+    state.zoom = 1;
+    state.opts.onZoom?.(1);
+    if (state.zoomTimer) { clearTimeout(state.zoomTimer); state.zoomTimer = 0; }
+    refit();
   }
 
   function setBlocks(blocks) {
@@ -145,14 +209,18 @@
   }
 
   /** 重建所有页面占位（缩放变化、换文档、数据换版都走这里） */
-  function buildPages() {
+  function buildPages(view = null) {
     const host = state.host;
     if (!host) return;
     teardownObservers();
-    const keepScroll = host.scrollTop;
+    // 重铺后页面高度会变（缩放 / 换数据）。记住了「滚动比例 + 选中块在屏幕上的位置」，
+    // 铺完再还原 —— 否则缩一次就跳回页首，读长文献时很打断。
+    const ratio = view?.ratio ?? (host.scrollTop / Math.max(1, host.scrollHeight));
+    const anchor = view?.anchor || null;
     host.innerHTML = '';
     state.wraps.clear();
     state.rendered = [];
+    state.base.clear();
     state.gen += 1;
     const total = pageCount();
     if (!total) {
@@ -194,10 +262,32 @@
     // 那样页面就永远停在占位符上。这里主动把视口内的页渲染掉。
     requestAnimationFrame(() => primeVisible());
 
-    // 恢复滚动位置（重排前后用户读的还是同一段）
-    host.scrollTop = keepScroll;
+    // 恢复阅读位置：有选中块就跟着块走（缩放在读的那一段不会跑掉），否则按比例
+    restoreScroll(ratio, anchor);
     const active = state.activeId && state.blocks.find((b) => b.id === state.activeId);
     if (active) requestAnimationFrame(() => focus(active.id, { flash: false }));
+  }
+
+  /**
+   * 恢复阅读位置。
+   *
+   * 有锚点块时按**几何**还原（块所在的页 + 页内纵向百分比），不依赖该块已渲染 ——
+   * 缩放那一刻目标页往往还没画出来，等它画好再对齐就晚了（用户已经看到跳了一下）。
+   */
+  function restoreScroll(ratio, anchor) {
+    const host = state.host;
+    if (!host) return;
+    if (anchor) {
+      const b = state.blocks.find((x) => x.id === anchor.id);
+      const rec = b ? state.wraps.get(b.page) : null;
+      const p = b ? blockPercent(b, pageSize(b.page)) : null;
+      if (rec && p) {
+        const wrapTop = (rec.wrap.getBoundingClientRect().top - host.getBoundingClientRect().top) + host.scrollTop;
+        host.scrollTop = Math.max(0, wrapTop + (p.top / 100) * rec.wrap.clientHeight - anchor.offset);
+        return;
+      }
+    }
+    host.scrollTop = ratio * Math.max(0, host.scrollHeight - host.clientHeight);
   }
 
   /** 主动渲染视口内（含上下各一屏）的页面 */
@@ -347,7 +437,58 @@
     // 先算「每块往下还能长多高」，再铺块：译文比原文长时，长到不压下一块为止
     const merged = mergeOverlapping(items);
     for (const it of merged) it.grow = growRoom(it, merged, pageH);
-    for (const it of merged) rec.layer.appendChild(buildBlockEl(it.b, it.p, it.grow));
+    const jobs = [];
+    for (const it of merged) {
+      const el = buildBlockEl(it.b, it.p, it.grow);
+      rec.layer.appendChild(el);
+      const textEl = el.querySelector('.ctp-text');
+      if (textEl) jobs.push({ el, textEl, grow: it.grow, kind: it.b.kind || 'body' });
+    }
+    if (jobs.length) fitPage(n, jobs);
+  }
+
+  /**
+   * 一页一次排版：先量完所有块，定下一个统一的基准字号，再统一落笔。
+   *
+   * 分两遍是必须的 —— 只有量完本页全部块，才知道「基准」该定多大。逐块各算各的
+   * 正是用户看到「同一页里有大字有小字」的原因。
+   */
+  function fitPage(n, jobs) {
+    const usable = [];
+    for (const j of jobs) {
+      if (!prepText(j.el, j.textEl)) continue;
+      j.max = maxFit(j.textEl, j.el.clientHeight);
+      j.len = (j.textEl.textContent || '').length;
+      usable.push(j);
+    }
+    const base = pickBase(usable);
+    state.base.set(n, base);
+    for (const j of usable) applySize(j, base);
+  }
+
+  /**
+   * 本页统一字号 = 各块「能放下的最大字号」的**按字数加权**中位数。
+   *
+   * 两个要点：
+   *   · 加权：一页里十几个小字块（作者单位、脚注、页码行）字少，一个长正文块字多；
+   *     不按字数加权的话，小字块的极值会把整页基准拖到最低那档。
+   *   · 取中位数而不是最小值：最小值意味着「一个超长脚注决定全页」，那正是把字号
+   *     压到 6px 的原因。中位数下仍有一半的文字要降档，所以还要靠「先长高」兜住。
+   */
+  function pickBase(jobs) {
+    const items = jobs
+      .filter((j) => Number.isFinite(j.max) && j.max > 0)
+      .map((j) => ({ max: j.max, w: Math.max(1, Math.min(400, j.len || 1)) }))
+      .sort((a, b) => a.max - b.max);
+    if (!items.length) return clamp(11, BASE_LO, BASE_HI);
+    const total = items.reduce((s, x) => s + x.w, 0);
+    let acc = 0;
+    let pick = items[items.length - 1].max;
+    for (const it of items) {
+      acc += it.w;
+      if (acc >= total * 0.5) { pick = it.max; break; }
+    }
+    return Math.round(clamp(pick, BASE_LO, BASE_HI) * 2) / 2;   // 取到 0.5px 档
   }
 
   /**
@@ -477,8 +618,7 @@
       text.className = 'ctp-text';
       text.textContent = tr;
       el.appendChild(text);
-      // 先挂到文档里再量尺寸：脱离文档的节点 scrollHeight 恒为 0
-      fitWhenMounted(el, text, grow);
+      // 字号由 paintLayer / refreshBlock 统一给（这里还不知道本页基准是多少）
     } else if (state.pending.has(b.id)) {
       el.classList.add('ctp-pending');
       el.innerHTML = '<span class="ctp-spin"></span>';
@@ -492,89 +632,95 @@
     return el;
   }
 
-  /**
-   * 文字要挂进真实布局才量得准，所以推迟到下一帧再二分字号。
-   * 用 requestAnimationFrame 而不是同步量：一次铺 30 个块同步二分会把主线程卡住。
-   */
-  function fitWhenMounted(el, textEl, grow = 0) {
-    requestAnimationFrame(() => {
-      if (!el.isConnected) return;
-      fitText(el, textEl, grow);
-    });
-  }
-
-  function fitText(el, textEl, grow = 0) {
+  /** 落笔前的公共样式：宽度 / 内边距 / 字体族 / 行高 / 对齐。返回 false = 还没进布局，量不了 */
+  function prepText(el, textEl) {
     const w = el.clientWidth;
     const h = el.clientHeight;
-    if (!w || !h) return;
+    if (!w || !h) return false;
     const kind = el.dataset.kind;
+    const isTitle = kind === 'title';
+    const isHeading = isTitle || kind === 'heading';
     const padX = w < 60 ? 2 : 4;
     const padY = h < 18 ? 1 : 2;
     textEl.style.width = Math.max(8, w - padX * 2) + 'px';
     textEl.style.padding = padY + 'px ' + padX + 'px';
+    textEl.style.boxSizing = 'border-box';
     el.style.padding = '0';
-
-    const isHeading = kind === 'title' || kind === 'heading';
-    const family = isHeading
-      ? "'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif"
-      : "'Songti SC','Source Han Serif SC','Noto Serif CJK SC',SimSun,serif";
-    textEl.style.fontFamily = family;
+    textEl.style.fontFamily = SERIF;
     textEl.style.fontWeight = isHeading ? '700' : '400';
-    textEl.style.lineHeight = isHeading ? '1.26' : '1.32';
-    textEl.style.textAlign = kind === 'title' ? 'center' : 'justify';
+    textEl.style.lineHeight = isTitle ? '1.4' : isHeading ? '1.35' : '1.55';
+    textEl.style.textAlign = isTitle ? 'center' : 'justify';
+    // 中文按字断行本来就没问题；关掉连字符与「单词中间断行」能让英文缩写在块里不被拆开
+    textEl.style.hyphens = 'none';
+    textEl.style.wordBreak = 'normal';
+    textEl.style.overflowWrap = 'break-word';
+    return true;
+  }
 
-    const cap = clamp(h, MIN_FONT, MAX_FONT);
+  /** 在不改动块高度的前提下，能完整放下的最大字号 */
+  function maxFit(textEl, h) {
+    const ceil = Math.min(MAX_FONT, Math.max(MIN_FONT, h));
+    textEl.style.fontSize = ceil + 'px';
+    if (textEl.scrollHeight <= h + 0.5) return ceil;
     let lo = MIN_FONT;
-    let hi = cap;
-    textEl.style.fontSize = hi + 'px';
-    if (textEl.scrollHeight <= h + 0.5 && textEl.scrollWidth <= w + 0.5) {
-      el.style.height = 'auto';
-      el.style.minHeight = h + 'px';
-      return;
-    }
-
-    // 短标题不折行：标题折成两半（"ARTICLE INF / O"）比缩一号字难看得多，
-    // 所以宁可把字号压到放得下宽度为止。
-    const short = (textEl.textContent || '').trim().length <= 16;
-    if (isHeading && short) {
-      textEl.style.whiteSpace = 'nowrap';
-      let fs = cap;
-      textEl.style.fontSize = fs + 'px';
-      let guard = 0;
-      while (fs > 5 && textEl.scrollWidth > w - padX * 2 && guard++ < 60) {
-        fs -= 0.5;
-        textEl.style.fontSize = fs + 'px';
-      }
-      if (textEl.scrollHeight <= h + 0.5) {
-        el.style.height = 'auto';
-        el.style.minHeight = h + 'px';
-        return;
-      }
-    }
-
-    for (let i = 0; i < 8; i++) {
+    let hi = ceil;
+    for (let i = 0; i < 5; i++) {
       const mid = (lo + hi) / 2;
       textEl.style.fontSize = mid + 'px';
       if (textEl.scrollHeight <= h + 0.5) lo = mid; else hi = mid;
     }
-    textEl.style.fontSize = lo.toFixed(2) + 'px';
+    return lo;
+  }
 
-    // 最小字号还放不下：白底往下长 —— 但只长到「下一块的上沿」，不压别人的字。
-    // 长到头仍然放不下才截断（加 … 角标，悬停看全文）——文字互相叠着最难读。
-    if (textEl.scrollHeight > h + 0.5) {
-      const need = textEl.scrollHeight + 1;
-      const target = Math.min(need, h + Math.max(0, grow));
-      el.style.height = 'auto';
-      el.style.minHeight = h + 'px';
-      el.style.maxHeight = target + 'px';
-      el.style.overflow = 'hidden';
-      if (need > target + 1) {
-        el.classList.add('ctp-clip');
-        el.title = textEl.textContent || '';
-      } else {
-        el.classList.add('ctp-grown');
+  /**
+   * 按本页基准字号落笔。
+   *
+   * 字号只允许三档：base、base-0.5、base-1（只在放不下时往下走）。为什么不「每块算到
+   * 刚好放得下」：那样实测一页会出现 6 / 6.25 / 6.69 / 6.75 / 7.5 五种字，肉眼就是
+   * 「排版乱、字号不统一」。0.5px 一档的差别几乎看不出，超过两档才会被察觉。
+   *
+   * 顺序是「先长高、后降档」：长高只多吃一点行间留白，降档会破坏字号统一。
+   */
+  function applySize(j, base) {
+    const isTitle = j.kind === 'title';
+    const isHeading = isTitle || j.kind === 'heading';
+    const want = isTitle ? base * 1.35 : isHeading ? base * 1.15 : base;
+    const h = Math.round(j.el.clientHeight || 0);
+    const room = Math.round(Math.max(0, j.grow || 0));
+    const target = h + room;
+
+    let fs = Math.round(want * 2) / 2;
+    if (fs < MIN_FONT) fs = MIN_FONT;
+
+    // 标题不做「先按原框缩号」的预判：原框是给英文排的一行高，中文标题哪怕同字号
+    // 也常常高出一两像素，先缩号会让标题比正文还小。交给下面的 target（含可长高度）
+    // 判断就够了 —— target 的上沿就是下一块的位置，不会压到正文。
+
+    for (let step = 0; step < 3; step++) {
+      const size = Math.max(MIN_FONT, Math.round((fs - step * 0.5) * 2) / 2);
+      j.textEl.style.fontSize = size + 'px';
+      if (j.textEl.scrollHeight <= target + 0.5) {
+        growTo(j, h, Math.min(target, Math.ceil(j.textEl.scrollHeight) + 1));
+        j.el.classList.remove('ctp-clip');
+        j.el.removeAttribute('title');
+        return;
       }
+      if (size <= MIN_FONT) break;
     }
+    // 三档都放不下：最低那档 + 长到上限 + 截断（悬停看全文）
+    j.textEl.style.fontSize = Math.max(MIN_FONT, Math.round((fs - 1) * 2) / 2) + 'px';
+    growTo(j, h, target);
+    j.el.classList.add('ctp-clip');
+    j.el.title = j.textEl.textContent || '';
+  }
+
+  /** 让白底长到 need 高（不超过 h 就保持原样） */
+  function growTo(j, h, need) {
+    if (need <= h + 0.5) { j.el.classList.remove('ctp-grown'); return; }
+    j.el.style.height = 'auto';
+    j.el.style.minHeight = h + 'px';
+    j.el.style.maxHeight = Math.round(need) + 'px';
+    j.el.classList.add('ctp-grown');
   }
 
   /** 单块重绘（按需翻译完成后只动这一块，不重铺整页） */
@@ -602,6 +748,17 @@
     const grow = self ? growRoom(self, items, rec.wrap.clientHeight || 1) : 0;
     const el = buildBlockEl(b, p, grow);
     if (old) old.replaceWith(el); else rec.layer.appendChild(el);
+    // 单块重排只是换个内容，字号要沿用本页基准 —— 否则这一块会突然比邻居大/小
+    const textEl = el.querySelector('.ctp-text');
+    if (textEl && prepText(el, textEl)) {
+      const job = { el, textEl, grow, kind: b.kind || 'body' };
+      job.max = maxFit(textEl, el.clientHeight);
+      job.len = (textEl.textContent || '').length;
+      // 本页基准还没算过（例如单块刷新发生在整页铺之前）就先按这一块定一个
+      const base = state.base.get(b.page) || pickBase([job]);
+      state.base.set(b.page, base);
+      applySize(job, base);
+    }
     if (state.activeId === id) el.classList.add('active');
   }
 
@@ -701,14 +858,27 @@
     try { return out.toDataURL('image/jpeg', 0.9); } catch (_) { return null; }
   }
 
+  /**
+   * 按当前宽度（× 缩放）重铺。缩放时以「选中的那一块」为锚点，读到的位置不会跳走。
+   */
   function refit() {
-    if (!state.host || !state.blocks.length) return;
-    buildPages();
+    const host = state.host;
+    if (!host || !state.blocks.length) return;
+    // 栏被藏起来时（切到「文本重排」/「仅原文」）宽度是 0，这时候铺出来的页面
+    // 只有 0.2 倍缩放，白算一遍；等它重新显示时 bindCmpStyle 会再叫一次。
+    if (!host.clientHeight || !host.clientWidth) return;
+    let anchor = null;
+    if (state.activeId) {
+      const el = elOf(state.activeId);
+      if (el) anchor = { id: state.activeId, offset: el.getBoundingClientRect().top - host.getBoundingClientRect().top };
+    }
+    buildPages({ anchor, ratio: host.scrollTop / Math.max(1, host.scrollHeight) });
   }
 
   function destroy() {
     state.destroyed = true;
     teardownObservers();
+    if (state.zoomTimer) { clearTimeout(state.zoomTimer); state.zoomTimer = 0; }
     if (state.resizeObserver) { try { state.resizeObserver.disconnect(); } catch (_) { /* ignore */ } state.resizeObserver = null; }
     if (state.host) state.host.innerHTML = '';
     state.host = null;
@@ -716,9 +886,11 @@
     state.byPage.clear();
     state.wraps.clear();
     state.rendered = [];
+    state.base.clear();
     state.pending.clear();
     state.errors.clear();
     state.activeId = null;
+    state.zoom = 1;
   }
 
   window.CmpPages = {
@@ -731,6 +903,9 @@
     setError,
     capture,
     refit,
+    setZoom,
+    getZoom,
+    fitWidth,
     destroy,
     /** 排查用：不暴露大对象 */
     debug: () => ({
@@ -738,6 +913,8 @@
       rendered: [...state.rendered],
       blocks: state.blocks.length,
       scale: state.scale,
+      zoom: state.zoom,
+      base: [...state.base.entries()],
       activeId: state.activeId,
       hasDoc: !!state.opts.getDoc?.(),
       pageCount: state.opts.pageCount?.(),
