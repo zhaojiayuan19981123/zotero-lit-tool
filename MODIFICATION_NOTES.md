@@ -1,3 +1,64 @@
+## v1.38.1：阅读器 AI 助读的公式/表格/代码块排版修正（DOMPurify 白名单吃掉 KaTeX 样式）（2026-11-13）
+
+> 用户反馈：「修改一下文献阅读时 AI 助手出现的排版乱的情况」（附截图：AI 助读回答里
+> 公式上下标叠在一起、分式没有分数线、表格被压成一字一行、行内公式压到相邻行）。
+
+### 一、根因：清洗白名单把 KaTeX 的排版样式当垃圾删了
+
+AI 回答、笔记预览走同一条渲染链：`marked`（含自定义 blockKatex/inlineKatex 扩展）
+→ KaTeX 输出 → DOMPurify 清洗。
+
+`public/app.js` 的 `uponSanitizeAttribute` 钩子只放行
+`font-family / font-size / text-align / background-color / color` 五类声明，
+其余 `style` 一律删掉。而 **KaTeX 的公式排版完全靠内联 style**：
+
+- `.vlist` 上用 `height` + `top` + `vertical-align` 摆放上下标、分子分母；
+- 分式的分数线是 `.frac-line` 上的 `border-bottom-width`；
+- 根号、`\rule` 还会用到 `padding-left` / `min-width` / `width`。
+
+属性被清掉后 KaTeX 不报错、不缺字，只是**所有垂直位置信息一起丢失** ——
+上下标糊在基线上、分式塌成一行，视觉上就是「公式乱成一坨」。这属于典型
+「修一处安全策略，顺手把第三方渲染库的排版机制一起拆了」。
+
+### 二、次因：AI 气泡只有字号/行高，没有块级排版
+
+`.pr-msg-bubble` 原来只声明了 `font-size / line-height / border / padding`，
+右侧速读面板只有 300~400px 宽，于是浏览器按默认规则硬挤：
+
+| 元素 | 原来的表现 | 原因 |
+| --- | --- | --- |
+| 四列表格 | 压成「Estim / ate」「+0.00 / 47」一字一行 | 表格按可用宽度平均分列 + `word-break: break-word` |
+| Python 代码块 | 整行横向冲出卡片被裁掉 | `pre` 不换行、容器又不滚动 |
+| 整块公式 | 撑破气泡压到相邻段落 | `.katex-display` 无 `overflow-x` |
+| 段落 | 上下各 1em 外边距，13px 字号下空旷得像缺行 | 浏览器默认 `p` 外边距 |
+| 中文断行 | 右括号 `）` 单独跑到下一行开头 | `word-break: break-word` 允许任意断点 |
+
+### 三、修法
+
+1. **新增 `public/md-style-filter.js`**（纯函数，挂在 `window.MdStyleFilter`，有单测）：
+   白名单逻辑从 `app.js` 抽出来，公式子树（`.katex` / `.katex-display` 内）额外放行
+   一组排版属性，**值只认长度**（`em/px/%/纯数字`）与 `position: relative`。
+   `url()` / `expression()` / `position: fixed` / `calc()` 在公式里同样被拦；
+   公式以外的用户样式照旧只放行字体/字号/对齐/颜色。
+   `index.html` 里在 `app.js` **之前**引入（钩子创建时就依赖它）。
+2. **`public/style.css` 给 `.pr-msg-bubble` 补窄栏排版**（原则：能滚就滚，绝不压列宽、
+   绝不裁内容）：表格 `display:block + overflow-x:auto`、`pre` 等宽+浅底+横向滚动、
+   `.katex-display` 横向滚动、行内 `.katex` 禁折行、段落 `.5em`、标题等比缩放、
+   引用块左竖线；并把 `word-break: break-word` 换成 `overflow-wrap: break-word`。
+3. **`public/app.js`**：钩子改为调用 `window.MdStyleFilter.filterStyle(value, inMath)`，
+   `inMath` 由 `node.closest('.katex, .katex-display')` 判定。
+
+### 四、测试与验收
+
+- 新增 `test/md-style-filter.test.mjs`（6 项）：拿**真实 KaTeX 输出**过白名单 ——
+  16 个样本（分式/上下标/求和/根号/矩阵/`\rule`/`\xrightarrow`）× 行内+整块两种模式，
+  渲染出的每一条 `style` 都必须原样保留；同时断言危险声明被拦、公式外不放行排版属性、
+  `index.html` 的加载顺序早于 `app.js`。
+- `node --test`：**698 / 698**（Node 20.10 与 Node 22.22 各一遍，`fail 0`）。
+- `verify-features.mjs`：**75 / 75**（含「无 JS 运行时错误」）。
+- 专项真机（真实阅读器 + 真 HTTP + 真实 DOM 测量）：**13 / 13**；
+  同一段回答横向溢出元素 **52 → 0**，分式分数线在位，表格/代码块/整块公式均可横向滚动。
+
 ## v1.38.0：搜索输入不再卡顿（base64 缩略图 / 四遍搜索 / 同步渲染）、选中文献导出 PDF（2026-11-06）
 
 > 用户反馈：「搜索文献的搜索逻辑，首先，用户在输入的时候，会存在输入卡顿，就是在搜索框里打字的时候，

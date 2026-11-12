@@ -2038,11 +2038,75 @@ mark.anno-c-purple { color: var(--primary); background: none; }
   font-size: 13px; line-height: 1.7; color: var(--text);
   background: var(--bg); border: 1px solid var(--border);
   border-radius: 10px; padding: 9px 12px;
-  white-space: pre-wrap; word-break: break-word;
+  white-space: pre-wrap; word-break: normal; overflow-wrap: break-word;
 }
 .pr-msg.ai .pr-msg-bubble { white-space: normal; }
 .pr-msg.user .pr-msg-bubble { background: var(--primary-soft); border-color: transparent; }
 .pr-msg-bubble img { max-width: 100%; border-radius: 7px; margin: 5px 0; display: block; }
+
+/* ---------- AI 回答里的 Markdown 富文本 ----------
+   右侧速读面板只有 300~400px 宽，而回答里经常出现四列表格、Python 代码块、
+   带分式与求和号的公式。不给一套窄栏排版的话，浏览器只能按默认规则硬挤：
+   · 表格被平均压成「Estim/ate」「+0.00/47」这样一字一行；
+   · 代码块既不换行也不滚动，整行横向冲出卡片被裁掉；
+   · 整块公式默认 auto 宽度，直接把气泡撑破、压到相邻段落上；
+   · 段落上下各 1em 外边距，在 13px 字号下显得空得离谱。
+   这里的取舍统一成一句话：**能滚就滚，绝不压列宽、绝不裁内容**。 */
+.pr-msg-bubble p { margin: .5em 0; }
+.pr-msg-bubble > :first-child { margin-top: 0; }
+.pr-msg-bubble > :last-child { margin-bottom: 0; }
+.pr-msg-bubble h1,
+.pr-msg-bubble h2,
+.pr-msg-bubble h3,
+.pr-msg-bubble h4 { margin: .85em 0 .4em; line-height: 1.45; font-weight: 700; color: var(--text); }
+.pr-msg-bubble h1 { font-size: 15.5px; }
+.pr-msg-bubble h2 { font-size: 14.5px; }
+.pr-msg-bubble h3 { font-size: 13.5px; }
+.pr-msg-bubble h4 { font-size: 13px; }
+.pr-msg-bubble ul,
+.pr-msg-bubble ol { margin: .45em 0; padding-left: 1.45em; }
+.pr-msg-bubble li { margin: .18em 0; }
+.pr-msg-bubble li > p { margin: .2em 0; }
+.pr-msg-bubble hr { margin: .9em 0; border: none; border-top: 1px solid var(--border); }
+.pr-msg-bubble a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+.pr-msg-bubble blockquote {
+  margin: .6em 0; padding: 3px 9px; border-left: 3px solid var(--primary);
+  border-radius: 0 5px 5px 0; background: var(--panel-soft); color: var(--text-2);
+}
+.pr-msg-bubble blockquote > :first-child { margin-top: 0; }
+.pr-msg-bubble blockquote > :last-child { margin-bottom: 0; }
+/* 行内代码：等宽 + 浅底，长串允许断行，避免顶出版心 */
+.pr-msg-bubble code {
+  font-family: var(--font-mono); font-size: .9em; padding: 0 4px;
+  border: 1px solid var(--border-soft); border-radius: 4px;
+  background: var(--panel-soft); word-break: break-all;
+}
+/* 代码块：**横向滚动**，而不是把超长行裁在卡片外 */
+.pr-msg-bubble pre {
+  margin: .6em 0; padding: 9px 10px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--panel-soft);
+  overflow-x: auto; white-space: pre; font-size: 11.5px; line-height: 1.55;
+}
+.pr-msg-bubble pre code {
+  display: block; padding: 0; border: none; background: none;
+  font-size: inherit; line-height: inherit; white-space: inherit; word-break: normal;
+}
+/* 表格：display:block 让表格自己成为横向滚动容器，列宽按内容 max-content 算，
+   不再被面板宽度平均切碎 */
+.pr-msg-bubble table {
+  display: block; width: max-content; max-width: 100%; overflow-x: auto;
+  margin: .6em 0; border-collapse: collapse; font-size: 12px;
+}
+.pr-msg-bubble th,
+.pr-msg-bubble td {
+  padding: 4px 8px; border: 1px solid var(--border);
+  text-align: left; vertical-align: top; word-break: normal;
+}
+.pr-msg-bubble th { background: var(--panel-soft); font-weight: 600; white-space: nowrap; }
+/* 整块公式：允许横向滚动，别撑破气泡；窄栏里左对齐比居中更好读 */
+.pr-msg-bubble .katex-display { margin: .6em 0; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
+/* 行内公式不许被折断（否则 $N=25$ 会被拆成「N=」+ 换行 +「25」） */
+.pr-msg-bubble .katex { white-space: nowrap; }
 .pr-msg-attach { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .pr-msg-attach img { max-width: 110px; max-height: 80px; border-radius: 6px; border: 1px solid var(--border); object-fit: cover; }
 .pr-chat-attach { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 12px; }

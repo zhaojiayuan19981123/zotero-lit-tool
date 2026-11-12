@@ -486,14 +486,18 @@
     });
   }
 
+  // ★ KaTeX 的公式排版靠**内联 style** 完成：`.vlist` 用 height / top / vertical-align
+  //   把上下标、分式的分子分母摆到正确位置，分子分母之间还靠 border-bottom-width 画分数线。
+  //   这些声明一旦被白名单（只放行字体/字号/对齐/颜色）过滤掉，公式不会报错，
+  //   只会**叠成一团** —— 表现就是「AI 回答里的公式乱成一坨」。
+  //   白名单与放行规则见 public/md-style-filter.js（纯函数，有单测拿真实 KaTeX 输出回归）。
   if (window.DOMPurify?.addHook) {
     window.DOMPurify.addHook('uponSanitizeAttribute', (_node, data) => {
       if (data.attrName === 'style') {
-        const allowed = String(data.attrValue || '').split(';').map((part) => part.trim()).filter((part) => {
-          return /^(?:font-family\s*:\s*[\w\s,"'-]+|font-size\s*:\s*\d{1,2}(?:\.\d+)?(?:px|pt|em|rem|%)|text-align\s*:\s*(?:left|center|right|justify)|background-color\s*:\s*(?:#[0-9a-f]{3,8}|[a-z]+)|color\s*:\s*(?:#[0-9a-f]{3,8}|[a-z]+))$/i.test(part);
-        });
-        data.attrValue = allowed.join('; ');
-        data.keepAttr = allowed.length > 0;
+        const inMath = typeof _node?.closest === 'function' && !!_node.closest('.katex, .katex-display');
+        const kept = window.MdStyleFilter ? window.MdStyleFilter.filterStyle(data.attrValue, inMath) : '';
+        data.attrValue = kept;
+        data.keepAttr = !!kept;
       }
       if (data.attrName === 'href' && !/^(?:https?:|mailto:|#|\/)/i.test(String(data.attrValue || ''))) data.keepAttr = false;
     });
