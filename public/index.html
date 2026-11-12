@@ -1881,8 +1881,8 @@
       <div class="cmp-bar" id="cmpBar">
         <div class="pn-seg pn-seg-sm" id="cmpViewSeg">
           <button class="pn-seg-btn" data-cmpview="pdf" title="只看原文 PDF">仅原文</button>
-          <button class="pn-seg-btn active" data-cmpview="split" title="左原文 PDF 右译文，两侧同步滚动">原文译文</button>
-          <button class="pn-seg-btn" data-cmpview="trans" title="只看译文，用于快速通读">仅译文</button>
+          <button class="pn-seg-btn active" data-cmpview="split" title="左原文页、右译文页；滚动不同步，点段落互相定位">原文译文</button>
+          <button class="pn-seg-btn" data-cmpview="trans" title="只看译文页（版面与原页一致，图表表格保持原图）">仅译文</button>
         </div>
         <select id="cmpBarEngine" class="cmp-bar-engine" title="点段落即译 / 重译统一用这个引擎，顶部设置一次即可">
           <option value="auto">引擎：跟随全局设置</option>
@@ -1892,7 +1892,7 @@
           <option value="sentence">逐句配对</option>
         </select>
         <span class="cmp-engine-state" id="cmpEngineState"></span>
-        <span class="cmp-hint" id="cmpSyncHint"></span>
+        <span class="cmp-hint" id="cmpSyncHint">点原文段落 → 译文页定位 · 滚动不联动</span>
         <span class="cmp-bar-spacer"></span>
         <button id="cmpExportNote" class="cmp-bar-btn" title="按当前配对方式导出对照笔记（Markdown，原文引用 + 译文）"><svg class="ico ico" aria-hidden="true"><use href="#i-download"/></svg>对照笔记</button>
         <button id="cmpStartToggle" class="cmp-bar-btn" title="选择翻译引擎，把整篇按版面块逐段翻译"><svg class="ico ico" aria-hidden="true"><use href="#i-globe"/></svg>整篇翻译</button>
@@ -1917,13 +1917,27 @@
         </section>
         <div class="pn-resizer" data-cmpresize="trans" title="拖动调整原文 / 译文宽度"></div>
 
-        <!-- ---------- 中右：译文流 ---------- -->
+        <!-- ---------- 中右：译文页 ----------
+             参照 FreePDF 的读法：不是把译文排成一条文本流，而是**按原版面铺页** ——
+             页面底图仍是原 PDF 那一页，版面块在原坐标上被白底覆盖、填上译文；
+             图表 / 表格 / 公式不遮不翻，原样留在页面上。
+             滚动与原文栏**不联动**（只有点段落才互相定位），避免两边抢滚动条。 ---------- -->
         <section class="cmp-pane cmp-trans" data-cmp="trans">
           <div class="cmp-pane-head">
-            <span class="cmp-pane-title">译文</span>
+            <span class="cmp-pane-title">译文页</span>
             <span class="side-count" id="cmpTransCount">0</span>
           </div>
-          <div class="cmp-flow" id="cmpTransFlow"></div>
+          <div class="cmp-flow ctp-scroll" id="cmpTransFlow"></div>
+          <!-- 选中块的操作条：贴在译文栏底部，只在选中某一块时出现 -->
+          <div class="cmp-block-bar hidden" id="cmpBlockBar">
+            <span class="cmp-block-tag" id="cmpBarKind" data-kind="body">正文</span>
+            <span class="cmp-block-page" id="cmpBarPage"></span>
+            <span class="cmp-block-bar-spacer"></span>
+            <button class="cmp-act" type="button" data-cmpbar="tr" title="只翻译这一段">译</button>
+            <button class="cmp-act" type="button" data-cmpbar="retrans" title="用顶部工具条选择的引擎重新翻译这一段">重译</button>
+            <button class="cmp-act" type="button" data-cmpbar="img" title="放大看这一块的原图">原图</button>
+            <button class="cmp-act" type="button" data-cmpbar="ai" title="把整块截图（不是标题）送进右侧 AI 助读">送 AI</button>
+          </div>
         </section>
         <div class="pn-resizer" data-cmpresize="assist" title="拖动调整 AI 助读宽度"></div>
 
@@ -2108,6 +2122,7 @@
         <div class="pr-panel-body pr-pane hidden" data-prpane="analysis">
           <div class="pr-analysis-head">
             <span id="prAnTitle" class="pr-an-title">—</span>
+            <button id="btnPrAnPrint" class="btn btn-ghost btn-sm" title="把这篇文献的解析结果排成一份独立文档打印（先预览）">打印</button>
             <button id="btnPrAnRefresh" class="btn btn-ghost btn-sm" title="重新解析这篇文献">↻ 重新解析</button>
           </div>
           <div id="prAnalysisBody" class="pr-an-body"></div>
@@ -2203,6 +2218,37 @@
     </div>
   </div>
 
+  <!-- ===== 打印预览 =====
+       原文与「解析结果」是两份独立文档：原文只印论文页（不加标题，免得把页面往下挤），
+       解析结果印成一份排版干净的文稿。预览里看到的就是打出来的样子。 -->
+  <div id="ppOverlay" class="prp hidden">
+    <div class="prp-mask" data-ppclose="1"></div>
+    <div class="prp-panel" role="dialog" aria-modal="true" aria-label="打印预览">
+      <div class="prp-head">
+        <span class="prp-title">打印预览</span>
+        <div class="prp-seg" id="ppSeg">
+          <button class="prp-seg-btn active" data-ppmode="pdf" title="只打印论文原文页，不加标题、不压版面">原文</button>
+          <button class="prp-seg-btn" data-ppmode="analysis" title="把这篇文献的解析结果排成一份独立文稿">解析结果</button>
+        </div>
+        <span class="prp-range" id="ppRangeWrap">
+          <label for="ppRange">页码</label>
+          <input id="ppRange" class="tb-input" placeholder="例如 1-3,5" />
+          <span class="prp-range-total" id="ppTotal"></span>
+        </span>
+        <span class="prp-spacer"></span>
+        <span class="prp-status" id="ppStatus"></span>
+        <button class="btn btn-ghost" id="ppClose">关闭</button>
+        <button class="btn btn-primary" id="ppPrint">打印</button>
+      </div>
+      <div class="prp-body" id="ppBody">
+        <div class="prp-paper" id="ppPaper"></div>
+      </div>
+      <div class="prp-foot">
+        打印会用系统打印对话框（可选打印机 / 份数 / 双面）。原文与解析结果是两份独立文档，分别打印即可。
+      </div>
+    </div>
+  </div>
+
   <!-- ===== 新手引导（首次使用） ===== -->
   <div id="onboarding" class="ob hidden">
     <div class="ob-backdrop" id="obBackdrop"></div>
@@ -2241,6 +2287,8 @@
   <script src="reader-mode.js"></script>
   <script src="reading-heat.js"></script>
   <script src="compare-utils.js"></script>
+  <!-- 对照精读的「译文页」渲染器：按版面块坐标把译文覆盖回原页 -->
+  <script src="cmp-pages.js"></script>
   <script src="paper-note-utils.js"></script>
   <script src="doi-utils.js"></script>
   <script src="rank-utils.js"></script>

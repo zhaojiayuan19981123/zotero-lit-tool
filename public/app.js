@@ -3656,18 +3656,13 @@
 
   // ---------- 解析结果面板（与左侧正在阅读的文献同步） ----------
   // 复用文献中心的字段体系与渲染函数，保证「阅读时看到的解析」与列表完全一致。
-  function renderPrAnalysis() {
-    const box = $('prAnalysisBody');
-    if (!box) return;
-    const it = items.find((x) => x.id === pr.recordId);
-    if (!it) {
-      $('prAnTitle').textContent = '—';
-      box.innerHTML = '<div class="pr-an-empty">未找到对应的文献记录。</div>';
-      return;
-    }
-    $('prAnTitle').textContent = it.title || '（未命名）';
-    $('prAnTitle').title = it.title || '';
-
+  /**
+   * 解析结果的「节」列表 —— 面板与打印共用同一份口径。
+   *
+   * 抽出来是因为打印要单独排一份文稿：如果打印另起一份取值逻辑，面板里改了字段
+   * 顺序或渲染方式，打出来的就会跟屏幕上看到的不一样。
+   */
+  function analysisSections(it) {
     const sections = [];
     // 「基本信息」单独成块展示（这些是元数据，不适合当作解析结果条目）
     const META_KEYS = new Set(['importedAt', 'title', 'authors', 'journal', 'year', 'doi']);
@@ -3681,7 +3676,6 @@
         html: basics.map(([k, v]) => `<div style="margin-bottom:3px"><b style="color:var(--text-3);font-weight:600">${esc(k)}：</b>${esc(v)}</div>`).join(''),
       });
     }
-
     // 其余内容字段按当前文库类型的顺序展示（我的思考已在 TYPE_ORDER 内，不重复追加）
     const order = TYPE_ORDER[it.docType || 'empirical'] || [];
     const cols = order.map((k) => CONTENT_COLS[k]).filter((c) => c && !META_KEYS.has(c.key));
@@ -3691,6 +3685,22 @@
       const rendered = c.type === 'md' ? mdInline(String(v)) : esc(String(v)).replace(/\n/g, '<br />');
       sections.push({ label: c.label, icon: typeIcon(c.type), html: rendered, ai: c.ai });
     }
+    return sections;
+  }
+
+  function renderPrAnalysis() {
+    const box = $('prAnalysisBody');
+    if (!box) return;
+    const it = items.find((x) => x.id === pr.recordId);
+    if (!it) {
+      $('prAnTitle').textContent = '—';
+      box.innerHTML = '<div class="pr-an-empty">未找到对应的文献记录。</div>';
+      return;
+    }
+    $('prAnTitle').textContent = it.title || '（未命名）';
+    $('prAnTitle').title = it.title || '';
+
+    const sections = analysisSections(it);
 
     // 解析状态提示
     const statusHtml = it.status === 'done'
@@ -6098,6 +6108,9 @@
     $('prDirToggle')?.addEventListener('click', () => setPrDir(!pr.dirOpen));
     // 打印：可打当前页 / 指定页码 / 全部，交给本机打印机
     $('prPrint')?.addEventListener('click', () => openPrintDialog());
+    bindPrintPreview();
+    // 解析结果单独成一份文档打印：入口放在面板标题旁，不用先翻工具条
+    $('btnPrAnPrint')?.addEventListener('click', () => openPrintDialog('analysis'));
     $('prDirSearch')?.addEventListener('input', renderPrDir);
     $('prDirList')?.addEventListener('click', async (e) => {
       const row = e.target.closest('[data-prdir-id]');
@@ -6731,9 +6744,6 @@
     activeId: null,
     transCache: new Map(),  // 单段翻译结果：blockId -> 译文（另有 localStorage 持久缓存）
     splitGroups: new Map(), // blockId -> 被分栏/换页截断的同一句的块 id 数组
-    syncing: false,         // 同步滚动加锁，避免两侧互相触发形成回环
-    syncTimer: null,
-    syncAnchorId: null,     // 上一次「同步滚动」认定的锚点块，重复的不再处理
     pdfPickEl: null,        // 画在 PDF 页面上的「当前选中块」方框
     pdfPickId: null,
     meta: null,             // /api/pdf-translate/settings 的结果
@@ -6741,6 +6751,8 @@
     autoId: null,           // 自动管线正在处理（或已处理过）的文献 id —— 一篇只跑一轮
     autoEnter: false,       // true = 当前翻译作业跑完后要自动进入对照精读
     autoTimer: null,        // 自动管线等版面解析的轮询句柄（关阅读器时清掉）
+    srcRO: null,            // 原文栏宽度观察器（栏宽变了要重新 fitWidth）
+    srcROFrame: 0,
   };
 
   function cmpEl(id) { return document.getElementById(id); }
@@ -6802,8 +6814,51 @@
     }
   }
 
-  function initCmpResizers() {
-    const panes = cmpEl('cmpPanes');
+  /**
+   * 盯着原文栏宽度。
+   *
+   * 对照精读里 PDF 装在 .cmp-pane[data-cmp="src"] 里，栏宽由 flex 比例决定 ——
+   * 拖分隔条、切三档视图、进出阅读模式都会改它，但**窗口尺寸没变**，所以
+   * resize 监听收不到通知。不补这一手，缩放就停在进模式那一刻的值上，
+   * 页面比栏宽出一截（实测 833px 的页塞进 509px 的栏，右边整条被裁掉）。
+   */
+  function watchCmpPdfWidth() {
+    const pane = cmpPane('src');
+    if (!pane || typeof ResizeObserver !== 'function' || cmp.srcRO) return;
+    let lastW = pane.clientWidth || 0;
+    cmp.srcRO = new ResizeObserver(() => {
+      const w = pane.clientWidth || 0;
+      if (!w || Math.abs(w - lastW) < 3) { lastW = w; return; }
+      lastW = w;
+      if (cmp.srcROFrame) cancelAnimationFrame(cmp.srcROFrame);
+      cmp.srcROFrame = requestAnimationFrame(() => {
+        cmp.srcROFrame = 0;
+        fitWidthWhenReady();
+      });
+    });
+    cmp.srcRO.observe(pane);
+  }
+
+  /**
+   * 适配宽度，但容忍「文档还没加载完」。
+   *
+   * 进模式那一刻 pr.doc 往往是空的（自动管线比 PDF 字节先跑到），这时 fitWidth()
+   * 直接 return —— 而栏宽也不会再变第二次，缩放在页面加载完之后就再也不重算了，
+   * 结果页面按默认 140% 铺，右边整条被栏宽裁掉。所以这里等文档就位再量。
+   */
+  function fitWidthWhenReady(tries = 0) {
+    if (!cmp.on) return;
+    if (pr.doc) { try { fitWidth(); } catch (_) { /* ignore */ } return; }
+    if (tries > 20) return;   // ≈5s 还没加载完：交给加载完成后的那一次
+    setTimeout(() => fitWidthWhenReady(tries + 1), 250);
+  }
+
+  function unwatchCmpPdfWidth() {
+    if (cmp.srcROFrame) { cancelAnimationFrame(cmp.srcROFrame); cmp.srcROFrame = 0; }
+    if (cmp.srcRO) { try { cmp.srcRO.disconnect(); } catch (_) { /* ignore */ } cmp.srcRO = null; }
+  }
+
+  function initCmpResizers() {    const panes = cmpEl('cmpPanes');
     if (!panes || panes.dataset.resizersBound === '1') return;
     panes.dataset.resizersBound = '1';
     // 每根分隔条调整它左右相邻的两栏：把宽度增量从右边搬到左边（或反之）
@@ -6852,11 +6907,14 @@
     // 与笔记模式互斥（两者要抢同一份 #prPages）
     if (pn.on) { try { await closePnNoteMode(); } catch (_) { /* ignore */ } }
     cmp.on = true;
-    cmp.syncAnchorId = null;
     loadCmpRatios();
     applyCmpRatios();
+    // 栏宽一变就要重新适配 PDF 宽度（拖分隔条 / 切视图都不会触发 window.resize）
+    watchCmpPdfWidth();
     adoptCmpAssist();
     adoptCmpPdfHost();
+    // 译文页宿主先挂好：等 loadCmpAlign 拿到块就能直接铺页
+    mountCmpPages();
     // 已经开着阅读模式进来的：原文栏直接装重排面板，别让用户以为「重排被关掉了」
     if (pr.reading.on) {
       adoptCmpReadingPane();
@@ -6881,18 +6939,21 @@
     setTimeout(() => {
       applyCmpRatios();
       // PDF 换了容器、宽度变了：重新适配宽度，否则页面会横向溢出
-      if (cmp.view !== 'trans') { try { fitWidth(); } catch (_) { /* 还没加载完 PDF 时忽略 */ } }
+      if (cmp.view !== 'trans') fitWidthWhenReady();
       if (cmp.data) renderCmp();
     }, 60);
   }
 
   async function closeCmpMode() {
     cmp.on = false;
+    unwatchCmpPdfWidth();
     // 先退阅读模式：重排面板要搬回 .pr-main，PDF 页也要重新显示出来
     if (pr.reading.on || $('prReading')?.parentElement?.id === 'cmpPdfHost') exitReadingMode({ silent: true });
     closeCmpStream();
     clearPdfPick();
     uninstallCmpPdfHooks();
+    // 译文页的画布与观察器要一起释放（一份 200 页的文献能留下几十张位图）
+    window.CmpPages?.destroy();
     restoreCmpAssist();
     restoreCmpPdfHost();
     cmpEl('prCmpMode')?.classList.add('hidden');
@@ -6905,7 +6966,6 @@
     cmp.orderIndex.clear();
     cmp.heads = [];
     cmp.activeId = null;
-    cmp.syncAnchorId = null;
     cmp.transCache.clear();
     // PrBlocks 里装的还是「对照流块集」，搬回正文区后要换回完整的版面块集
     //（否则普通阅读里点页眉页脚没反应、悬停也少了块）
@@ -7011,6 +7071,36 @@
     // setHooks 是 Object.assign，置 null 即可让 reader-blocks 回落到
     // 「只有带裁图的块响应点击」的默认行为。
     window.PrBlocks.setHooks({ onPick: null });
+  }
+
+  // ---------- 译文页（FreePDF 式版面还原） ----------
+
+  /**
+   * 挂载译文页渲染器。
+   *
+   * 页面底图走同一个 pdf.js 文档（pr.doc），所以不额外下载 PDF；缩放按译文栏
+   * 自身宽度算（两栏宽度本来就不一样），铺出来的页面和原页同版面。
+   */
+  function mountCmpPages() {
+    const host = cmpEl('cmpTransFlow');
+    if (!host || !window.CmpPages) return;
+    window.CmpPages.mount(host, {
+      getDoc: () => pr.doc,
+      pageCount: () => pr.totalPages,
+      pageSize: (n) => pr.pageSizes?.[n - 1] || null,
+      onPick: (id, meta) => cmpPickFromTransPage(id, meta),
+    });
+  }
+
+  /** 点了译文页上的某一块：原文定位过去，按需翻译由调用方决定 */
+  function cmpPickFromTransPage(id, meta) {
+    if (!cmp.on || !cmp.blockById.has(id)) return;
+    cmpSelectBlock(id, {
+      revealPdf: true,
+      scrollTrans: false,
+      flash: true,
+      translate: !!meta?.needTranslate,
+    });
   }
 
   /**
@@ -7348,7 +7438,6 @@
     cmp.orderIndex.clear();
     cmp.heads = [];
     cmp.activeId = null;
-    cmp.syncAnchorId = null;
     cmp.transCache.clear();
     const blocks = Array.isArray(data?.blocks) ? data.blocks : [];
     blocks.forEach((b, i) => {
@@ -7387,82 +7476,35 @@
     return 2;
   }
 
+  // ---------- 渲染（译文页） ----------
+
+  /** 块的中文类型名（与左侧大纲、底部操作条共用一套口径） */
+  function cmpBlockLabel(b) {
+    return window.PrBlocks?.labels?.[b.label] || CMP_KIND_LABEL[b.kind] || '区域';
+  }
+
   /**
-   * 译文栏里的一块。
+   * 铺译文页。
    *
-   * 原文由中间的 PDF 直接呈现，所以这里**只**渲染译文侧。译文缺失时分两种文案：
-   *   - translatable === false（图表 / 表格 / 公式 / 参考文献）：本来就按原样保留；
-   *   - 还没翻：给一个「译」按钮，点一下单独翻这一段。
-   * 一律写「未翻译」会让人以为图表也能翻，所以这两种情况必须分开说。
+   * 与旧版「文本流」的区别：这里只把块交给 CmpPages，由它渲染**和原页同版面的页面**——
+   * 每个文字块在原坐标上被白底覆盖并填译文，图表 / 表格 / 公式原样保留。
+   * 所以「按原样保留」不再是一句占位文字，而是页面上那张真实的图。
    */
-  function cmpBlockHtml(b) {
-    const kind = b.kind || 'body';
-    const label = window.PrBlocks?.labels?.[b.label] || CMP_KIND_LABEL[kind] || '区域';
-    const id = String(b.id || '');
-    const tr = String(b.translation || '').trim() || String(cmp.transCache.get(id) || '').trim();
-    const parts = [];
-
-    const acts = [];
-    if (tr) {
-      acts.push(cmpRetransActs(id));
-    } else if (b.translatable) {
-      acts.push(`<button class="cmp-act" data-cmp-act="tr" data-cmp-id="${esc(id)}" title="只翻译这一段">${ico('globe')}译</button>`);
-    }
-    if (b.image && pr.recordId) {
-      acts.push(`<button class="cmp-act" data-cmp-act="img" data-cmp-id="${esc(id)}" title="放大看原图 / 送 AI 解释">${ico('search')}原图</button>`);
-    }
-    acts.push(`<button class="cmp-act" data-cmp-act="ai" data-cmp-id="${esc(id)}" title="把这一段的原文放进右侧 AI 助读的引用池">${ico('send')}送 AI</button>`);
-
-    parts.push('<div class="cmp-block-meta">'
-      + `<span class="cmp-block-tag" data-kind="${esc(kind)}">${esc(label)}</span>`
-      + (b.page ? `<span class="cmp-block-page">P${esc(String(b.page))}</span>` : '')
-      + `<span class="cmp-block-acts">${acts.join('')}</span></div>`);
-
-    // 无译文且有裁图（图表 / 表格 / 公式）：把裁图放上来，否则这一块只剩一句「按原样保留」，
-    // 读者会以为漏了内容。有译文时不放，免得抢正文的注意力。
-    if (!tr && b.image && pr.recordId) {
-      parts.push(`<img class="cmp-block-img" data-cmp-img="${esc(id)}" src="${esc(layoutAssetUrl(pr.recordId, b.image))}" alt="${esc(label)}" loading="lazy" />`);
-    }
-
-    if (tr) {
-      // 逐句模式下把原文句 / 译文句并列显示；请求始终按段落发，不按句发
-      parts.push(window.CompareUtils
-        ? window.CompareUtils.translationHtml(b.text, tr)
-        : `<div class="cmp-block-text">${esc(tr)}</div>`);
-    } else if (b.translatable) {
-      parts.push('<div class="cmp-block-text cmp-block-missing">—（未翻译）点「译」只翻这一段</div>');
-    } else {
-      parts.push(`<div class="cmp-block-text cmp-block-missing">—（${esc(label)}，按原样保留）</div>`);
-    }
-
-    return `<div class="cmp-block" data-block-id="${esc(id)}" data-kind="${esc(kind)}">${parts.join('')}</div>`;
-  }
-
-  /** 译文栏里某一块的 DOM（id 里的短横线与点号由 CSS.escape 兜住） */
-  function transBlockEl(id) {
-    return cmpEl('cmpTransFlow')?.querySelector(`.cmp-block[data-block-id="${CSS.escape(String(id || ''))}"]`) || null;
-  }
-
   function renderCmp() {
     renderCmpOutline();
     const mode = cmpEl('prCmpMode');
     // 视图属性写回 DOM：CSS 靠 prCmpMode[data-view] 决定「原文 / 译文 / 助读」谁显示
     if (mode) mode.dataset.view = cmp.view;
-    const transFlow = cmpEl('cmpTransFlow');
-    if (!transFlow) return;
     const blocks = Array.isArray(cmp.data?.blocks) ? cmp.data.blocks : [];
-    if (!blocks.length) {
-      transFlow.innerHTML = '<div class="cmp-flow-empty">还没有对照数据。<br />先点工具条上的「整篇翻译」，在弹出的面板里跑一次<b>版面识别</b>。</div>';
-      refreshCmpCounts();
-      return;
-    }
-    transFlow.innerHTML = blocks.map((b) => cmpBlockHtml(b)).join('');
+    window.CmpPages?.setBlocks(blocks);
     refreshCmpCounts();
-    // 重渲染后把选中框补回来：否则整篇翻译跑完（数据换了一版）时，
-    // 用户原先选中的那一段会「掉色」，而 PDF 上的方框还挂着，看着像选中了别的块。
+    // 数据换版（整篇翻译跑完）后，之前选中的块要重新点亮，否则页面上的框会「掉色」
     if (cmp.activeId && cmp.blockById.has(cmp.activeId)) {
-      markCmpBlockActive(cmp.activeId);
+      window.CmpPages?.setActive(cmp.activeId);
       cmpPaintPdfPick(cmp.activeId);
+      cmpUpdateBlockBar(cmp.activeId);
+    } else {
+      cmpUpdateBlockBar(null);
     }
   }
 
@@ -7480,7 +7522,7 @@
     state.textContent = `共 ${blocks.length} 块 · ${translated} 段已译`;
     state.classList.toggle('ready', translated > 0);
     state.title = cmp.structureOnly
-      ? '当前只铺了版面结构。点原文任意段落即可单独翻译，或用「整篇翻译」整篇翻一遍。'
+      ? '当前只铺了版面结构。点任意段落即可单独翻译，或用「整篇翻译」整篇翻一遍。'
       : '这是「整篇翻译」产出的对照数据，与版面块逐段对齐。';
   }
 
@@ -7510,41 +7552,66 @@
     });
   }
 
-  // ---------- 选中 / 定位 / 同步滚动 ----------
+  // ---------- 选中 / 定位（只有点击同步，没有滚动同步） ----------
 
-  function cmpScrollIntoView(flow, el, center = true) {
-    if (!flow || !el) return;
-    const fr = flow.getBoundingClientRect();
-    const er = el.getBoundingClientRect();
-    const delta = center
-      ? (er.top - fr.top) - Math.max(0, (fr.height - er.height) / 2)
-      : (er.top - fr.top) - 40;
-    flow.scrollTop += delta;
+  /**
+   * 译文页里某一块的 DOM。
+   * 注意选择器是 `.ctp-block[data-id]`：译文页的块按版面坐标绝对定位，
+   * 不再是旧版文本流里的 `.cmp-block[data-block-id]`。
+   */
+  function transBlockEl(id) {
+    return cmpEl('cmpTransFlow')?.querySelector(`.ctp-block[data-id="${CSS.escape(String(id || ''))}"]`) || null;
   }
 
-  /** 译文栏里把某一块标成选中（其余清除）。flash = 闪一下，明确告诉用户「跳到这儿了」 */
+  /** 译文页里把某一块标成选中（其余清除）。flash = 闪一下，明确告诉用户「跳到这儿了」 */
   function markCmpBlockActive(id, flash = false) {
-    const flow = cmpEl('cmpTransFlow');
-    if (!flow) return;
-    flow.querySelectorAll('.cmp-block.active').forEach((el) => el.classList.remove('active'));
+    window.CmpPages?.setActive(id);
+    if (!flash) return;
     const el = transBlockEl(id);
     if (!el) return;
-    el.classList.add('active');
-    if (!flash) return;
-    el.classList.remove('flash');
+    el.classList.remove('ctp-flash');
     void el.offsetWidth;   // 强制重排：连点同一个块也要能重放动画
-    el.classList.add('flash');
-    setTimeout(() => el.classList.remove('flash'), 1000);
+    el.classList.add('ctp-flash');
+    setTimeout(() => el.classList.remove('ctp-flash'), 900);
   }
 
-  /** 标出译文栏里「当前滚到哪儿了」的那一块 —— 比选中态轻，不抢选中块的视觉 */
-  function markCmpBlockCurrent(id) {
-    const flow = cmpEl('cmpTransFlow');
-    if (!flow) return;
-    flow.querySelectorAll('.cmp-block.current').forEach((el) => el.classList.remove('current'));
-    transBlockEl(id)?.classList.add('current');
-  }
+  /**
+   * 底部操作条：显示选中块的类型、页码和可做的动作。
+   *
+   * 旧版这些按钮挂在每一块自己的头上；换成版面还原的页面后，块的大小就是原文字块的大小，
+   * 再塞一排按钮会把正文挤掉。所以统一收到栏底的一条，按选中块切换。
+   */
+  function cmpUpdateBlockBar(id) {
+    const bar = cmpEl('cmpBlockBar');
+    if (!bar) return;
+    const b = id ? cmp.blockById.get(id) : null;
+    if (!b) {
+      bar.classList.add('hidden');
+      return;
+    }
+    bar.classList.remove('hidden');
+    const tag = cmpEl('cmpBarKind');
+    if (tag) {
+      tag.textContent = cmpBlockLabel(b);
+      tag.dataset.kind = b.kind || 'body';
+    }
+    const page = cmpEl('cmpBarPage');
+    if (page) page.textContent = b.page ? 'P' + b.page : '';
 
+    const tr = String(b.translation || '').trim() || String(cmp.transCache.get(id) || '').trim();
+    const canTr = !!b.translatable;
+    const btn = (k) => bar.querySelector(`[data-cmpbar="${k}"]`);
+    btn('tr')?.classList.toggle('hidden', !canTr || !!tr);
+    btn('retrans')?.classList.toggle('hidden', !canTr || !tr);
+    // 「原图」只对带裁图的块有意义；「送 AI」对文字块送原文、对图表送整张图
+    btn('img')?.classList.toggle('hidden', !b.image || !pr.recordId);
+    const ai = btn('ai');
+    if (ai) {
+      ai.title = b.image
+        ? '把这一块的整张截图（不是图题文字）送进右侧 AI 助读'
+        : '把这一段原文放进右侧 AI 助读的引用池';
+    }
+  }
   // ---------- PDF 侧：选中框 / 滚动定位 ----------
 
   /**
@@ -7621,12 +7688,14 @@
   }
 
   /**
-   * 选中某一块：译文栏高亮 + 滚过去，PDF 上画选中框（必要时滚到该页），大纲高亮到所属章节。
+   * 选中某一块：译文页高亮并滚到该块，PDF 上画选中框（必要时滚到该页），大纲高亮到所属章节。
+   *
+   * 只有「点击」会走到这里 —— 两侧滚动**不再联动**（见下面删掉的 cmpOnPdfScroll 注释）。
    *
    * @param {string} id 块 id（与 manifest / PrBlocks 同源）
    * @param {object} [opts]
-   * @param {boolean} [opts.revealPdf]   把 PDF 滚到该块
-   * @param {boolean} [opts.scrollTrans] 把译文栏滚到该块
+   * @param {boolean} [opts.revealPdf]   把原文 PDF 滚到该块
+   * @param {boolean} [opts.scrollTrans] 把译文页滚到该块
    * @param {boolean} [opts.flash]       译文块闪一下
    * @param {boolean} [opts.translate]   还没译文时顺手翻这一段
    */
@@ -7636,8 +7705,11 @@
     if (!cmp.blockById.has(id)) return;
     cmp.activeId = id;
     markCmpBlockActive(id, flash);
+    // 译文页定位：只在「点原文」时发生；从译文页点回原文时传 scrollTrans:false，
+    // 否则会把用户刚点的那一段又滚一遍，看起来像「点一下跳两下」。
+    if (scrollTrans && cmp.view !== 'pdf') window.CmpPages?.focus(id, { flash: false });
     if (revealPdf) {
-      // 阅读模式下原文栏是隐藏的：再把 #prPages 滚一遍等于什么都没发生（用户看到的
+      // 阅读模式下原文栏是重排文本流：把 PDF 滚一遍等于什么都没发生（用户看到的
       // 就是「点左侧目录没反应」）。改成按「页 + 文字」滚重排视图里的那一段。
       const b = cmp.blockById.get(id);
       if (pr.reading.on && b && Number(b.page)) {
@@ -7651,12 +7723,8 @@
       }
     }
     cmpPaintPdfPick(id);
-    // 「仅原文」视图下译文栏是隐藏的，滚动它没有意义
-    if (scrollTrans && cmp.view !== 'pdf') {
-      const el = transBlockEl(id);
-      if (el) cmpScrollIntoView(cmpEl('cmpTransFlow'), el);
-    }
     markCmpOutline(id);
+    cmpUpdateBlockBar(id);
     if (translate) cmpTranslateBlock(id, { auto: true });
   }
 
@@ -7686,102 +7754,19 @@
     });
   }
 
-  /**
-   * 找出 PDF 视口上方锚线处的那一块 —— 同步滚动的落点。
-   *
-   * 按「锚线处的块」对齐而不是按滚动比例插值：版面块的密度在页与页之间差别极大
-   *（整页大图 vs 整页正文），按比例算会越滚越偏。
-   */
-  function cmpTopVisibleBlock() {
-    const scroller = cmpPdfScroller();
-    if (!scroller || !window.PrBlocks) return null;
-    const blocks = cmp.data?.blocks || [];
-    if (!blocks.length) return null;
-    const sr = scroller.getBoundingClientRect();
-    if (!sr.height) return null;
-    const anchorY = sr.top + Math.min(96, sr.height * 0.2);
-    const wrapRects = new Map();   // 每页只量一次 rect，几十个块也就几十次算术
-    let best = null;
-    for (const b of blocks) {
-      if (!b.page) continue;
-      let wr = wrapRects.get(b.page);
-      if (wr === undefined) {
-        const wrap = document.querySelector(`#prPages .pr-page-wrap[data-page="${b.page}"]`);
-        wr = wrap ? wrap.getBoundingClientRect() : null;
-        wrapRects.set(b.page, wr);
-      }
-      if (!wr?.height) continue;
-      const flat = window.PrBlocks.getBlock(b.id, b.page);
-      const p = flat ? window.PrBlocks.blockPercent(flat) : null;
-      if (!p) continue;
-      if (wr.top + (p.top / 100) * wr.height <= anchorY) best = b;
-      else break;   // blocks 按阅读顺序排，越过锚线就可以停
-    }
-    return best;
-  }
+  // ---------- 滚动同步：已按需求移除 ----------
+  //
+  // 旧实现（cmpTopVisibleBlock / cmpOnPdfScroll / cmpOnReadingScroll）按「视口锚线
+  // 处的块」把译文流滚到同一段。现在译文栏是**和原文同版面的页**，两侧页面高度、
+  // 页间距、缩放都各自独立，再按锚线硬对齐只会互相拽着跳；而且用户在译文页上下
+  // 对照时，原文被一起拖走反而碍事。所以只保留**点击**这一条同步链路
+  //（见 cmpSelectBlock 与 cmpPickFromTransPage），滚动各走各的。
 
   /**
-   * PDF 滚动 → 译文栏跟随。
-   *
-   * 刻意只做单向（PDF → 译文）。反向同步会与「点译文块跳原文」互相触发形成回环；
-   * 而且用户在译文栏细读时把 PDF 拖着跑，反而碍事。
-   */
-  function cmpOnPdfScroll() {
-    if (!cmp.on || cmp.syncing || cmp.view === 'pdf') return;
-    const b = cmpTopVisibleBlock();
-    if (!b || b.id === cmp.syncAnchorId) return;
-    cmp.syncAnchorId = b.id;
-    const flow = cmpEl('cmpTransFlow');
-    const el = transBlockEl(b.id);
-    if (!flow || !el) return;
-    cmp.syncing = true;
-    cmpScrollIntoView(flow, el, false);   // 顶部对齐：与「锚线」的语义一致
-    markCmpBlockCurrent(b.id);
-    clearTimeout(cmp.syncTimer);
-    cmp.syncTimer = setTimeout(() => { cmp.syncing = false; }, 90);
-  }
-
-  function initCmpSync() {
-    const scroller = cmpPdfScroller();
-    if (!scroller || scroller.dataset.cmpSyncBound === '1') return;
-    scroller.dataset.cmpSyncBound = '1';
-    scroller.addEventListener('scroll', cmpOnPdfScroll, { passive: true });
-  }
-
-  /**
-   * 原文栏换成「重排文本流」时的同一条锚线：重排视图里视口顶部的块 → 译文栏跟随。
-   *
-   * 重排视图没有 PDF 的页面几何，所以换算方式不同：PrReading.anchor() 给的是
-   * 「第几页 + 页内自上而下多少 pt」，把它折成页面高度百分比，再和版面块比 ——
-   * 和 PDF 那条路径用的是同一个百分比口径，落点因此是一致的。
-   */
-  function cmpTopVisibleBlockFromReading() {
-    const a = window.PrReading?.anchor?.();
-    if (!a?.page) return null;
-    const blocks = cmp.data?.blocks || [];
-    if (!blocks.length) return null;
-    // 用未旋转的页高：PrReading 的 y 就是以它的 `pageSize` 钩子（= pr.pageSizes）算出来的
-    const size = pr.pageSizes?.[a.page - 1] || getPageDisplaySize(a.page);
-    const pct = size?.h ? Math.max(0, Math.min(100, (a.y / size.h) * 100)) : 0;
-    let best = null;
-    for (const b of blocks) {
-      if (!b.page) continue;
-      if (b.page < a.page) { best = b; continue; }
-      if (b.page > a.page) break;
-      const flat = window.PrBlocks?.getBlock(b.id, b.page);
-      const p = flat ? window.PrBlocks.blockPercent(flat) : null;
-      if (!p) continue;
-      if (p.top <= pct) best = b;
-      else break;
-    }
-    return best;
-  }
-
-  /**
-   * 点重排段落 → 译文栏定位。
+   * 点重排段落 → 译文页定位。
    * 重排块 id（r1…）与对照块 id（p3-b17）是两套编号，所以按「页 + 页内纵向
    * 百分比」折算：拿点击块的 rect 算出它在原页的顶部百分比，再在同页的对照块里
-   * 找几何最接近的一个。之前这里没有任何点击链路，只有滚动时的弱同步。
+   * 找几何最接近的一个。
    */
   function cmpSelectBlockByReading(info) {
     if (!cmp.on || !Array.isArray(cmp.data?.blocks) || !cmp.data.blocks.length) return;
@@ -7803,48 +7788,13 @@
     if (best) cmpSelectBlock(best.id, { scrollTrans: true, flash: true, translate: true });
   }
 
-  function cmpOnReadingScroll() {
-    if (!cmp.on || cmp.syncing || cmp.view === 'pdf' || !pr.reading.on) return;
-    const b = cmpTopVisibleBlockFromReading();
-    if (!b || b.id === cmp.syncAnchorId) return;
-    cmp.syncAnchorId = b.id;
-    const flow = cmpEl('cmpTransFlow');
-    const el = transBlockEl(b.id);
-    if (!flow || !el) return;
-    cmp.syncing = true;
-    cmpScrollIntoView(flow, el, false);
-    markCmpBlockCurrent(b.id);
-    clearTimeout(cmp.syncTimer);
-    cmp.syncTimer = setTimeout(() => { cmp.syncing = false; }, 90);
-  }
-
   // ---------- 单段按需翻译（点原文哪一段就翻哪一段） ----------
 
   /**
-   * 改写译文栏里某一块的正文。
-   * 原文栏现在是真 PDF，没有文本槽可写；译文只落在译文栏这一个地方。
-   */
-  function setCmpTransText(id, html, { pending = false, missing = false } = {}) {
-    const el = transBlockEl(id)?.querySelector('.cmp-block-text');
-    if (!el) return;
-    el.innerHTML = html;
-    el.classList.toggle('pending', pending);
-    el.classList.toggle('cmp-block-missing', missing);
-  }
-
-  /**
-   * 解析「翻译源字符串」为 provider / profileId。
-   * 三种形态：'llm:<id>'（逐条大模型配置）、'auto'（跟随全局设置）、其余（provider id）。
-   */
-  function cmpResolveSource(src) {
-    if (String(src || '').startsWith('llm:')) return { provider: 'siliconflow', profileId: String(src).slice(4) };
-    if (src && src !== 'auto') return { provider: src, profileId: '' };
-    return { provider: undefined, profileId: '' };
-  }
-
-  /**
-   * 单段翻译。默认就近取引擎（对照精读面板选的 → 设置页翻译源）；重译时可用
-   * `source` 显式指定引擎、用 `force` 覆盖已有译文。
+   * 单段翻译。
+   *
+   * 译文不再写进「文本流里的某个 div」，而是先落到 cmp.blockById 的数据上，
+   * 再让译文页重画那一块 —— 页面上的覆盖率、字号都按块重新算。
    */
   async function cmpTranslateBlock(id, { auto = false, force = false, source } = {}) {
     const CU = window.CompareUtils;
@@ -7866,7 +7816,7 @@
     const text = joined ? joined.text : String(first.text || '').trim();
     if (!text) { if (!auto) toast('这一段没有可翻译的文字', 'error'); return; }
 
-    for (const b of members) setCmpTransText(b.id, '<span class="cmp-pending">翻译中…</span>', { pending: true });
+    for (const b of members) window.CmpPages?.setPending(b.id, true);
     // 本地缓存命中就直接回填，不再向引擎发请求（再次打开这篇也一样）
     let tr = CU ? CU.cacheGet(text, target, provider, profileId) : '';
     try {
@@ -7885,37 +7835,26 @@
         b.translation = piece;
         cmp.transCache.set(b.id, piece);
         CU?.cacheSet(String(b.text || ''), target, provider, profileId, piece);
-        cmpApplyTranslation(b.id, b.text, piece);
+        window.CmpPages?.refreshBlock(b.id);
       });
       refreshCmpCounts();
+      if (cmp.activeId) cmpUpdateBlockBar(cmp.activeId);
       if (!auto) toast(members.length > 1 ? `已按整段翻译并回分 ${members.length} 处` : '已翻译这一段', 'success');
     } catch (e) {
-      for (const b of members) {
-        setCmpTransText(b.id, `<span class="cmp-trans-error">${ico('alert')}${esc(e.message)}</span>`, { pending: true });
-      }
+      for (const b of members) window.CmpPages?.setError(b.id, e.message);
+      if (!auto) toast('翻译失败：' + e.message, 'error');
     }
   }
 
-  /** 译文写回 DOM：逐句模式下换成并列句，同时把「译」按钮换成复制 / 重译。 */
-  function cmpApplyTranslation(id, srcText, tr) {
-    const blk = transBlockEl(id);
-    if (!blk) return;
-    const html = window.CompareUtils
-      ? window.CompareUtils.translationHtml(srcText, tr)
-      : `<div class="cmp-block-text">${esc(tr)}</div>`;
-    const old = blk.querySelector('.cmp-block-text');
-    if (old) old.outerHTML = html;
-    else blk.insertAdjacentHTML('beforeend', html);
-    const trBtn = blk.querySelector('.cmp-act[data-cmp-act="tr"]');
-    if (trBtn) trBtn.outerHTML = cmpRetransActs(id);
-    const img = blk.querySelector('.cmp-block-img');
-    if (img) img.remove();
-  }
 
-  /** 有译文时的动作按钮：复制 + 重新翻译（用顶部工具条统一的引擎重译）。 */
-  function cmpRetransActs(id) {
-    return `<button class="cmp-act" data-cmp-act="copy" data-cmp-id="${esc(id)}" title="复制这段译文">⧉ 复制</button>`
-      + `<button class="cmp-act" data-cmp-act="retrans" data-cmp-id="${esc(id)}" title="用顶部工具条选择的引擎重新翻译这一段">${ico('refresh')}重译</button>`;
+  /**
+   * 解析「翻译源字符串」为 provider / profileId。
+   * 三种形态：'llm:<id>'（逐条大模型配置）、'auto'（跟随全局设置）、其余（provider id）。
+   */
+  function cmpResolveSource(src) {
+    if (String(src || '').startsWith('llm:')) return { provider: 'siliconflow', profileId: String(src).slice(4) };
+    if (src && src !== 'auto') return { provider: src, profileId: '' };
+    return { provider: undefined, profileId: '' };
   }
 
   /**
@@ -7929,15 +7868,63 @@
 
   // ---------- 一键送入 AI 助读 ----------
 
-  function cmpSendToAssist(id) {
+  /**
+   * 把 dataURL 压到合理尺寸。
+   *
+   * 版面裁图是整页渲染出来的 PNG，一张图动辄两三兆；聊天接口虽然收 base64，
+   * 但太大既慢又吃上下文。长边压到 1600px、JPEG 0.9 —— 坐标轴刻度、表格数字仍然清楚。
+   */
+  function shrinkImageDataUrl(dataUrl, maxSide = 1600) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxSide / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+        if (scale >= 1 && /^data:image\/jpe?g/i.test(dataUrl)) return resolve(dataUrl);
+        const w = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
+        const h = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        try { resolve(c.toDataURL('image/jpeg', 0.9)); } catch (_) { resolve(dataUrl); }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
+  /**
+   * 「送 AI」。
+   *
+   * 图表 / 表格 / 公式：送**整张图**（优先用版面解析落盘的 assets 裁图，没有就现从
+   * 译文页画布上裁），图题只作为说明文字附在后面。旧版只把 `text`（识别出的图题）
+   * 丢进引用池，模型根本看不到图 —— 截图里那句「（图片，按原样保留）」就是当时的产物。
+   * 文字块：仍送原文，不额外带图。
+   */
+  async function cmpSendToAssist(id) {
     const b = cmp.blockById.get(id);
     if (!b) return;
-    const kindLabel = window.PrBlocks?.labels?.[b.label] || CMP_KIND_LABEL[b.kind] || '区域';
+    const kindLabel = cmpBlockLabel(b);
     const label = `第 ${b.page} 页 · ${kindLabel}`;
+    const caption = String(b.caption || b.text || '').trim();
+    const hasImage = !!b.image && !!pr.recordId;
+
+    if (hasImage) {
+      let dataUrl = null;
+      try { dataUrl = await assetDataUrl(pr.recordId, b.image); } catch (_) { dataUrl = null; }
+      if (!dataUrl) dataUrl = window.CmpPages?.capture(id) || null;
+      if (dataUrl) {
+        const reduced = await shrinkImageDataUrl(dataUrl).catch(() => dataUrl);
+        prChatImages.push({ name: `${kindLabel}-P${b.page}.jpg`, dataUrl: reduced });
+        renderPrAttach();
+        if (caption) addCitePoolItem(caption, label);
+        switchPrTab('chat');
+        toast('已把整张图放进 AI 助读的待发送附件', 'success');
+        return;
+      }
+    }
     const text = String(b.text || '').trim() || String(b.translation || '').trim();
-    if (!text) { toast('这一段没有可引用的文字', 'error'); return; }
+    if (!text) { toast('这一块没有可送的内容', 'error'); return; }
     addCitePoolItem(text, label);
-    // 送进去就切到 AI 助读（面板就在最右栏，无需移动）
     switchPrTab('chat');
   }
 
@@ -8116,8 +8103,8 @@
     const hint = cmpEl('cmpSyncHint');
     if (hint) {
       hint.textContent = cmp.view === 'split'
-        ? '滚动原文，译文自动跟随 · 点原文段落即译'
-        : cmp.view === 'pdf' ? '只看原文 · 点段落仍会翻译到右栏' : '只看译文 · 点段落可跳回原文';
+        ? '点原文段落 → 译文页定位 · 滚动不联动'
+        : cmp.view === 'pdf' ? '只看原文 · 点段落仍会翻译到右栏' : '只看译文页 · 点段落可跳回原文';
     }
     // 「仅原文」下译文栏隐藏，选中框照旧留在 PDF 上；「仅译文」下 PDF 隐藏，把框收掉
     if (cmp.view === 'trans') clearPdfPick();
@@ -8126,9 +8113,11 @@
       // 容器宽度变了，等一帧再量（display 刚从 none 切回来时 clientWidth 还是 0）
       requestAnimationFrame(() => { try { fitWidth(); } catch (_) { /* 还没加载 PDF 时忽略 */ } });
     } else if (cmp.activeId) {
-      const el = transBlockEl(cmp.activeId);
-      if (el) cmpScrollIntoView(cmpEl('cmpTransFlow'), el);
+      // 译文页刚重新显形（宽度从 0 变回来），等一帧再定位
+      requestAnimationFrame(() => window.CmpPages?.focus(cmp.activeId, { flash: false }));
     }
+    // 译文栏宽度变了，译文页要按新宽度重排一次（字号是跟着块宽算的）
+    requestAnimationFrame(() => window.CmpPages?.refit());
   }
 
   /** 按当前配对方式导出对照笔记（原文引用 + 译文的 Markdown）。 */
@@ -8149,7 +8138,6 @@
 
   function bindCmpEvents() {
     initCmpResizers();
-    initCmpSync();
     bindCmpView(cmp.view);
 
     const pairSel = cmpEl('cmpPairMode');
@@ -8178,33 +8166,19 @@
     });
     cmpEl('cmpOutlineSearch')?.addEventListener('input', applyCmpOutlineFilter);
 
-    // 译文栏：点段落 → PDF 滚过去并画框（「点译文回原文」）
-    cmpEl('cmpTransFlow')?.addEventListener('click', (e) => {
-      const act = e.target.closest('[data-cmp-act]');
-      if (act) {
-        e.stopPropagation();
-        const id = act.dataset.cmpId;
-        const kind = act.dataset.cmpAct;
-        if (kind === 'ai') { cmpSendToAssist(id); return; }
-        if (kind === 'tr') { cmpTranslateBlock(id); return; }
-        if (kind === 'retrans') { cmpRetranslateBlock(id); return; }
-        if (kind === 'img') { openCmpBlockImage(id); return; }
-        if (kind === 'copy') {
-          const b = cmp.blockById.get(id);
-          const tr = String(b?.translation || cmp.transCache.get(id) || '').trim();
-          if (!tr) { toast('这一段还没有译文', 'error'); return; }
-          navigator.clipboard.writeText(tr).then(() => toast('已复制译文', 'success')).catch(() => toast('复制失败', 'error'));
-        }
-        return;
-      }
-      // 裁图点击 = 放大看原图
-      const img = e.target.closest('[data-cmp-img]');
-      if (img) { e.stopPropagation(); openCmpBlockImage(img.dataset.cmpImg); return; }
-      // 正在划词就别抢：用户是在选译文，不是点段落
-      if (window.getSelection()?.toString().trim()) return;
-      const blk = e.target.closest('.cmp-block');
-      if (!blk) return;
-      cmpSelectBlock(blk.dataset.blockId, { revealPdf: true, scrollTrans: false, translate: true });
+    // 底部操作条：只作用于当前选中的块。
+    // 译文页里的块本身由 CmpPages 处理点击（选中 + 双向定位），操作按钮集中在这里，
+    // 免得像旧版那样每条译文头上挂一排按钮、把正文挤掉。
+    cmpEl('cmpBlockBar')?.addEventListener('click', (e) => {
+      const act = e.target.closest('[data-cmpbar]');
+      if (!act) return;
+      const id = cmp.activeId;
+      if (!id || !cmp.blockById.has(id)) return;
+      const kind = act.dataset.cmpbar;
+      if (kind === 'ai') { cmpSendToAssist(id); return; }
+      if (kind === 'tr') { cmpTranslateBlock(id); return; }
+      if (kind === 'retrans') { cmpRetranslateBlock(id); return; }
+      if (kind === 'img') { openCmpBlockImage(id); return; }
     });
 
     // 启动面板
@@ -8666,8 +8640,7 @@
       },
       onScroll: () => {
         updateReadingHint();
-        // 对照精读里原文栏就是这块重排面板：它一滚，译文栏要跟着走
-        if (cmp.on) cmpOnReadingScroll();
+        // 刻意不在这里同步译文页：滚动同步已经按需求去掉，只有点击才互定位
       },
       // 点重排视图里的一段 → 译文栏定位到对应块（Ctrl/Cmd 点击由阅读器自己弹出原文浮层）
       onBlockClick: (info) => { if (cmp.on) cmpSelectBlockByReading(info); },
@@ -8835,6 +8808,8 @@
 
   function closePdfReader() {
     pr.open = false;
+    // 打印预览开着就一起收掉：它持有整篇的高清位图，关阅读器后没有意义
+    if (pp.on) closePrintDialog();
     window.ReadingHeat?.stop();   // 关阅读器立刻结算并落盘，别把最后一段停留丢掉
     // 阅读模式先把重排视图收干净（它持有 DOM 与裁图 canvas），再销毁 PDF
     exitReadingMode({ silent: true });
@@ -8908,6 +8883,11 @@
       pr.pageSizes = await fetchPageSizes(doc);
       buildPlaceholders();
       renderNotesList();
+      // 对照精读开着进来的：译文页要等文档到手才有底图可画，这里立刻补一版
+      if (cmp.on) {
+        window.CmpPages?.refit();
+        if (cmp.view !== 'trans') { try { fitWidth(); } catch (_) { /* ignore */ } }
+      }
       // 版面就位后静默预热阅读模式（用户点按钮时通常已经算完）
       scheduleReadingWarmup();
     } catch (e) { toast('PDF 加载失败：' + e.message, 'error'); }
@@ -10009,8 +9989,9 @@
       box.id = 'litPrintArea';
       box.className = 'print-area';
       document.body.appendChild(box);
-      // 打印完就把图片清掉：一整篇的高清位图很占内存
-      window.addEventListener('afterprint', () => { box.innerHTML = ''; });
+      // 打印完就把图片清掉：一整篇的高清位图很占内存。
+      // 预览开着的时候不能清 —— 那份内容还要留在预览纸面上看。
+      window.addEventListener('afterprint', () => { if (!pp.on) box.innerHTML = ''; });
     }
     return box;
   }
@@ -10041,8 +10022,9 @@
 
   async function printPdfPages(pages) {
     const box = printArea();
-    const it = paperRecord(pr.recordId);
-    box.innerHTML = printHeader(it?.title || $('prFilename')?.textContent || '');
+    // 这里不再印「标题 + 页码」：标题会把第一页往下推，最后一页被顶到第二张纸上。
+    // 原文文档只印原文页本身。
+    box.innerHTML = '';
     for (let i = 0; i < pages.length; i += 1) {
       // 每页渲染完让出一帧：几十页的文档不至于把界面卡死，也让进度提示看得见
       const { canvas } = await renderFullPageCanvas(pages[i]);
@@ -10057,8 +10039,6 @@
       canvas.height = 0;
       await new Promise((r) => setTimeout(r, 0));
     }
-    // 交给系统：Electron / 浏览器都会弹出打印对话框（可选打印机、份数、页码范围）
-    window.print();
   }
 
   /** EPUB 没有「页」，打印当前章节正文（纯文字，省时省纸） */
@@ -10072,41 +10052,231 @@
     window.print();
   }
 
-  function openPrintDialog() {
-    if (pr.fileKind === 'epub') { printEpubChapter(); return; }
-    if (!pr.doc) { toast('还没有打开文档', 'error'); return; }
-    const total = pr.totalPages || 1;
-    const cur = pr.pageNum || 1;
-    const btn = $('prPrint');
-    const rect = btn?.getBoundingClientRect?.();
-    showPopover($('prPopover'), '打印这篇文献', `
-      <div style="margin-bottom:8px">共 <b>${total}</b> 页。页码支持「1-3,5,9-10」这种写法；打印会调起系统打印对话框，可在那里选打印机、份数与双面。</div>
-      <label class="field" style="display:block">
-        <span>页码（留空 = 当前第 ${cur} 页）</span>
-        <input id="printRangeInput" class="tb-input" placeholder="例如 1-3,5" value="${cur}" />
-      </label>`,
-      [
-        { text: '取消', cls: '', onClick: () => {} },
-        { text: `全部 ${total} 页`, cls: '', onClick: () => {
-          runPrint(Array.from({ length: total }, (_, i) => i + 1), total);
-        } },
-        { text: '打印', cls: 'btn-primary', onClick: async () => {
-          const raw = $('printRangeInput')?.value || String(cur);
-          const pages = parsePageRange(raw, total);
-          if (!pages) { toast('页码写法看不懂，请用「1-3,5」这种格式', 'error'); return; }
-          runPrint(pages, total);
-        } },
-      ],
-      { left: rect ? rect.left : 200, top: rect ? rect.bottom + 8 : 160 });
+  // ---------- 打印预览：原文 / 解析结果各成一份文档 ----------
+  //
+  // 「原文」只印论文页本身（不加页眉标题，免得把页面往下挤）；
+  // 「解析结果」是另一份文档：标题 + 元信息 + 分节正文，排成 A4 文稿。
+  // 两份都在同一个预览里看，分别打。
+
+  const PP_PREVIEW_MAX = 12;   // 预览最多铺几页（再多就只为打印渲染，免得一开窗就等半天）
+
+  const pp = {
+    on: false,
+    mode: 'pdf',      // pdf | analysis
+    gen: 0,           // 重建代数：切页签 / 改页码时让上一轮异步渲染作废
+    busy: false,
+    rangeTimer: null,
+  };
+
+  function ppEl(id) { return document.getElementById(id); }
+
+  function ppSetStatus(text) {
+    const el = ppEl('ppStatus');
+    if (el) el.textContent = text || '';
   }
 
-  async function runPrint(pages, total) {
+  /** 打开打印预览：默认停在「原文 + 当前页」，也可直接开到「解析结果」 */
+  function openPrintDialog(mode = 'pdf') {
+    if (mode === 'pdf' && pr.fileKind === 'epub') { printEpubChapter(); return; }
+    if (mode === 'pdf' && !pr.doc) { toast('还没有打开文档', 'error'); return; }
+    pp.on = true;
+    ppEl('ppOverlay')?.classList.remove('hidden');
+    const total = pr.totalPages || 1;
+    if (ppEl('ppTotal')) ppEl('ppTotal').textContent = `共 ${total} 页`;
+    const range = ppEl('ppRange');
+    if (range) range.value = String(Math.min(Math.max(1, pr.pageNum || 1), total));
+    ppSwitchMode(mode);
+  }
+
+  function closePrintDialog() {
+    pp.on = false;
+    pp.busy = false;
+    pp.gen += 1;
+    if (pp.rangeTimer) { clearTimeout(pp.rangeTimer); pp.rangeTimer = null; }
+    ppEl('ppOverlay')?.classList.add('hidden');
+    // 预览用过的位图一起放掉（一百页 JPEG 挂在 DOM 里很吃内存）
+    printArea().innerHTML = '';
+    ppSetStatus('');
+  }
+
+  async function ppSwitchMode(mode) {
+    pp.mode = mode;
+    for (const b of ppEl('ppSeg')?.querySelectorAll('[data-ppmode]') || []) {
+      b.classList.toggle('active', b.dataset.ppmode === mode);
+    }
+    ppEl('ppRangeWrap')?.classList.toggle('hidden', mode !== 'pdf');
+    await ppRender();
+  }
+
+  /** 重建预览内容（打印容器与预览纸面是同一个节点，只是挂的位置不同） */
+  async function ppRender() {
+    const box = printArea();
+    const paper = ppEl('ppPaper');
+    if (!box || !paper) return;
+    if (box.parentElement !== paper) paper.appendChild(box);
+    const gen = ++pp.gen;
+    ppSetStatus('正在生成预览…');
     try {
-      if (pages.length > 6) toast(`正在渲染 ${pages.length} 页，稍等一下就弹出打印窗口…`, 'success');
-      await printPdfPages(pages);
+      if (pp.mode === 'analysis') {
+        ppBuildAnalysis();
+      } else {
+        const pages = ppCurrentPages();
+        if (!pages) { ppSetStatus('页码写法看不懂，用「1-3,5」这种格式'); return; }
+        await ppBuildPdf(pages, { preview: true, gen });
+      }
+    } catch (e) {
+      ppSetStatus('预览失败：' + (e?.message || e));
+      return;
+    }
+    if (gen !== pp.gen) return;
+    ppSetStatus('');
+    ppFitZoom();
+  }
+
+  /** 页码输入 → 页码数组（留空 = 当前页） */
+  function ppCurrentPages() {
+    const total = pr.totalPages || 1;
+    const raw = String(ppEl('ppRange')?.value || '').trim();
+    if (!raw) return [Math.min(Math.max(1, pr.pageNum || 1), total)];
+    return parsePageRange(raw, total);
+  }
+
+  async function ppBuildPdf(pages, { preview = false, gen = pp.gen } = {}) {
+    const box = printArea();
+    box.innerHTML = '';
+    const list = preview ? pages.slice(0, PP_PREVIEW_MAX) : pages;
+    for (let i = 0; i < list.length; i += 1) {
+      if (gen !== pp.gen) return;   // 页码 / 页签换过了：这一轮作废
+      ppSetStatus(`正在渲染第 ${i + 1} / ${list.length} 页…`);
+      const { canvas } = await renderFullPageCanvas(list[i]);
+      // 渲染是异步的：回来时页码可能已经改过（或预览已关），这一张就别再贴上去，
+      // 否则两轮渲染的图会叠在同一个打印区里（表现为「预览 1 页却有两张图」）。
+      if (gen !== pp.gen) { canvas.width = 0; canvas.height = 0; return; }
+      const img = document.createElement('img');
+      img.className = 'print-page';
+      img.alt = `第 ${list[i]} 页`;
+      img.src = canvas.toDataURL('image/jpeg', 0.92);
+      canvas.width = 0;
+      canvas.height = 0;
+      box.appendChild(img);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    if (preview && pages.length > list.length) {
+      const note = document.createElement('div');
+      note.className = 'prp-note';
+      note.textContent = `预览只铺了前 ${PP_PREVIEW_MAX} 页；点「打印」会按上面的页码渲染全部 ${pages.length} 页。`;
+      box.appendChild(note);
+    }
+  }
+
+  /** 解析结果文稿：标题 + 元信息 + 分节正文（与右侧面板同一份字段口径） */
+  function ppBuildAnalysis() {
+    const box = printArea();
+    const it = items.find((x) => x.id === pr.recordId) || paperRecord(pr.recordId);
+    box.innerHTML = '';
+    const doc = document.createElement('div');
+    doc.className = 'print-doc';
+    if (!it) {
+      doc.innerHTML = '<div class="pd-empty">未找到对应的文献记录，无法打印解析结果。</div>';
+      box.appendChild(doc);
+      return;
+    }
+    const sections = analysisSections(it);
+    const body = sections.map((s) => `
+      <div class="pd-sec">
+        <div class="pd-sec-h">${esc(s.label)}</div>
+        <div class="pd-sec-v">${s.html}</div>
+      </div>`).join('');
+    const today = new Date();
+    const stamp = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    // 不再单列一行「作者 · 期刊 · 年份」：下面的「基本信息」一节就是这些字段，
+    // 打印稿上重复一遍反而像凑版面。
+    doc.innerHTML = `
+      <h1 class="pd-title">${esc(it.title || '（未命名文献）')}</h1>
+      ${body || '<div class="pd-empty">这篇文献还没有解析结果。先在右侧「解析结果」里跑一次解析，再来打印。</div>'}
+      <div class="pd-foot">一站式科研终端（经管版）· 文献解析结果 · ${stamp}</div>`;
+    box.appendChild(doc);
+  }
+
+  /** 纸面固定 703px 宽（≈A4 可打印宽度），按面板可用宽度定缩放 */
+  function ppFitZoom() {
+    const body = ppEl('ppBody');
+    const paper = ppEl('ppPaper');
+    if (!body || !paper) return;
+    const avail = Math.max(240, body.clientWidth - 44);
+    const z = Math.min(1, (avail / 703) * 0.98);
+    paper.style.zoom = String(Math.max(0.26, Math.round(z * 1000) / 1000));
+  }
+
+  /** 交给系统打印对话框；打印期间把内容从预览纸面挪到 body 下（预览的 zoom 不该影响打印） */
+  function ppSystemPrint() {
+    const box = printArea();
+    if (box.parentElement !== document.body) document.body.appendChild(box);
+    const back = () => {
+      if (!pp.on) return;
+      const p = ppEl('ppPaper');
+      if (p && box.parentElement !== p) p.appendChild(box);
+    };
+    window.addEventListener('afterprint', back, { once: true });
+    try {
+      window.print();
+    } finally {
+      // Electron 里 window.print 是同步的，回来时对话框已经关了
+      setTimeout(back, 600);
+    }
+  }
+
+  async function ppPrint() {
+    if (pp.busy) return;
+    pp.busy = true;
+    const btn = ppEl('ppPrint');
+    if (btn) btn.disabled = true;
+    let more = false;
+    try {
+      if (pp.mode === 'pdf') {
+        const pages = ppCurrentPages();
+        if (!pages) { toast('页码写法看不懂，请用「1-3,5」这种格式', 'error'); return; }
+        more = pages.length > PP_PREVIEW_MAX;
+        if (more) toast(`正在渲染 ${pages.length} 页，稍等一下…`, 'success');
+        await ppBuildPdf(pages, { preview: false, gen: ++pp.gen });
+      } else {
+        pp.gen += 1;
+        ppBuildAnalysis();
+      }
+      ppSetStatus('');
+      ppSystemPrint();
     } catch (e) {
       toast('打印准备失败：' + (e?.message || e), 'error');
+    } finally {
+      pp.busy = false;
+      if (btn) btn.disabled = false;
+      // 打完把预览收回前 12 页：两百页位图不该一直挂在 DOM 上
+      if (more && pp.on) setTimeout(() => { if (pp.on && pp.mode === 'pdf') ppRender(); }, 1200);
     }
+  }
+
+  function bindPrintPreview() {
+    ppEl('ppClose')?.addEventListener('click', closePrintDialog);
+    ppEl('ppOverlay')?.addEventListener('click', (e) => {
+      if (e.target?.dataset?.ppclose) closePrintDialog();
+    });
+    ppEl('ppSeg')?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-ppmode]');
+      if (b && !b.classList.contains('active')) ppSwitchMode(b.dataset.ppmode);
+    });
+    ppEl('ppPrint')?.addEventListener('click', ppPrint);
+    // 页码边改边预览：停手 500ms 再渲染，别每敲一个字符就重画一遍
+    ppEl('ppRange')?.addEventListener('input', () => {
+      if (pp.rangeTimer) clearTimeout(pp.rangeTimer);
+      pp.rangeTimer = setTimeout(() => { pp.rangeTimer = null; if (pp.on && pp.mode === 'pdf') ppRender(); }, 500);
+    });
+    ppEl('ppRange')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); if (pp.on && pp.mode === 'pdf') ppRender(); }
+    });
+    window.addEventListener('resize', () => { if (pp.on) ppFitZoom(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && pp.on) closePrintDialog();
+    });
   }
 
   function fitWidth() {
@@ -12982,9 +13152,13 @@
   };
   // 调试/自动化钩子：直接打开某篇文献的 PDF 阅读器、切换右侧页签、读取当前模型
   window.__openReader = (id) => openPdfReader(id);
+  // 调试/自动化钩子：直接开关对照精读（端到端验证用，正常用户走工具条按钮）
+  window.__toggleCmp = () => toggleCmpMode();
   // 成果管理调用：在终端内阅读自己上传的 PDF 附件（同一套阅读器 + 划词/全文翻译）
   window.__openReaderExternal = (opts) => openAchievementPdfReader(opts);
   window.__setPrTab = (t) => switchPrTab(t);
+  // 调试/自动化钩子：直接开打印预览（端到端验证用，正常用户走工具条上的「打印」）
+  window.__openPrint = (mode) => openPrintDialog(mode || 'pdf');
   window.__activeModel = () => ({
     activeProfileId, active: activeModelInfo,
     profiles: profiles.map((p) => ({ id: p.id, label: p.label, provider: p.provider, model: p.model })),

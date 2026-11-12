@@ -4039,7 +4039,7 @@ body.pn-resizing * { cursor: col-resize !important; }
 .cmp-pane { display: flex; flex-direction: column; overflow: hidden; min-width: 0; background: var(--surface); min-height: 0; }
 .cmp-outline { background: var(--side-1); border-right: 1px solid var(--hair); }
 .cmp-src { background: var(--panel-soft); }
-.cmp-trans { border-left: 1px solid var(--hair); }
+.cmp-trans { border-left: 1px solid var(--hair); position: relative; }
 .cmp-assist { border-left: 1px solid var(--hair); }
 .cmp-assist-host { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 /* 搬进来的右侧面板要撑满，且不要再叠一层左边框（宿主 pane 已经有了） */
@@ -4188,6 +4188,108 @@ body.pn-resizing * { cursor: col-resize !important; }
 .cmp-pending { color: var(--ink-3); font-size: 12px; }
 .cmp-trans-error { color: var(--red); font-size: 12px; line-height: 1.7; }
 
+/* ---------- 译文页（参照 FreePDF / pdf2zh 的版面还原读法） ----------
+   译文栏不再是「一段一段的文本流」，而是一页页和原版面同样大小的页面：
+   底图仍是原 PDF 那一页，文字块在原坐标上被白底覆盖、填上译文；
+   图表 / 表格 / 公式不遮不翻，原样留在页面上。
+   两栏滚动**不联动**，只有点击块才互相定位。 */
+.cmp-flow.ctp-scroll {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 18px; padding: 18px 16px 58px; overflow: auto;
+  background: var(--panel-2);
+}
+.ctp-page {
+  position: relative; flex: 0 0 auto; background: #fff; overflow: hidden;
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .10), 0 6px 18px rgba(0, 0, 0, .06);
+}
+.ctp-canvas { display: block; width: 100%; height: 100%; }
+.ctp-layer { position: absolute; inset: 0; }
+.ctp-block { position: absolute; box-sizing: border-box; cursor: pointer; border-radius: 2px; }
+
+/* 图表 / 表格 / 公式：整块原样保留，只在悬停时描个边，提示「这块可以点」 */
+.ctp-block.ctp-keep:hover {
+  outline: 1.5px dashed color-mix(in srgb, var(--primary) 55%, transparent);
+  background: color-mix(in srgb, var(--primary) 4%, transparent);
+}
+/* 已翻译的文字块：白底盖住原文，再写中文 */
+.ctp-block.ctp-filled { background: #fff; color: #16181b; overflow: hidden; }
+.ctp-text {
+  box-sizing: border-box; display: block;
+  /* break-word 而不是 anywhere：anywhere 会把 "ARTICLE INFO" 拆成 "ARTICLEINF / O"
+     （块宽比字号小一点点就断在任何字符上）。break-word 只在整词放不下时才断，中英混排都更稳。 */
+  white-space: pre-wrap; overflow-wrap: break-word; hyphens: none;
+}
+/* 放了最大可用字号仍装不下：白底长到「下一块的上沿」为止，剩下的截断（悬停看全文） */
+.ctp-block.ctp-grown { z-index: 3; }
+.ctp-block.ctp-clip { z-index: 3; }
+.ctp-block.ctp-clip::after {
+  content: '…'; position: absolute; right: 3px; bottom: 0;
+  font: 600 11px/14px -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: var(--text-2, #6b7280);
+}
+/* 还没翻的文字块：不盖原文，悬停时给一个「译」角标（点一下就翻这一段） */
+.ctp-block.ctp-missing:hover {
+  outline: 1.5px dashed color-mix(in srgb, var(--primary) 55%, transparent);
+  background: rgba(255, 255, 255, .5);
+}
+.ctp-block.ctp-missing:hover::after {
+  content: '译'; position: absolute; right: 2px; top: 2px; padding: 0 4px;
+  font: 600 10px/16px -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: #fff; background: var(--primary); border-radius: 3px;
+}
+.ctp-block.ctp-pending {
+  background: rgba(255, 255, 255, .92);
+  display: flex; align-items: center; justify-content: center;
+}
+.ctp-spin {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid rgba(0, 0, 0, .14); border-top-color: var(--primary);
+  animation: ctpSpin .8s linear infinite;
+}
+@keyframes ctpSpin { to { transform: rotate(360deg); } }
+.ctp-block.ctp-error {
+  outline: 1.5px dashed var(--red);
+  background: rgba(255, 255, 255, .6);
+}
+.ctp-block.active {
+  outline: 2px solid var(--primary); outline-offset: 1px; z-index: 4;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+.ctp-block.ctp-flash { animation: ctpFlash .9s ease-out 1; }
+@keyframes ctpFlash {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 45%, transparent); }
+  35% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 30%, transparent); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
+}
+.ctp-placeholder {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--ink-3); background: var(--panel-2);
+}
+.ctp-page-no {
+  position: absolute; right: 8px; bottom: 6px; padding: 0 4px;
+  font-size: 10px; line-height: 15px; color: rgba(0, 0, 0, .28);
+  background: rgba(255, 255, 255, .72); border-radius: 3px;
+  pointer-events: none; user-select: none;
+}
+.ctp-empty { padding: 48px 18px; text-align: center; font-size: 12.5px; color: var(--ink-3); line-height: 2; }
+
+/* 选中块的操作条：贴译文栏底部，只在选中时出现（旧版是每条译文头上挂一排按钮） */
+.cmp-block-bar {
+  position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 6;
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .08);
+  backdrop-filter: blur(6px);
+}
+.cmp-block-bar.hidden { display: none; }
+.cmp-block-bar-spacer { flex: 1; }
+.cmp-block-bar .cmp-block-tag { opacity: 1; }
+.cmp-block-bar .cmp-act { white-space: nowrap; }
+.cmp-block-bar .cmp-act.hidden { display: none; }
+
 /* ---------- 启动面板（选引擎整篇翻译 / 进度） ---------- */
 .cmp-start {
   position: absolute; inset: 0; z-index: 8; overflow-y: auto;
@@ -4309,16 +4411,99 @@ body.pn-resizing * { cursor: col-resize !important; }
 .pr-think-btn.think-on { color: var(--primary); border-color: color-mix(in srgb, var(--primary) 40%, transparent); background: var(--primary-soft); }
 
 /* ================= 打印（阅读器工具条的「打印」按钮） =================
-   打印时把整个应用界面藏掉，只留 #litPrintArea 里预先渲染好的页面图片，
-   这样打出来的是干净的论文页，而不是工具栏 + 侧栏的截图。 */
+   打印时把整个应用界面藏掉，只留 #litPrintArea 里预先渲染好的内容，
+   这样打出来的是干净的论文页 / 解析结论，而不是工具栏 + 侧栏的截图。 */
 .print-area { display: none; }
 @media print {
   body > *:not(#litPrintArea) { display: none !important; }
   #litPrintArea { display: block !important; }
   html, body { background: #fff !important; }
   .print-title { font-size: 12pt; font-weight: 700; margin: 0 0 8pt; }
+  /* 只印论文页本身：图片撑满可打印宽度，不加任何页眉标题 —— 标题会把整页往下推，
+     最后一页被压到第二张纸上，就是这个按钮最容易被骂的地方。 */
   .print-page { display: block; width: 100%; height: auto; page-break-after: always; break-after: page; }
   .print-page:last-child { page-break-after: auto; break-after: auto; }
   .print-para { font-size: 11pt; line-height: 1.7; margin: 0 0 8pt; }
-  @page { margin: 12mm; }
+  /* 预览里那行「只预览了前 N 页」的提示不该印出来 */
+  .prp-note { display: none !important; }
+  .print-doc { padding: 0 !important; }
+  @page { margin: 14mm 12mm; }
+}
+
+/* ---------- 打印预览弹层（类名前缀 prp-：pp- 已被解析进度浮层占用） ---------- */
+.prp { position: fixed; inset: 0; z-index: 4200; display: flex; align-items: center; justify-content: center; }
+.prp.hidden { display: none; }
+.prp-mask { position: absolute; inset: 0; background: rgba(10, 12, 16, .58); }
+.prp-panel {
+  position: relative; width: min(1180px, 94vw); height: min(92vh, 960px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg-1, #fff); border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .38);
+}
+.prp-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 14px; border-bottom: 1px solid var(--line, #e5e7eb);
+}
+.prp-title { font: 700 14px/1.4 -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+.prp-seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--bg-3, #f1f2f4); }
+.prp-seg-btn {
+  border: 0; background: transparent; cursor: pointer;
+  font: 500 12.5px/1 -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  padding: 6px 12px; border-radius: 6px; color: var(--text-2, #4b5563);
+}
+.prp-seg-btn.active { background: var(--bg-1, #fff); color: var(--text-1, #111827); box-shadow: 0 1px 3px rgba(0, 0, 0, .14); }
+.prp-range { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2, #4b5563); }
+.prp-range.hidden { display: none; }
+.prp-range .tb-input { width: 112px; height: 26px; }
+.prp-range-total { color: var(--text-3, #6b7280); }
+.prp-spacer { flex: 1; }
+.prp-status { font-size: 12px; color: var(--text-3, #6b7280); }
+.prp-body {
+  flex: 1; min-height: 0; overflow: auto; padding: 18px 16px 26px;
+  background: #6f7377; display: flex; justify-content: center; align-items: flex-start;
+}
+/* 预览纸面：宽度固定成 A4 可打印宽度（703px ≈ 186mm@96dpi），再用 zoom 缩到面板里。
+   用 zoom 而不是 transform：缩放后仍然参与布局，滚动条长度和纸面高度都是对的。 */
+.prp-paper {
+  width: 703px; background: #fff; box-shadow: 0 8px 28px rgba(0, 0, 0, .34);
+  zoom: .62; flex: none;
+}
+.prp-paper .print-area { display: block; }
+.prp-paper .print-page { display: block; width: 100%; height: auto; margin: 0 0 12px; }
+.prp-paper .print-page:last-child { margin-bottom: 0; }
+.prp-note {
+  font: 12px/1.6 -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: #6b7280; padding: 4px 2px 10px;
+}
+
+/* ---------- 解析结果文稿（预览与打印共用一套版式） ---------- */
+.print-doc {
+  padding: 26px 30px 30px; color: #111827; background: #fff;
+  font: 11pt/1.78 'Songti SC', 'Source Han Serif SC', 'Noto Serif CJK SC', SimSun, serif;
+}
+.pd-title {
+  font: 700 17pt/1.42 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  margin: 0 0 8px; letter-spacing: .2px;
+}
+.pd-meta {
+  font: 9.5pt/1.7 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: #4b5563; padding-bottom: 8px; margin-bottom: 14px; border-bottom: 1px solid #d8dbe0;
+}
+.pd-sec { margin: 0 0 13px; break-inside: avoid; }
+.pd-sec-h {
+  font: 700 11pt/1.6 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: #0f172a; margin: 0 0 4px; padding-left: 8px; border-left: 3px solid #2f6feb;
+}
+.pd-sec-v { white-space: pre-wrap; word-break: break-word; }
+.pd-sec-v table { border-collapse: collapse; width: 100%; font-size: 10pt; }
+.pd-sec-v th, .pd-sec-v td { border: 1px solid #ccd1d8; padding: 4px 7px; text-align: left; }
+.pd-sec-v h1, .pd-sec-v h2, .pd-sec-v h3 { font-size: 11.5pt; margin: 8px 0 4px; }
+.pd-sec-v ul, .pd-sec-v ol { padding-left: 1.6em; margin: 4px 0; }
+.pd-sec-v code { font: 9.5pt/1.5 'Cascadia Mono', Consolas, monospace; background: #f3f4f6; padding: 1px 4px; border-radius: 3px; }
+.pd-sec-v pre { background: #f6f7f9; border: 1px solid #e2e5ea; border-radius: 6px; padding: 8px 10px; overflow: auto; }
+.pd-sec-v pre code { background: none; padding: 0; }
+.pd-empty { color: #6b7280; font-size: 10.5pt; }
+.pd-foot {
+  margin-top: 18px; padding-top: 8px; border-top: 1px dashed #d8dbe0;
+  font: 8.5pt/1.6 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; color: #6b7280;
 }
