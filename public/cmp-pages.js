@@ -224,7 +224,7 @@
     state.gen += 1;
     const total = pageCount();
     if (!total) {
-      host.innerHTML = '<div class="ctp-empty">还没有对照数据。<br />先点工具条上的「整篇翻译」，在弹出的面板里跑一次<b>版面识别</b>。</div>';
+      host.innerHTML = '<div class="ctp-empty">暂无对照数据</div>';
       return;
     }
     state.scale = computeScale(1);

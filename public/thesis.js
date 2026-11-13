@@ -446,7 +446,7 @@
     if (!list.length) {
       wrap.innerHTML = `<div class="th-empty"><div class="th-empty-icon">${ico('graduation')}</div>
         <p>${S.items.length ? '没有符合筛选条件的论文' : '还没有学位论文'}</p>
-        <p class="th-muted">点击「${ico('upload')}导入学位论文 PDF」；导入后会自动读封面填好标题、作者、学校、学位类型、年份。点标题可看解析详情。</p></div>`;
+        </div>`;
       renderBulk();
       return;
     }
@@ -1228,7 +1228,7 @@
                 <button class="tb-btn ghost" id="thrClearChat" style="padding:1px 6px">清空对话</button>
               </div>
               <div class="thr-input-row">
-                <textarea class="thr-input" id="thrInput" placeholder="问关于这篇学位论文的问题…（选中正文可自动引用；回车发送，Shift+回车换行）"></textarea>
+                <textarea class="thr-input" id="thrInput" placeholder="问关于这篇论文的问题…"></textarea>
                 <button class="thr-send" id="thrSend">发送</button>
               </div>
             </div>
@@ -1248,7 +1248,7 @@
             <input type="file" id="thrNoteFile" accept="image/*" multiple class="hidden" />
           </div>
           <div class="thr-note-body" id="thrNoteBody">
-            <textarea class="thr-md" id="thrMd" placeholder="读到这里想到什么就写下来。AI 生成的「本章速读 / 综述条目 / 答辩演练」也会追加到这里。"></textarea>
+            <textarea class="thr-md" id="thrMd" placeholder="写下这一章的想法…"></textarea>
             <div class="thr-md-preview pr-md-content hidden" id="thrMdPreview"></div>
           </div>
         </aside>
@@ -1650,7 +1650,7 @@
     parts.push(`<div class="thr-out-group">章节目录${srcTip ? ` · ${esc(srcTip)}` : ''}</div>`);
     const items = R.outline.filter((c) => !q || String(c.title).toLowerCase().includes(q));
     if (!items.length) {
-      parts.push(`<div class="thr-out-empty">${R.outline.length ? '没有匹配的章节' : '尚未识别到章节。点上方「＋ 在当前位置加书签」也能自己标。'}</div>`);
+      parts.push(`<div class="thr-out-empty">${R.outline.length ? '没有匹配的章节' : '暂无章节'}</div>`);
     }
     for (const c of items) {
       parts.push(`<div class="thr-out-item lv${c.level || 1}" data-page="${c.page}">
@@ -1997,7 +1997,7 @@
     if (showPrev) {
       prev.innerHTML = md.value.trim()
         ? markdown(md.value)
-        : '<div class="thr-out-empty">笔记还是空的。切到「编辑」写下第一句，或在阅读器里选中正文 →「追加到笔记」。</div>';
+        : '<div class="thr-out-empty">暂无笔记</div>';
     }
   }
 
@@ -2519,7 +2519,7 @@
     const layer = document.createElement('div');
     layer.className = 'thr-ocr-layer';
     layer.innerHTML = `<div class="thr-ocr-rect hidden"></div>
-      <div class="thr-ocr-hint">拖动框选要摘录的区域 · 直接点一下识别整页 · Esc 取消</div>`;
+      <div class="thr-ocr-hint">拖动框选 · 点击整页 · Esc 取消</div>`;
     el.appendChild(layer);
 
     let start = null;
@@ -2648,7 +2648,7 @@
         <button class="tb-btn ghost" id="thOcrCopy">复制</button>
         <button class="tb-btn ghost" id="thOcrClose" title="关闭">✕</button>
       </div>
-      <textarea class="th-ocr-text" id="thOcrText" placeholder="识别出的文字会出现在这里，可以直接改…"></textarea>
+      <textarea class="th-ocr-text" id="thOcrText" placeholder="识别结果…"></textarea>
       <div class="th-ocr-acts">
         <button class="tb-btn accent" id="thOcrQuote">${ico('send')}加入素材库</button>
         <button class="tb-btn" id="thOcrNote">${ico('pen')}追加到笔记</button>
@@ -2760,7 +2760,7 @@
     let list = [];
     try { list = await api('/api/thesis-quotes'); } catch (_) { list = []; }
     if (!list.length) {
-      box.innerHTML = '<div class="thr-out-empty">还没有摘录。在阅读器里选中正文 →「加入素材库」即可，摘录会自动带上章节与页码。</div>';
+      box.innerHTML = '<div class="thr-out-empty">暂无摘录</div>';
       return;
     }
     const groups = new Map();
@@ -2806,7 +2806,7 @@
     el.classList.remove('hidden');
     loadModelChoices().then(() => { $('#thCmpModel').innerHTML = modelSelectHtml('thCmpModel'); });
     const chosen = new Set(preset);
-    $('#thCmpBody').innerHTML = `<p class="th-muted">勾选 2–5 篇（已解析出字段的效果最好），再点「开始对比」。</p>
+    $('#thCmpBody').innerHTML = `<p class="th-muted">勾选 2–5 篇</p>
       ${S.items.map((it) => `<label class="pop-item" style="display:block;padding:5px 2px">
         <input type="checkbox" data-cmp="${esc(it.id)}" ${chosen.has(it.id) ? 'checked' : ''} />
         ${esc(it.title || it.originalName || '未命名')} <span class="th-muted">${esc(it.year || '')}</span></label>`).join('')}`;

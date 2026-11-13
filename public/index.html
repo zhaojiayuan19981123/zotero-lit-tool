@@ -249,7 +249,7 @@
             <span class="hb-avatar" id="homeAvatar">研</span>
             <div class="hb-info">
               <div class="hb-greet" id="homeGreet">你好，研究生</div>
-              <div class="hb-sub" id="homeSub">完善个人资料后显示学校 / 专业 / 年级</div>
+              <div class="hb-sub" id="homeSub">完善个人资料</div>
               <div class="hb-encouragement" id="dailyEncouragement"></div>
               <div class="hb-progress">
                 <span>学业进度</span>
@@ -292,7 +292,7 @@
               <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span class="cal-we">六</span><span class="cal-we">日</span>
             </div>
             <div id="calGrid" class="cal-grid"></div>
-            <div id="calDayEvents" class="cal-day-events"><div class="pr-loading">点击日期查看当天安排</div></div>
+            <div id="calDayEvents" class="cal-day-events"><div class="pr-loading">选择日期</div></div>
           </div>
 
           <div class="card home-card home-today">
@@ -336,7 +336,7 @@
             <span><svg class="ico" aria-hidden="true"><use href="#i-puzzle"/></svg></span><b>算法类文库</b><span class="side-count" data-rootcount="algorithm"></span>
           </div>
           <button class="tb-btn" id="btnAddCol">＋ 新建分类</button>
-          <span class="lib-hint">拖动文献行到分类上即可归类</span>
+          <span class="lib-hint">拖入分类</span>
         </div>
         <div class="col-chips" id="colChips"></div>
 
@@ -415,8 +415,7 @@
           </table>
           <div id="emptyState" class="empty-state hidden">
             <div class="empty-icon"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-layers"/></svg></div>
-            <p>当前文库暂无文献</p>
-            <p class="empty-hint">点击「批量上传 PDF」或把 PDF 直接拖入窗口；也可拖动行到上方分类进行归类</p>
+            <p>暂无文献</p>
           </div>
         </div>
       </section>
@@ -433,9 +432,7 @@
       <section id="viewTopJournals" class="view hidden top-journal-view">
         <div class="top-journal-head">
           <div>
-            <div class="eyebrow">UTD 24 · 公开元数据追踪</div>
             <h2>顶刊追踪</h2>
-            <p>签到后领取每本已订阅期刊的未重复文章；文章元数据来自 Crossref，并保留出版社原文入口。</p>
           </div>
           <div class="top-journal-head-actions">
             <button id="btnTopJournalSync" class="tb-btn">↻ 同步最新文章</button>
@@ -611,8 +608,8 @@
             </div>
             <div class="review-config-grid">
               <label class="field"><span>审稿人领域角色</span><input id="reviewExpertise" class="tb-input" maxlength="160" placeholder="例如：战略管理与因果识别领域专家" /></label>
-              <label class="field"><span>目标期刊 / 会议</span><div class="review-journal-row"><input id="reviewJournal" class="tb-input" maxlength="240" placeholder="用于获取 EasyScholar 等级" /><button class="btn btn-sm" id="btnReviewRank">查询等级</button></div><span id="reviewRank" class="review-rank"></span></label>
-              <label class="field review-custom-field"><span>自定义审稿要求</span><textarea id="reviewCustomPrompt" rows="3" maxlength="4000" placeholder="例如：优先关注理论机制、识别策略或可复现性。不会覆盖真实性约束。"></textarea></label>
+              <label class="field"><span>目标期刊 / 会议</span><div class="review-journal-row"><input id="reviewJournal" class="tb-input" maxlength="240" placeholder="期刊 / 会议名称" /><button class="btn btn-sm" id="btnReviewRank">查询等级</button></div><span id="reviewRank" class="review-rank"></span></label>
+              <label class="field review-custom-field"><span>自定义审稿要求</span><textarea id="reviewCustomPrompt" rows="3" maxlength="4000" placeholder="例：关注识别策略与可复现性（真实性约束仍生效）"></textarea></label>
             </div>
             <div class="review-action-row">
               <span id="reviewSaveState" class="md-save-state"></span>
@@ -629,12 +626,11 @@
         <div class="worldlib-wrap">
           <div class="wl-intro card">
             <b><svg class="ico ico-sm" aria-hidden="true"><use href="#i-globe"/></svg>世图科研下载助手</b>
-            <p>把从世图科研（worldlib）复制的「标题 + 链接地址」文本粘贴到下方，自动解析成下载列表。支持这两种格式（可多选整段粘贴）：</p>
+            <p>粘贴「标题 + 链接地址」，自动解析成下载列表。</p>
             <pre>标题：10.1093/jcr/ucaf065
 链接地址：https://research.worldlib.site/tools/submit_ajax.ashx?action=getdownfile&...=xxx.pdf&uid=...</pre>
-            <p class="wl-hint">点「下载并导入」后，软件会自动抓取链接里的 PDF 文件（自动解析中转页获取真实下载地址），下载完成后连同 PDF 附件一并导入文献中心，无需打开浏览器手动下载。</p>
           </div>
-          <label class="field"><span>粘贴文本（支持一次粘贴多条）</span><textarea id="wlInput" rows="6" placeholder="标题：10.1093/jcr/ucaf065
+          <label class="field"><span>粘贴文本</span><textarea id="wlInput" rows="6" placeholder="标题：10.1093/jcr/ucaf065
 链接地址：https://research.worldlib.site/..."></textarea></label>
           <div class="wl-actions">
             <button class="btn btn-primary" id="btnWlParse"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-search"/></svg>解析列表</button>
@@ -693,13 +689,12 @@
               <div class="chat-welcome">
                 <div class="chat-welcome-ico"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-ai"/></svg></div>
                 <b>AI 科研助手已就绪</b>
-                <p>基于你的文献知识库、项目与任务进行定制化对话。<br />支持多会话与上下文记忆，试试左侧快捷指令，或直接输入问题。</p>
               </div>
             </div>
-            <div id="chatContextPills" class="chat-context-pills" aria-live="polite"><span class="chat-context-empty">可附加 PDF 或选择本地知识库内容</span></div>
+            <div id="chatContextPills" class="chat-context-pills" aria-live="polite"><span class="chat-context-empty"></span></div>
             <div class="ai-model-row" id="chatModelRow"></div>
             <div class="chat-input-row">
-              <textarea id="chatInput" rows="2" placeholder="输入问题，Enter 发送 / Shift+Enter 换行…"></textarea>
+              <textarea id="chatInput" rows="2" placeholder="输入问题…"></textarea>
               <button id="btnChatAttach" class="btn btn-ghost" title="上传 PDF"><svg class="ico ico" aria-hidden="true"><use href="#i-link"/></svg></button>
               <button id="btnChatKnowledge" class="btn btn-ghost" title="选择本地知识"><svg class="ico ico" aria-hidden="true"><use href="#i-brain"/></svg></button>
               <button id="btnChatSend" class="btn btn-primary">发送</button>
@@ -713,7 +708,6 @@
               <div class="kb-row"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-papers"/></svg>小论文 <b id="kbPaper">0</b> 篇</div>
               <div class="kb-row"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-thesis"/></svg>大论文 <b id="kbThesis">0</b> 项</div>
               <div class="kb-row"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-flask"/></svg>研究记录 <b id="kbNote">0</b> 条</div>
-              <div class="kb-tip">对话时会自动检索与你问题最相关的文献摘要、项目、任务与论文投稿状态作为上下文回答。同一会话内支持上下文追问，过长历史会自动压缩为摘要。</div>
             </div>
             <div class="card chat-quick">
               <div class="card-head"><b><svg class="ico ico-sm" aria-hidden="true"><use href="#i-zap"/></svg>快捷指令</b></div>
@@ -961,7 +955,6 @@
           <input id="histNote" class="tb-input" placeholder="动态说明，如：收到外审意见，小修" />
           <button class="btn btn-primary" id="btnHistAdd">记录</button>
         </div>
-        <p class="modal-desc">时间线自动留痕。被拒稿后：把状态改回「投稿中」并更换目标期刊，即可在同一篇论文下记录完整转投历史。</p>
       </div>
       <div class="modal-foot">
         <button id="btnPaperDelete" class="btn" style="color:var(--red);margin-right:auto"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-trash"/></svg>删除</button>
@@ -1011,7 +1004,7 @@
     <div class="modal-dialog modal-wide">
       <div class="modal-head"><h3><svg class="ico ico-sm" aria-hidden="true"><use href="#i-mail"/></svg>邮箱账户管理</h3><button class="modal-close" id="btnMaClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button></div>
       <div class="modal-body">
-        <p class="modal-desc">支持添加多个邮箱账户（如个人 163 邮箱 + 学校邮箱），随时切换查看。不需要邮箱也可以留空，不影响其他功能。<br />账号与授权码仅保存在<b>本机数据目录</b>（mail.json），不会上传到任何服务器。</p>
+        <p class="modal-desc">账号与授权码仅保存在<b>本机数据目录</b>（mail.json），不会上传到任何服务器。</p>
         <div id="maList" class="ma-list"></div>
 
         <div class="field-sep"></div>
@@ -1033,7 +1026,7 @@
         <p class="modal-desc" id="maNote"></p>
 
         <details class="ma-advanced">
-          <summary>高级设置（服务器地址与端口，一般无需修改）</summary>
+          <summary>高级设置</summary>
           <div class="prof-grid">
             <label class="field"><span>IMAP 服务器</span><input id="maImapHost" class="tb-input" placeholder="imap.163.com" /></label>
             <label class="field"><span>IMAP 端口</span><input id="maImapPort" class="tb-input" placeholder="993" /></label>
@@ -1086,12 +1079,10 @@
         <button class="modal-close" id="btnSettingsClose"><svg class="ico ico" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
       <div class="modal-body">
-        <p class="modal-desc">配置大模型后可获得精准的「研究背景 / 方法 / 结果 / 创新点」分点解析；模型同时驱动 AI 助手对话、论文对话与划词翻译。<b>可以添加多个模型</b>（例如：硅基流动的 DeepSeek 做日常解析 + 通义的 Qwen-VL 专门看图表），在<b>主界面顶栏一键切换</b>。</p>
 
         <div class="ml-section">
           <div class="ml-head">
             <span class="ml-title"><svg class="ico ico" aria-hidden="true"><use href="#i-puzzle"/></svg>已配置的模型 <b id="mlCount">0</b>/20</span>
-            <span class="ml-hint">点「使用中」的卡片可切换激活模型；同一时刻只有一个生效</span>
           </div>
           <div id="mlList" class="ml-list"></div>
           <div class="ml-actions">
@@ -1107,14 +1098,9 @@
         <div class="ml-section" id="visionSection">
           <div class="ml-head">
             <span class="ml-title"><svg class="ico ico" aria-hidden="true"><use href="#i-eye"/></svg>视觉模型 <b class="ml-required">必填</b></span>
-            <span class="ml-hint">当前模型不支持图片时，先用它「看图转文字」再回答</span>
           </div>
-          <p class="ml-desc">
-            DeepSeek 这类纯文本模型收到图片会直接报错。指定一个<b>视觉模型</b>后，发图提问时会先让它
-            「看图并写成详细文字描述」，再把描述交给当前模型回答；图表 / 公式的「AI 解释」也会直接走视觉模型直答。
-            <b>留空则自动选用你已配置且被判定为支持视觉的模型。</b>
-          </p>
-          <label class="field"><span>视觉模型（看图的那一双眼睛）<b class="ml-required">*</b></span>
+          <p class="ml-desc">纯文本模型无法读图；留空时自动选用支持图片的配置。</p>
+          <label class="field"><span>视觉模型<b class="ml-required">*</b></span>
             <select id="setVisionProfile" class="tb-select"></select>
           </label>
           <div id="setVisionHint" class="ml-vision-hint"></div>
@@ -1123,16 +1109,12 @@
         <!-- 本地 OpenAI 兼容端口：让别的软件也能用上这里的模型路由 -->
         <div class="ml-section" id="gatewaySection">
           <div class="ml-head">
-            <span class="ml-title"><svg class="ico ico" aria-hidden="true"><use href="#i-globe"/></svg>本地端口（给别的软件用）</span>
+            <span class="ml-title"><svg class="ico ico" aria-hidden="true"><use href="#i-globe"/></svg>本地端口</span>
             <label class="rt-switch" title="开启后本机会监听一个 OpenAI 兼容端口，供别的软件调用">
               <input type="checkbox" id="gwEnabled" /> 开启
             </label>
           </div>
-          <p class="ml-desc">
-            开启后，本应用会在本机起一个 <b>OpenAI 兼容</b>端口（只绑 127.0.0.1，不向局域网开放）。
-            把别的软件（Cherry Studio、ChatBox、Claude Code 等）的 Base URL 填成下面这个地址，
-            它们就直接用上这里的<b>多模型故障转移</b>了 —— 主模型抽风会自动换备用。
-          </p>
+          <p class="ml-desc">仅监听 127.0.0.1，供本机其他软件以 OpenAI 兼容地址调用。</p>
           <div class="rt-row">
             <label class="field field-inline"><span>端口</span>
               <input id="gwPort" class="tb-input" type="number" min="1024" max="65535" />
@@ -1144,12 +1126,11 @@
             <code id="gwBaseURL">—</code>
             <button type="button" id="btnGwCopy" class="btn btn-ghost btn-sm">复制</button>
           </div>
-          <small class="ml-field-hint">已在用的软件举例：把 Base URL 填 <code>http://127.0.0.1:15721/v1</code>、API Key 随便填一个非空值即可（本端口只监听本机，不需要鉴权）。</small>
         </div>
 
         <!-- 高级设置：日常不用动的东西都收在这里，默认折叠，界面保持清爽 -->
         <details class="adv-block" id="advSettings">
-          <summary><svg class="ico ico" aria-hidden="true"><use href="#i-settings"/></svg>高级设置<span class="adv-note">请求超时 · 出站代理 · 两段式看图 · 故障转移与熔断</span></summary>
+          <summary><svg class="ico ico" aria-hidden="true"><use href="#i-settings"/></svg>高级设置</summary>
           <div class="adv-body">
 
             <!-- 请求超时 + 出站代理 -->
@@ -1160,7 +1141,6 @@
                   <input id="rtTimeoutSeconds" class="tb-input" type="number" min="10" max="900" />
                 </label>
               </div>
-              <small class="ml-field-hint">推理模型（gpt-5.x 这类）想得久，单次回答动辄 80 秒以上。默认 120 秒；如果模型还是动不动「超时」，把它调大。</small>
 
               <div class="rt-row" style="margin-top:10px">
                 <label class="field field-inline"><span>出站代理</span>
@@ -1179,21 +1159,8 @@
                 <button type="button" id="btnPxDetect" class="btn btn-ghost btn-sm">重新检测</button>
               </div>
               <div id="pxTried" class="px-tried"></div>
-              <small class="ml-field-hint">有些上游直连不通，但本机已经跑着 v2rayN / Clash 这类软件。默认会自动探测常见的本地端口（10809 / 7890 / 10808 …），并且<b>只在直连失败时才走代理</b> —— 国内中转不会被白白绕一圈。</small>
             </div>
 
-            <!-- 两段式看图：选择器已提前到上方「视觉模型（必填）」区块，这里只留说明 -->
-            <div class="ml-sub">
-              <div class="ml-sub-head">
-                <span class="ml-sub-title"><svg class="ico ico" aria-hidden="true"><use href="#i-eye"/></svg>两段式看图</span>
-                <span class="ml-hint">视觉模型已在上方「视觉模型（必填）」里设置</span>
-              </div>
-              <p class="ml-desc">
-                当当前模型不支持图片时，系统会先用上方指定的<b>视觉模型</b>「看图并写成详细文字描述」，
-                再把描述交给当前模型回答；每条模型的“图片能力”可在编辑时自行覆盖。
-                上方未指定时，自动选用你已配置且被判定为支持视觉的模型。
-              </p>
-            </div>
 
             <!-- 模型路由：多条配置互为备份，失败自动切换 + 熔断 -->
             <div class="ml-sub" id="routerSection">
@@ -1203,11 +1170,7 @@
                   <input type="checkbox" id="rtEnabled" /> 启用
                 </label>
               </div>
-              <p class="ml-desc">
-                主模型调用失败（超时 / 限流 / 5xx / 网关返回网页）时，自动按<b>故障转移队列</b>的顺序换下一条配置重试；
-                连续失败的那条会进入<b>熔断</b>并暂时跳过，冷却过后再半开试探恢复。
-                <b>队列留空时等价于「只用主模型」</b>，不改变现有行为。
-              </p>
+              <p class="ml-desc">失败时按队列顺序重试；队列为空则只用主模型。</p>
 
               <div class="rt-row">
                 <label class="rt-switch"><input type="checkbox" id="rtFailover" /> 自动故障转移</label>
@@ -1221,7 +1184,7 @@
                 <div class="rt-stat"><span class="rt-stat-k">运行时间</span><b class="rt-stat-v" id="rtUptime">—</b></div>
               </div>
 
-              <div class="rt-sub">故障转移队列<span class="rt-sub-note">主模型不在此列 —— 它总是第一个被尝试</span></div>
+              <div class="rt-sub">故障转移队列<span class="rt-sub-note">主模型自动排第一</span></div>
               <div id="rtQueue" class="rt-queue"></div>
               <div class="rt-add-row">
                 <select id="rtAddSelect" class="tb-select"></select>
@@ -1237,7 +1200,7 @@
                   <label class="field"><span>错误率阈值（%）</span><input id="rtErrorRate" class="tb-input" type="number" min="0" max="100" /></label>
                   <label class="field"><span>算错误率的最小请求数</span><input id="rtMinRequests" class="tb-input" type="number" min="5" max="100" /></label>
                 </div>
-                <small class="ml-field-hint">连续失败到阈值、或者错误率超过阈值，都会让这条配置进入熔断；冷却结束后半开试探，连续成功到「恢复成功阈值」就恢复正常。填 0 秒表示不冷却、下一条请求立刻再试。</small>
+                <small class="ml-field-hint">熔断时长填 0 秒表示不冷却。</small>
               </details>
 
               <div class="rt-sub">各模型健康状态<span class="rt-sub-note"><i class="rt-led ok"></i>正常 · <i class="rt-led warn"></i>近期有失败 · <i class="rt-led bad"></i>已熔断</span></div>
@@ -1264,7 +1227,6 @@
         <div id="mlEditor" class="ml-editor hidden">
           <div class="ml-editor-head">
             <b id="mlEditorTitle">添加模型</b>
-            <span class="ml-editor-sub">填错也不影响已有的其他模型</span>
           </div>
           <div class="prof-grid">
             <label class="field"><span>供应商</span>
@@ -1326,7 +1288,6 @@
               </select>
             </label>
           </div>
-          <small class="ml-field-hint">测试会验证 system role、普通 JSON 和流式响应。若本地网关不支持 SSE，请保存为“仅非流式 JSON”。</small>
           <div id="mlModelChips" class="ml-chips"></div>
           <div id="mlTestResult" class="ml-test-result hidden"></div>
           <div class="ml-editor-foot">
@@ -1349,46 +1310,39 @@
           <label class="ml-switch"><input type="checkbox" id="setAiEnabled" /> 启用 AI（关闭后全部走规则离线提取，不消耗额度）</label>
         </label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:var(--primary-soft)">easyScholar 期刊等级查询（免费开放接口，需 SecretKey；可在已有文献与模拟审稿中查询等级）。</p>
-        <label class="field"><span>easyScholar SecretKey</span><input id="setEasyKey" class="tb-input" type="password" placeholder="在 easyScholar 官网获取，留空则不查询等级" /></label>
+        <h4 class="settings-group-title">期刊等级</h4>
+        <label class="field"><span>easyScholar SecretKey</span><input id="setEasyKey" class="tb-input" type="password" placeholder="留空不查询" /></label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:var(--primary-soft)">划词翻译（PDF 阅读器内选中文字自动翻译）。网页版火山 / 有道免密钥开箱即用；需要更高质量可配置 DeepL 或云厂商机器翻译。</p>
+        <h4 class="settings-group-title">划词翻译</h4>
         <label class="field"><span>翻译提供方</span>
           <select id="setTranslateProvider" class="tb-select w100">
-            <option value="builtin">内置翻译模型 · 免费（学术优化，推荐）</option>
-            <option value="siliconflow">当前激活的大模型（用上面配置的 Key）</option>
-            <option value="deepl">DeepL（需单独 Key）</option>
-            <option value="volcweb">火山翻译 · 网页版（免密钥）</option>
-            <option value="youdaoweb">有道翻译 · 网页版（免密钥）</option>
-            <option value="volcapi">火山引擎机器翻译（需 AccessKey）</option>
-            <option value="youdaoapi">有道智云翻译（需 应用ID/密钥）</option>
-            <option value="baidu">百度翻译开放平台（需 AppID/密钥）</option>
-            <option value="tencent">腾讯云机器翻译（需 SecretId/Key）</option>
-            <option value="free">免费接口（MyMemory，无需密钥）</option>
+            <option value="builtin">内置翻译模型（免费）</option>
+            <option value="siliconflow">当前激活的大模型</option>
+            <option value="deepl">DeepL</option>
+            <option value="volcweb">火山翻译（网页版）</option>
+            <option value="youdaoweb">有道翻译（网页版）</option>
+            <option value="volcapi">火山引擎机器翻译</option>
+            <option value="youdaoapi">有道智云翻译</option>
+            <option value="baidu">百度翻译开放平台</option>
+            <option value="tencent">腾讯云机器翻译</option>
+            <option value="free">免费接口</option>
           </select>
         </label>
         <div class="field tr-field" data-tr-for="builtin" style="grid-column:1/-1">
-          <span class="hint-text" style="font-size:12px;line-height:1.7;color:var(--text-3)">
-            内置翻译模型：固定使用翻译够用的小模型（Qwen3-8B 等免费模型，自动挑选可用的一个），
-            复用你在上面模型配置里填过的硅基流动 Key，不需要再单独申请；翻译不需要消耗大模型额度，
-            速度比推理模型快一个量级。若还没配过硅基流动 Key，请先在上面添加一条模型配置。
-          </span>
+          <span class="hint-text">复用已配置的硅基流动 Key，无需另申请。</span>
         </div>
-        <label class="field tr-field" data-tr-for="deepl"><span>DeepL API Key（选 DeepL 时填写）</span><input id="setDeeplKey" class="tb-input" type="password" placeholder="DeepL 密钥，留空则不用 DeepL" /></label>
-        <label class="field tr-field" data-tr-for="deepl"><span>DeepL 端点（可选，自建 DeepLX 时填）</span><input id="setDeeplEndpoint" class="tb-input" placeholder="留空 = 按 Key 自动选官方 Free / Pro 端点；自建例：http://127.0.0.1:1188/translate" /></label>
-        <label class="field tr-field hidden" data-tr-for="volcapi"><span>火山引擎 AccessKey（格式：AccessKeyId#SecretAccessKey）</span><input id="setVolcKey" class="tb-input" type="password" placeholder="AK#SK，在火山引擎控制台「API 访问密钥」获取" /></label>
+        <label class="field tr-field" data-tr-for="deepl"><span>DeepL API Key</span><input id="setDeeplKey" class="tb-input" type="password" placeholder="留空则不用 DeepL" /></label>
+        <label class="field tr-field" data-tr-for="deepl"><span>DeepL 端点</span><input id="setDeeplEndpoint" class="tb-input" placeholder="留空自动选择；自建例：http://127.0.0.1:1188/translate" /></label>
+        <label class="field tr-field hidden" data-tr-for="volcapi"><span>火山引擎 AccessKey</span><input id="setVolcKey" class="tb-input" type="password" placeholder="AccessKeyId#SecretAccessKey" /></label>
         <label class="field tr-field hidden" data-tr-for="volcapi"><span>火山引擎地域（可选）</span><input id="setVolcRegion" class="tb-input" placeholder="默认 cn-north-1" /></label>
-        <label class="field tr-field hidden" data-tr-for="youdaoapi"><span>有道智云密钥（格式：应用ID#应用密钥）</span><input id="setYoudaoKey" class="tb-input" type="password" placeholder="在有道智云控制台创建文本翻译应用后获取" /></label>
-        <label class="field tr-field hidden" data-tr-for="youdaoapi"><span>有道智云词汇表 ID（可选）</span><input id="setYoudaoVocabId" class="tb-input" placeholder="留空即可" /></label>
-        <label class="field tr-field hidden" data-tr-for="baidu"><span>百度翻译密钥（格式：AppID#密钥）</span><input id="setBaiduKey" class="tb-input" type="password" placeholder="在百度翻译开放平台「开发者信息」获取" /></label>
-        <label class="field tr-field hidden" data-tr-for="tencent"><span>腾讯云密钥（格式：SecretId#SecretKey）</span><input id="setTencentKey" class="tb-input" type="password" placeholder="在腾讯云「访问管理 → API 密钥管理」获取" /></label>
+        <label class="field tr-field hidden" data-tr-for="youdaoapi"><span>有道智云密钥</span><input id="setYoudaoKey" class="tb-input" type="password" placeholder="应用ID#应用密钥" /></label>
+        <label class="field tr-field hidden" data-tr-for="youdaoapi"><span>词汇表 ID</span><input id="setYoudaoVocabId" class="tb-input" placeholder="可选" /></label>
+        <label class="field tr-field hidden" data-tr-for="baidu"><span>百度翻译密钥</span><input id="setBaiduKey" class="tb-input" type="password" placeholder="AppID#密钥" /></label>
+        <label class="field tr-field hidden" data-tr-for="tencent"><span>腾讯云密钥</span><input id="setTencentKey" class="tb-input" type="password" placeholder="SecretId#SecretKey" /></label>
         <label class="field tr-field hidden" data-tr-for="tencent"><span>腾讯云地域（可选）</span><input id="setTencentRegion" class="tb-input" placeholder="默认 ap-shanghai" /></label>
-        <div class="field-sep"></div>
-        <p class="modal-desc">阅读器里的<b>翻译源</b>与<b>目标语言</b>：对照精读的整篇翻译与「点段落即译」、笔记模式、邮件翻译都读这一组设置。
-          对照精读界面里也有一份同样的选择器，改那边只影响那一次阅读。</p>
-        <label class="field"><span>翻译源（单段 / 对照精读的默认值）</span>
+        <label class="field"><span>翻译源</span>
           <select id="prTranslateSource" class="tb-select w100" title="局部翻译使用的翻译源；整篇翻译在对照精读里单独选">
-            <option value="auto">跟随上方「翻译提供方」设置</option>
+            <option value="auto">跟随上方设置</option>
           </select>
         </label>
         <label class="field"><span>语言方向</span>
@@ -1405,21 +1359,18 @@
             </select>
           </div>
         </label>
+        <label class="field"><span>中文字体文件</span><input id="setPdfFontPath" class="tb-input" placeholder="留空自动探测系统字体" /></label>
         <div class="field-sep"></div>
-        <label class="field"><span>全文翻译中文字体（可选）</span><input id="setPdfFontPath" class="tb-input" placeholder="留空 = 自动探测系统字体，找不到会自动下载 Noto Sans SC" /></label>
-        <p class="modal-desc">译文的字体家族（黑体系 / 宋体系 / 跟随原文）、粗细、字号与并发数，在
-          <b>对照精读</b>的「全文翻译」面板里按篇调整，并可用「存为默认」持久化。这里只需在需要指定某个特定字体文件时填写。</p>
-        <div class="field-sep"></div>
-        <p class="modal-desc" style="background:var(--primary-soft)">主题模式同步应用于整个界面（含阅读器）。三套模式各自独立配色，非简单地反转明暗。</p>
+        <h4 class="settings-group-title">外观</h4>
         <label class="field"><span>主题模式</span>
           <div id="themeModes" class="theme-modes"></div>
         </label>
         <label class="field field-inline"><span>跟随系统外观</span>
           <input type="checkbox" id="themeFollowSystem" class="tb-check" />
-          <em class="field-hint">开启后随系统深色/浅色自动切换（护眼模式需手动选择）</em>
+          <em class="field-hint">护眼模式需手动选择</em>
         </label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:var(--primary-soft)">全局字体（选择后所有界面文字统一使用该字体，立即预览；保存后跨启动生效）。</p>
+        <h4 class="settings-group-title">字体与字号</h4>
         <label class="field"><span>界面字体</span>
           <select id="setAppFont" class="tb-select w100">
             <option value="">默认（跟随系统）</option>
@@ -1431,7 +1382,7 @@
             <option value="Microsoft YaHei">微软雅黑</option>
           </select>
         </label>
-        <label class="field"><span>界面字号（英文统一使用 Times New Roman）</span>
+        <label class="field"><span>界面字号</span>
           <select id="setFontSize" class="tb-select w100">
             <option value="small">小（90%）</option>
             <option value="medium" selected>标准（100%）</option>
@@ -1440,8 +1391,9 @@
           </select>
         </label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:var(--green-soft)">数据保存位置（默认存在<b>系统用户数据目录</b>，与安装位置分离，<b>升级/覆盖安装不会丢失</b>文献与配置；也可手动指定自定义目录）。</p>
-        <label class="field"><span>数据保存目录</span><input id="setDataDir" class="tb-input" placeholder="留空 = 系统用户数据目录；例如 D:\文献库" /></label>
+        <h4 class="settings-group-title">数据</h4>
+        <label class="field"><span>数据保存目录</span><input id="setDataDir" class="tb-input" placeholder="留空 = 系统用户数据目录" /></label>
+        <small class="ml-field-hint">升级或覆盖安装不会丢失已有数据。</small>
 
         <div class="field-sep"></div>
         <div class="bk-section">
@@ -1449,7 +1401,6 @@
             <span class="bk-head-title"><svg class="ico ico" aria-hidden="true"><use href="#i-database"/></svg>数据备份与恢复</span>
             <span class="bk-head-hint">每次启动自动备份，保留最近 10 份</span>
           </div>
-          <p class="modal-desc">重装或升级前不必担心：应用每次启动都会把文献、配置、邮箱账户与 PDF 附件快照到数据目录下的 <code>backups/</code>。误删文献或配置出错时，可从这里一键恢复。</p>
           <div class="bk-actions">
             <button id="btnBkCreate" class="btn btn-ghost btn-sm">＋ 立即备份</button>
             <button id="btnBkExport" class="btn btn-ghost btn-sm"><svg class="ico ico-sm" aria-hidden="true"><use href="#i-download"/></svg>导出整包数据</button>
@@ -1484,7 +1435,7 @@
         <div id="updateStateIcon" class="update-state-icon">↻</div>
         <div class="update-state-copy">
           <h4 id="updateStateTitle">准备检查更新</h4>
-          <p id="updateStateMessage">点击下方按钮，从 GitHub Releases 检查可安装的新版本。</p>
+          <p id="updateStateMessage">尚未检查</p>
         </div>
         <div id="updateProgressWrap" class="update-progress-wrap hidden">
           <div class="update-progress-track"><span id="updateProgressBar"></span></div>
@@ -1513,9 +1464,9 @@
             </label>
             <button id="btnUpdateSourceSave" class="btn btn-ghost" type="button">保存</button>
           </div>
-          <p id="updateSourceHint" class="update-source-hint">留空则使用软件内置的镜像地址；未配置镜像时始终从 GitHub 官方下载。</p>
+          <p id="updateSourceHint" class="update-source-hint"></p>
         </div>
-        <p class="update-caution">安装前建议完成正在编辑的内容。下载完成后，应用将退出并启动安装程序；辅助式安装包在部分系统上仍可能要求确认安装选项。</p>
+        <p class="update-caution">安装会退出应用，请先保存正在编辑的内容。</p>
       </div>
       <div class="modal-foot">
         <a class="btn btn-ghost" href="https://github.com/zhaojiayuan19981123/worlex/releases" target="_blank" rel="noopener noreferrer">查看发布页</a>
@@ -1533,7 +1484,7 @@
       <p class="update-notify-title">发现新版本 <b id="updateNotifyVersion">--</b></p>
       <button class="update-notify-close" id="btnUpdateNotifyClose" data-update-notify="dismiss" title="关闭">×</button>
     </div>
-    <p class="update-notify-text" id="updateNotifyText">worlex 有新版本可用，建议升级。</p>
+    <p class="update-notify-text" id="updateNotifyText"></p>
     <div class="update-notify-actions">
       <button class="btn btn-primary btn-sm" id="btnUpdateNotifyOpen" data-update-notify="open">查看更新</button>
       <button class="btn btn-sm" id="btnUpdateNotifyLater" data-update-notify="dismiss">以后再说</button>
@@ -1638,7 +1589,7 @@
         <span class="pr-vsep" aria-hidden="true"></span>
         <button id="prToggleMd" class="btn btn-ghost pr-icobtn hidden" title="在 Markdown 译文与原文 PDF 之间切换"><svg class="ico" aria-hidden="true"><use href="#i-edit"/></svg><span class="pr-bt-t">查看译文</span></button>
         <button id="prToggleNote" class="btn btn-ghost pr-icobtn" title="笔记模式：左侧原文 / 中间划词翻译 / 右侧笔记（Markdown + 思维导图）"><svg class="ico" aria-hidden="true"><use href="#i-note"/></svg><span class="pr-bt-t">笔记模式</span></button>
-        <button id="prToggleCmp" class="btn btn-ghost pr-icobtn" title="对照精读：左大纲 ｜ 中左原文 ｜ 中右译文 ｜ 右 AI 助读。先识别版面，再逐段对照翻译，点原文译文同步定位"><svg class="ico" aria-hidden="true"><use href="#i-grid"/></svg><span class="pr-bt-t">对照精读</span></button>
+        <button id="prToggleCmp" class="btn btn-ghost pr-icobtn" title="对照精读：大纲 / 原文 / 译文 / 助读"><svg class="ico" aria-hidden="true"><use href="#i-grid"/></svg><span class="pr-bt-t">对照精读</span></button>
         <button id="prLayoutBtn" class="btn btn-ghost pr-icobtn" title="版面解析：识别图表 / 表格 / 公式区域，悬停看类型、点击放大或送 AI 解释"><svg class="ico" aria-hidden="true"><use href="#i-puzzle"/></svg><span class="plb-text">版面</span></button>
         <button id="prReadingBtn" class="btn btn-ghost pr-icobtn" title="阅读模式：把 PDF 重排成干净的文本流（双栏变单栏、字号行距可调、页眉页脚剔除、图表公式原样保留），与原页标注双向同步"><svg class="ico" aria-hidden="true"><use href="#i-book"/></svg><span class="pr-bt-t">阅读模式</span></button>
         <!-- 自动对照管线状态：打开文献 → 自动版面识别 → 自动整篇翻译 → 自动进对照精读 -->
@@ -1711,12 +1662,12 @@
                 <span>原文</span>
                 <button id="pnSendToNote" class="pn-mini-btn" title="把这段原文+译文追加到右侧笔记">→ 加入笔记</button>
               </div>
-              <textarea id="pnSrc" class="pn-src" placeholder="在左侧选中文字即可自动翻译；也可直接粘贴文本…"></textarea>
+              <textarea id="pnSrc" class="pn-src" placeholder="粘贴文本…"></textarea>
             </div>
             <div class="pn-field pn-field-grow">
               <div class="pn-field-label"><span>译文</span></div>
               <div id="pnTrans" class="pn-trans">
-                <div class="pn-trans-placeholder">翻译结果将显示在这里。</div>
+                 <div class="pn-trans-placeholder">暂无译文</div>
               </div>
             </div>
             <div class="pn-actions">
@@ -1747,7 +1698,7 @@
                 </div>
                 <button id="pnMdInsertTrans" class="pn-mini-btn" title="把中间栏的原文+译文插入到光标处">⇤ 插入翻译</button>
               </div>
-              <textarea id="pnMdEditor" class="pn-md-editor" placeholder="在这里用 Markdown 记笔记…&#10;&#10;- 支持标题、列表、表格、公式&#10;- 可粘贴图片"></textarea>
+              <textarea id="pnMdEditor" class="pn-md-editor" placeholder="用 Markdown 记笔记…"></textarea>
               <div id="pnMdPreview" class="pr-md-content pn-md-preview hidden"></div>
             </div>
 
@@ -1833,7 +1784,7 @@
               </aside>
 
               <div class="pn-mind-hint">
-                Tab 子主题 ｜ Enter 同级 ｜ Shift+Tab 父主题 ｜ F2 或双击改文字 ｜ Delete 删除 ｜ 方向键切换 ｜ Ctrl+V 粘贴图片 ｜ 滚轮上下平移，Ctrl+滚轮缩放
+                Tab 子主题｜Enter 同级｜F2 改名
               </div>
             </div>
           </div>
@@ -1860,10 +1811,7 @@
         <div class="cmp-start-card">
           <div class="cmp-start-emoji"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-book"/></svg></div>
           <h3 class="cmp-start-title">对照精读</h3>
-          <p class="cmp-start-desc" id="cmpStartDesc">
-            把这篇 PDF 的<b>版面识别结果</b>逐段译成目标语言：左侧列出本章大纲，中间左右对照原文与译文，
-            点击任一段落两侧同步定位，选中的段落可一键送入右侧 AI 助读。
-          </p>
+          <p class="cmp-start-desc" id="cmpStartDesc"></p>
           <ol class="cmp-start-steps" id="cmpStartSteps"></ol>
           <div class="cmp-start-form">
             <label class="cmp-field"><span>翻译引擎</span>
@@ -1916,7 +1864,7 @@
           <option value="sentence">逐句配对</option>
         </select>
         <span class="cmp-engine-state" id="cmpEngineState"></span>
-        <span class="cmp-hint" id="cmpSyncHint">点原文段落 → 译文页定位 · 滚动不联动</span>
+        <span class="cmp-hint" id="cmpSyncHint"></span>
         <span class="cmp-bar-spacer"></span>
         <button id="cmpExportNote" class="cmp-bar-btn" title="按当前配对方式导出对照笔记（Markdown，原文引用 + 译文）"><svg class="ico ico" aria-hidden="true"><use href="#i-download"/></svg>对照笔记</button>
         <button id="cmpStartToggle" class="cmp-bar-btn" title="选择翻译引擎，把整篇按版面块逐段翻译"><svg class="ico ico" aria-hidden="true"><use href="#i-globe"/></svg>整篇翻译</button>
@@ -1992,7 +1940,7 @@
           <input id="prDirSearch" class="pr-dir-search" type="search" placeholder="搜索标题 / 作者 / 期刊" />
         </div>
         <div class="pr-dir-list" id="prDirList"></div>
-        <div class="pr-dir-foot" id="prDirFoot">点标题即可切换阅读</div>
+        <div class="pr-dir-foot" id="prDirFoot"></div>
       </aside>
       <!-- EPUB 章节目录（读电子书时取代上面的「论文目录」，由 formatReaderToc 按格式切换） -->
       <aside id="prEpubToc" class="pr-dir pr-epub-toc hidden">
@@ -2001,7 +1949,7 @@
           <input id="prEpubTocSearch" class="pr-dir-search" type="search" placeholder="搜索章节 / 全书正文" />
         </div>
         <div class="pr-dir-list" id="prEpubTocList"></div>
-        <div class="pr-dir-foot" id="prEpubTocFoot">点章节即可跳转</div>
+        <div class="pr-dir-foot" id="prEpubTocFoot"></div>
       </aside>
       <!-- 左：PDF 连续页面（Markdown 译文打开后以覆盖层形式盖在页面上方） -->
       <div class="pr-main">
@@ -2078,7 +2026,7 @@
             <div class="rm-loading-card">
               <div class="rm-spinner" aria-hidden="true"></div>
               <div class="rm-loading-title" id="rmLoadingTitle">正在分析版面…</div>
-              <div class="rm-loading-hint" id="rmLoadingHint">第一次打开这一篇需要几秒：切分文字块、判断分栏、剔除页眉页脚。分析结果会缓存，下次打开就是秒开。</div>
+              <div class="rm-loading-hint" id="rmLoadingHint">正在分析版面…</div>
             </div>
           </div>
         </div>
@@ -2102,7 +2050,7 @@
               <option value="auto">引擎：跟随全局设置</option>
             </select>
           </div>
-          <textarea id="prSourceText" class="pr-src" placeholder="在左侧 PDF 中选中文字即可自动翻译；也可在此直接粘贴文本…"></textarea>
+          <textarea id="prSourceText" class="pr-src" placeholder="粘贴文本…"></textarea>
           <div class="pr-selection-options">
             <span>选区：</span>
             <label class="pr-join-label"><input id="prJoinMode" type="checkbox" /> 拼接模式</label>
@@ -2110,7 +2058,7 @@
           </div>
           <button id="prDoTranslate" class="btn btn-primary w100">翻 译</button>
           <div id="prTransResult" class="pr-trans-box">
-            <div class="pr-trans-placeholder">翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。</div>
+            <div class="pr-trans-placeholder">暂无译文</div>
           </div>
         </div>
 
@@ -2168,7 +2116,7 @@
         <div class="pr-pane pr-pane-chat hidden" data-prpane="chat">
           <div id="prChatModelRow" class="ai-model-row"></div>
           <div class="pr-chat-bar">
-            <span class="pr-chat-bar-title">对话记录 <span class="pr-chat-bar-note">按文献保存，退出应用不丢</span></span>
+            <span class="pr-chat-bar-title">对话记录</span>
             <span class="pr-chat-bar-actions">
               <button id="btnPrChatThink" class="btn btn-ghost btn-sm pr-think-btn" title="思考模式：自动（跟随模型）/ 快速（不思考，出字最快）/ 开启（展示思考过程）"><svg class="ico ico" aria-hidden="true"><use href="#i-brain"/></svg><span>思考：自动</span></button>
               <button id="btnPrChatSummary" class="btn btn-ghost btn-sm" title="把当前页 / 当前章节的正文交给 AI 总结"><svg class="ico ico" aria-hidden="true"><use href="#i-note"/></svg><span id="prSummaryLabel">总结本页</span></button>
@@ -2180,7 +2128,7 @@
           <div id="prCitePoolWrap" class="pr-cite-pool hidden">
             <div class="pr-cite-head">
               <span class="pr-cite-title"><svg class="ico ico" aria-hidden="true"><use href="#i-link"/></svg>引用池 <span class="side-count" id="prCiteCount">0</span>
-                <span class="pr-cite-hint">提问时连同这些原文一起交给 AI，发出后自动清空</span></span>
+                <span class="pr-cite-hint">发送后自动清空</span></span>
               <span class="pr-cite-actions">
                 <button class="btn btn-ghost btn-sm" id="prCiteAsk" title="就以引用池里的内容向 AI 提问">就这些提问</button>
                 <button class="btn btn-ghost btn-sm" id="prCiteClear" title="清空引用池">清空</button>
@@ -2278,9 +2226,6 @@
       </div>
       <div class="prp-body" id="ppBody">
         <div class="prp-paper" id="ppPaper"></div>
-      </div>
-      <div class="prp-foot">
-        打印会用系统打印对话框（可选打印机 / 份数 / 双面）。原文与解析结果是两份独立文档，分别打印即可。
       </div>
     </div>
   </div>

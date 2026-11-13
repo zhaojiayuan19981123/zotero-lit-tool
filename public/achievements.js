@@ -414,7 +414,7 @@
     const wide = WIDE_FIELDS.has(key) || isLong ? ' wide' : '';
     const hint = key === 'progressPercent'
       ? `<span class="ac-hint">0–100</span>`
-      : key === 'doi' ? '<span class="ac-hint">只填 10.xxxx/… 即可，不用带 https://doi.org/</span>' : '';
+      : key === 'doi' ? '<span class="ac-hint">10.xxxx/…</span>' : '';
     const input = isLong
       ? `<textarea data-field="${key}" rows="${key === 'abstract' || key === 'summary' ? 4 : 3}">${esc(val)}</textarea>`
       : `<input type="text" data-field="${key}" value="${esc(val)}" />`;
@@ -444,7 +444,7 @@
       <div class="ac-form">
         <div class="ac-field"><label>投稿 / 提交日期</label><input type="date" data-field="submitDate" value="${esc(item.submitDate || '')}" /></div>
         <div class="ac-field"><label>返修截止</label><input type="date" data-field="revisionDeadline" value="${esc(item.revisionDeadline || '')}" /></div>
-        <div class="ac-field wide"><label>本次进度说明</label><input type="text" id="acPgNote" placeholder="例如：已投稿至《管理世界》，等待初审结果" /></div>
+         <div class="ac-field wide"><label>本次进度说明</label><input type="text" id="acPgNote" placeholder="例：已投稿《管理世界》，等待初审" /></div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
         <button class="tb-btn accent" id="acPgAdd">＋ 记一笔进度</button>
@@ -606,7 +606,7 @@
     const patch = collectDetail();
     if (!patch) return;
     if (!draft && !String(patch.title || '').trim()) {
-      toast('名称不能为空：先填个名字，或点「保存草稿」先存着', 'error');
+      toast('请先填写名称', 'error');
       return;
     }
     try {

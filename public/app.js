@@ -865,11 +865,11 @@
     const searching = !!searchQuery();
     const emptyTitle = el.emptyState?.querySelector('p');
     const emptyHint = el.emptyState?.querySelector('.empty-hint');
-    if (emptyTitle) emptyTitle.textContent = searching ? '没有匹配的文献' : '当前文库暂无文献';
+    if (emptyTitle) emptyTitle.textContent = searching ? '没有匹配的文献' : '暂无文献';
     if (emptyHint) {
       emptyHint.textContent = searching
-        ? '搜索覆盖标题、作者、关键词、摘要以及该文库的全部字段，且支持模糊匹配；试试更短的词或清空搜索框'
-        : '点击「批量上传 PDF」或把 PDF 直接拖入窗口；也可拖动行到上方分类进行归类';
+        ? '试试更短的词或清空搜索框'
+        : '';
     }
     if (!scope.length) return;
     scope.forEach((it, idx) => {
@@ -1125,7 +1125,7 @@
       const updated = await api(`/api/literature/${id}/attachment`, { method: 'POST', body: form });
       const idx = items.findIndex((x) => x.id === id); if (idx >= 0) items[idx] = updated;
       render();
-      if (updated.fileKind === 'epub') { toast('EPUB 已挂上，点「阅读」即可看', 'success'); return; }
+      if (updated.fileKind === 'epub') { toast('EPUB 已添加', 'success'); return; }
       toast('上传成功，开始 AI 解析…');
       await parseIds([id]);
       // 同批量上传：解析后文件可能已被改名为「标题.pdf」，用最新记录生成缩略图
@@ -1539,9 +1539,8 @@
         ${it.status !== 'done' ? `<span class="badge badge-${it.status}" data-field-anchor="status" title="${esc(it.error || '')}">${STATUS_LABEL[it.status]}</span>` : ''}
       </div>
       ${it.error ? `<div class="modal-desc" data-field-anchor="status">${ico('alert')}解析失败：${esc(it.error)}</div>` : ''}
-      ${it.error ? '' : '<div class="anno-hint">提示：选中下方任意段落里的文字，可加底色高亮或改字色标注重点。</div>'}
       <section style="margin-bottom:18px" data-field-anchor="thoughts"><h4 style="margin:0 0 8px;font-size:13px;color:var(--primary);display:flex;align-items:center;gap:6px"><span style="width:4px;height:14px;background:var(--primary);border-radius:2px"></span>${ico('message')}我的思考<span class="col-ai">手写</span></h4>
-        <textarea id="drawerThoughts" class="drawer-thoughts" rows="4" placeholder="写下你自己的小想法：疑问、灵感、与课题的联系…">${esc(it.thoughts || '')}</textarea>
+        <textarea id="drawerThoughts" class="drawer-thoughts" rows="4" placeholder="记下疑问、灵感或联系…">${esc(it.thoughts || '')}</textarea>
         <button id="btnSaveDrawerThoughts" class="btn btn-primary" style="margin-top:8px">保存思考</button>
       </section>
       ${it.journalRankDetail && it.journalRankDetail.length ? `
@@ -1815,7 +1814,7 @@
     $('btnWlDownloadAll').disabled = !wlItems.length;
     $('btnWlImport').disabled = !wlItems.length;
     if (!wlItems.length) {
-      box.innerHTML = '<div class="wl-empty">尚未解析任何条目。把从世图科研复制的「标题 + 链接地址」文本粘贴到上方，点「解析列表」。</div>';
+      box.innerHTML = '<div class="wl-empty">暂无解析结果</div>';
       return;
     }
     box.innerHTML = wlItems.map((it, i) => {
@@ -1963,9 +1962,9 @@
   // 三套主题的完整色值定义在 style.css 的 [data-theme="..."] 块里，
   // 这里只负责切换 <html data-theme> 属性 + 持久化偏好。
   const THEME_MODES = [
-    { id: 'light', name: '浅色', icon: 'sun', desc: '明亮清爽，白天首选' },
-    { id: 'dark', name: '深色', icon: 'moon', desc: '低亮度，夜间护眼' },
-    { id: 'sepia', name: '护眼', icon: 'book', desc: '暖米色，长时间阅读' },
+    { id: 'light', name: '浅色', icon: 'sun' },
+    { id: 'dark', name: '深色', icon: 'moon' },
+    { id: 'sepia', name: '护眼', icon: 'book' },
   ];
   const MODE_KEY = 'uiThemeMode';
   const FOLLOW_KEY = 'uiThemeFollowSystem';
@@ -2012,7 +2011,6 @@
           <svg class="ico" aria-hidden="true"><use href="#i-${m.icon}"/></svg>
           <span class="tmc-name">${esc(m.name)}</span>
         </span>
-        <span class="tmc-desc">${esc(m.desc)}</span>
       </button>`).join('');
     box.querySelectorAll('.theme-mode-card').forEach((c) => {
       c.addEventListener('click', () => { setFollowSystem(false); applyThemeMode(c.dataset.mode, true); });
@@ -2255,7 +2253,7 @@
     if (!body) return;
     $('modelPanelCount').textContent = profiles.length ? `共 ${profiles.length} 个` : '';
     if (!profiles.length) {
-      body.innerHTML = `<div class="mp-empty">还没有配置任何模型。<br />点下面的「管理模型配置」添加，<br />可以同时配多个供应商的模型。</div>`;
+      body.innerHTML = `<div class="mp-empty">暂无模型配置</div>`;
       return;
     }
     const groups = new Map();
@@ -2366,17 +2364,16 @@
     const activeVision = active ? profileVision(active) : false;
     if (!able.length) {
       hint.className = 'ml-vision-hint warn';
-      hint.textContent = '还没有可用的视觉模型：先在上方添加一个支持视觉的模型（如 Kimi-K2.7-Code、Qwen3.8-27B、GLM-4.5V）并填写密钥。';
+      hint.textContent = '暂无可用的视觉模型';
     } else if (activeVision) {
       hint.className = 'ml-vision-hint ok';
-      hint.textContent = `当前模型「${profileName(active)}」本身就能看图，发图时会直接识别，无需转述。此项留作备用。`;
+      hint.textContent = `当前模型「${profileName(active)}」可直接看图`;
     } else {
       // 以「后端实际会用哪个」为准，而不是前端自己猜，避免两边判断不一致
       const real = activeVisionInfo || able[0];
       const isDesignated = !!settings.visionProfileId && settings.visionProfileId === real?.id;
       hint.className = 'ml-vision-hint ok';
-      hint.textContent = `发图提问时将先由「${real.label || real.model}」转述图片内容，再交给当前模型回答`
-        + `（${isDesignated ? '按你的指定' : '自动选择'}）。`;
+      hint.textContent = `图片由「${real.label || real.model}」转述（${isDesignated ? '按你的指定' : '自动选择'}）`;
     }
   }
 
@@ -2472,7 +2469,7 @@
     if (!box) return;
     const queue = rtQueue();
     if (!queue.length) {
-      box.innerHTML = '<div class="rt-empty">队列为空：主模型失败时不会切换，等价于「只用主模型」。用下面的下拉框把备用模型加进来。</div>';
+      box.innerHTML = '<div class="rt-empty">队列为空</div>';
       return;
     }
     box.innerHTML = queue.map((id, i) => {
@@ -2572,7 +2569,7 @@
     if (!box) return;
     const logs = routerStatus?.logs || [];
     if (!logs.length) {
-      box.innerHTML = '<div class="rt-empty">还没有请求记录。用一次 AI 功能后这里就会出现。</div>';
+      box.innerHTML = '<div class="rt-empty">暂无请求记录</div>';
       return;
     }
     box.innerHTML = logs.slice(0, 200).map((l) => {
@@ -2827,7 +2824,7 @@
     if (!box) return;
     $('mlCount').textContent = String(profiles.length);
     if (!profiles.length) {
-      box.innerHTML = '<div class="ml-empty">还没有模型。点「＋ 添加模型」手动配置，或点「一键添加常用模型」快速开始。</div>';
+      box.innerHTML = '<div class="ml-empty">暂无模型配置</div>';
       return;
     }
     box.innerHTML = profiles.map((p) => {
@@ -3321,7 +3318,7 @@
     $('btnGwApply').addEventListener('click', () => applyGateway());
     $('btnGwCopy').addEventListener('click', async () => {
       const text = $('gwBaseURL')?.textContent || '';
-      if (!text || text === '—' || text.startsWith('（')) { toast('本地端口还没启动，先点「应用」', 'error'); return; }
+      if (!text || text === '—' || text.startsWith('（')) { toast('本地端口未启动', 'error'); return; }
       try {
         await navigator.clipboard.writeText(text);
         toast('已复制：' + text, 'success');
@@ -3718,7 +3715,7 @@
     // 有解析结果但内容字段全为空时，给一句明确提示，而不是一片空白
     const noContent = it.status === 'done' && sections.length === 0;
     const emptyTip = noContent
-      ? '<div class="pr-an-empty">该文献已解析，但内容字段都为空。<br />可点下方「重新解析这篇」重跑一次。</div>'
+      ? '<div class="pr-an-empty">暂无可解析的内容</div>'
       : '';
 
     box.innerHTML = statusHtml + emptyTip + sections.map((s) => `
@@ -3982,7 +3979,7 @@
     if (!box) return;
     box.innerHTML = pn.md.trim()
       ? renderMarkdown(pn.md)
-      : '<div class="pr-trans-placeholder">笔记还是空的。可以在「编辑」里用 Markdown 写，也可以把中间栏的原文+译文「加入笔记」。</div>';
+      : '<div class="pr-trans-placeholder">暂无笔记</div>';
   }
 
   function switchPnMdEdit(mode) {
@@ -4781,7 +4778,7 @@
     pn.dirty = false;
     if (pn.mm) { try { pn.mm.destroy(); } catch (_) { /* ignore */ } pn.mm = null; pn.mmReady = false; }
     if (pnEl('pnSrc')) pnEl('pnSrc').value = '';
-    setPnTrans('<div class="pn-trans-placeholder">翻译结果将显示在这里。</div>');
+    setPnTrans('<div class="pn-trans-placeholder">暂无译文</div>');
     if (pnEl('pnMdEditor')) pnEl('pnMdEditor').value = '';
     if (pn.on) await loadPnNote(litId);
   }
@@ -5172,7 +5169,7 @@
                 <b>${esc(n.title || '未命名笔记')}</b>
                 <span>追加到这篇 · 更新于 ${esc(fmtTime(n.updatedAt || n.createdAt))}</span>
               </button>`).join('')
-          : '<div class="note-pick-empty">没有匹配的笔记，可点上方「新建一篇笔记」</div>';
+          : '<div class="note-pick-empty">暂无匹配笔记</div>';
       };
 
       wrap.addEventListener('click', (e) => {
@@ -5845,7 +5842,7 @@
     const host = $('prEpubHost');
     if (host) host.innerHTML = '';
     const foot = $('prEpubTocFoot');
-    if (foot) foot.textContent = '点章节即可跳转';
+    if (foot) foot.textContent = '';
     const search = $('prEpubTocSearch');
     if (search) search.value = '';
   }
@@ -5858,7 +5855,7 @@
     const entries = Array.isArray(toc) ? toc : [];
     $('prEpubTocCount').textContent = String(entries.length || 0);
     if (!entries.length) {
-      list.innerHTML = '<div class="pr-dir-empty">这本电子书没有提供目录信息<br />可以用上面的搜索框查找正文</div>';
+      list.innerHTML = '<div class="pr-dir-empty">暂无目录</div>';
       $('prEpubTocFoot').textContent = '';
       return;
     }
@@ -5906,7 +5903,7 @@
     if (!list) return;
     const total = titleHits.length + (bodyHits ? bodyHits.length : 0);
     $('prEpubTocCount').textContent = String(total);
-    $('prEpubTocFoot').textContent = bodyHits ? `共 ${total} 处命中 · 点结果跳转` : '正在检索全书正文…';
+    $('prEpubTocFoot').textContent = bodyHits ? `共 ${total} 处命中` : '正在检索全书正文…';
     const parts = [];
     if (titleHits.length) {
       parts.push('<div class="pr-dir-group">章节标题</div>');
@@ -6077,7 +6074,7 @@
         </div>`;
       }).join('')}
     `).join('');
-    if ($('prDirFoot')) $('prDirFoot').textContent = `共 ${total} 篇 · 点标题即可切换阅读`;
+    if ($('prDirFoot')) $('prDirFoot').textContent = `共 ${total} 篇`;
   }
 
   /**
@@ -7299,40 +7296,20 @@
     const q = await findCmpAlignJob();
     const hasStruct = !!cmp.data;
     const steps = [];
-    steps.push({
-      cls: hasLayout ? 'done' : 'now',
-      text: hasLayout ? '① 版面识别：已完成（块的切分 / 页码 / 阅读顺序都取自它）'
-        : '① 版面识别：还没有结果（点下面的「先识别版面」）',
-    });
-    steps.push({
-      cls: hasStruct ? 'done' : hasLayout ? 'now' : 'todo',
-      text: hasStruct ? '② 对照结构：已铺开（大纲 + 原文流，译文按需生成）'
-        : '② 对照结构：版面识别完成后自动铺开',
-    });
+    steps.push({ cls: hasLayout ? 'done' : 'now', text: hasLayout ? '① 版面识别 · 完成' : '① 版面识别' });
+    steps.push({ cls: hasStruct ? 'done' : hasLayout ? 'now' : 'todo', text: hasStruct ? '② 对照结构 · 完成' : '② 对照结构' });
     steps.push(zhDoc
-      // 中文文献：整篇翻译没有收益（翻出来的还是中文），这一步直接标成"不需要"
-      ? { cls: 'done', text: '③ 全文翻译：不需要 —— 这篇正文以中文为主，点哪一段就翻哪一段即可' }
-      : {
-        cls: q ? 'done' : hasStruct ? 'now' : 'todo',
-        text: q ? '③ 全文翻译：已完成，逐段译文已就位（整篇最省事）'
-          : '③ 全文翻译（可选）：选好引擎整篇翻一遍；不跑也能点任意段落单独翻',
-      });
+      ? { cls: 'done', text: '③ 全文翻译 · 中文文献无需整篇翻译' }
+      : { cls: q ? 'done' : hasStruct ? 'now' : 'todo', text: q ? '③ 全文翻译 · 完成' : '③ 全文翻译' });
     const box = cmpEl('cmpStartSteps');
     if (box) box.innerHTML = steps.map((s) => `<li class="${s.cls}">${esc(s.text)}</li>`).join('');
     // 没有版面结果时，把「先识别版面」这个按钮露出来
     cmpEl('cmpParseBtn')?.classList.toggle('hidden', hasLayout);
     const desc = cmpEl('cmpStartDesc');
     if (desc) {
-      const body = hasLayout
-        ? '版面已经识别好了：左侧列出本章大纲，中间左右对照原文与译文，点击任一段落两侧同步定位，'
-          + '选中的段落可一键送入右侧 AI 助读。<b>不整篇翻译也能用</b> —— 点哪一段就翻哪一段。'
-        : '对照精读要以<b>版面识别</b>的结果为基准：块的切分、页码、顺序都来自它，'
-          + '左右两侧才能逐段对齐。这篇还没有解析过版面 —— 点下面的「先识别版面」，等它跑完再回来。';
-      // 中文文献先说结论：整篇翻译这一步可以跳过，省下几分钟和一笔 token
-      desc.innerHTML = (zhDoc
-        ? '<div class="cmp-zh-note">这篇文献的正文以中文为主，<b>不需要整篇翻译</b>'
-          + '（翻出来的还是中文）。想查某个英文概念，选中那段文字单独翻一下就行。</div>'
-        : '') + body;
+      desc.innerHTML = zhDoc
+        ? '<div class="cmp-zh-note">正文以中文为主，可跳过整篇翻译；选中段落单独翻译即可。</div>'
+        : (hasLayout ? '' : '先完成版面识别，左右两侧才能逐段对齐。');
     }
     const load = cmpEl('cmpLoadBtn');
     if (load) {
@@ -7434,7 +7411,7 @@
         return true;
       }
     } catch (_) { /* 连版面都没有，下面统一提示 */ }
-    if (!silent) toast('这篇还没有版面识别结果 —— 先点「全文翻译」里的「先识别版面」', 'error');
+    if (!silent) toast('尚无版面识别结果', 'error');
     return false;
   }
 
@@ -7596,7 +7573,7 @@
     if (!box) return;
     const list = Array.isArray(blocks) ? blocks : (Array.isArray(cmp.data?.blocks) ? cmp.data.blocks : []);
     if (!list.length) {
-      box.innerHTML = '<div class="cmp-flow-empty">还没有对照数据。<br />先点工具条上的「整篇翻译」，在弹出的面板里跑一次<b>版面识别</b>。</div>';
+      box.innerHTML = '<div class="cmp-flow-empty">暂无对照数据</div>';
       return;
     }
     // 滚动位置跟着重排走：数据换版时用户读的仍是同一段
@@ -7653,7 +7630,7 @@
     if (!box) return;
     const heads = (cmp.heads || []).map((id) => cmp.blockById.get(id)).filter(Boolean);
     if (!heads.length) {
-      box.innerHTML = '<div class="cmp-outline-empty">这篇没有识别到章节标题。<br />换一篇，或重新解析版面试试。</div>';
+      box.innerHTML = '<div class="cmp-outline-empty">暂无章节标题</div>';
       return;
     }
     box.innerHTML = heads.map((b) => {
@@ -8108,7 +8085,7 @@
       return;
     }
     if (pr.layoutFor !== pr.recordId && !cmp.data) {
-      toast('还没有版面识别结果 —— 先点「先识别版面」，等跑完再开始翻译', 'error');
+      toast('尚无版面识别结果', 'error');
       refreshCmpStart();
       return;
     }
@@ -8171,13 +8148,13 @@
         // 长文档整篇翻译要几分钟，用户早就开始记笔记了，这时被强行切到对照精读很唐突；
         // 译文已就绪，徽标提示一句，想看时点「对照精读」即可（v1.24.6）。
         if (pn.on) {
-          if (cmp.autoId === pr.recordId) setCmpAutoChip(ok ? 'done' : null, ok ? '翻译完成，可点「对照精读」进入' : '');
+          if (cmp.autoId === pr.recordId) setCmpAutoChip(ok ? 'done' : null, ok ? '翻译完成' : '');
         } else if (ok && !cmp.on && pr.recordId && cmp.autoId === pr.recordId) {
           setCmpAutoChip('busy', '正在打开对照精读…');
           await openCmpMode();
         } else if (cmp.autoId === pr.recordId) {
           // 已经切到别的篇目了就别再打扰，徽标是当前这篇的状态
-          setCmpAutoChip(ok ? 'done' : 'fail', ok ? '翻译完成' : '翻译失败，可点「对照精读」手动进入');
+          setCmpAutoChip(ok ? 'done' : 'fail', ok ? '翻译完成' : '翻译失败');
         }
       }
     };
@@ -8252,8 +8229,8 @@
     const hint = cmpEl('cmpSyncHint');
     if (hint) {
       hint.textContent = cmp.view === 'split'
-        ? '点原文段落 → 译文定位 · 滚动不联动'
-        : cmp.view === 'pdf' ? '只看原文 · 点段落仍会翻译到右栏' : '只看译文 · 点段落可跳回原文';
+        ? '左右对照'
+        : cmp.view === 'pdf' ? '仅原文' : '仅译文';
     }
     // 「仅原文」下译文栏隐藏，选中框照旧留在 PDF 上；「仅译文」下 PDF 隐藏，把框收掉
     if (cmp.view === 'trans') clearPdfPick();
@@ -8495,7 +8472,7 @@
     if (found) {
       // 用户已经在笔记模式里（或刚切过去）→ 不抢界面，只提示译文已就绪（v1.24.6）
       if (pn.on) {
-        setCmpAutoChip('done', '翻译已完成，可点「对照精读」进入');
+        setCmpAutoChip('done', '翻译完成');
         return;
       }
       setCmpAutoChip('busy', '正在打开对照精读…');
@@ -8597,7 +8574,7 @@
     const hint = $('rmLoadingHint');
     const paint = (t) => { if (title && alive) title.textContent = t; };
     paint('正在分析版面…');
-    if (hint) hint.textContent = '第一次打开这一篇需要几秒：切分文字块、判断分栏、剔除页眉页脚。分析结果会缓存，下次打开就是秒开。';
+    if (hint) hint.textContent = '';
     const tick = async () => {
       if (!alive) return;
       try {
@@ -9978,14 +9955,10 @@
 
   // 划词面板的提示文案随文档格式走：读 EPUB 时别说成 PDF
   function selectionHintText() {
-    return pr.fileKind === 'epub'
-      ? '在左侧 EPUB 正文中选中文字即可自动翻译；也可在此直接粘贴文本…'
-      : '在左侧 PDF 中选中文字即可自动翻译；也可在此直接粘贴文本…';
+    return '粘贴文本…';
   }
   function translationPlaceholder() {
-    return pr.fileKind === 'epub'
-      ? '翻译结果将显示在这里。<br />在左侧 EPUB 正文中选中文字后会自动翻译。'
-      : '翻译结果将显示在这里。<br />在左侧 PDF 中选中文字后会自动翻译。';
+    return '暂无译文';
   }
 
   // 划词 → 自动填充右侧翻译面板并立即翻译（无需点击「译」）
@@ -10367,7 +10340,7 @@
     if (preview && pages.length > list.length) {
       const note = document.createElement('div');
       note.className = 'prp-note';
-      note.textContent = `预览只铺了前 ${PP_PREVIEW_MAX} 页；点「打印」会按上面的页码渲染全部 ${pages.length} 页。`;
+      note.textContent = `预览仅前 ${PP_PREVIEW_MAX} 页，打印时渲染全部 ${pages.length} 页。`;
       box.appendChild(note);
     }
   }
@@ -10396,7 +10369,7 @@
     // 打印稿上重复一遍反而像凑版面。
     doc.innerHTML = `
       <h1 class="pd-title">${esc(it.title || '（未命名文献）')}</h1>
-      ${body || '<div class="pd-empty">这篇文献还没有解析结果。先在右侧「解析结果」里跑一次解析，再来打印。</div>'}
+      ${body || '<div class="pd-empty">暂无解析结果</div>'}
       <div class="pd-foot">worlex · 文献解析结果 · ${stamp}</div>`;
     box.appendChild(doc);
   }
@@ -11485,7 +11458,7 @@
     const articles = topJournalData.articles || [];
     if (!articles.length) return tjEmpty('↻', '还没有同步文章', '请点击“同步最新文章”；同步只采集公开元数据、摘要、DOI 与出版社链接。');
     // 也挂上批量工具条：这里才是最常需要「导出 DOI」的列表，卡片因此可选
-    return `${tjBulkToolbar('latest', articles)}<div class="tj-section-note">按公开发表日期排序。部分出版社会延迟向 Crossref 补充摘要、机构或正式卷期信息。</div><div class="tj-article-list">${articles.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
+    return `${tjBulkToolbar('latest', articles)}<div class="tj-article-list">${articles.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
   }
   function tjBulkToolbar(kind, articles) {
     const count = topJournalSelection.size;
@@ -11509,11 +11482,11 @@
   }
   function renderTopJournalFavorites() {
     if (!topJournalFavorites.length) return tjEmpty('☆', '还没有收藏文章', '在今日推送、最新文章或历史记录中点击“收藏”，它将进入 AI 助手的本地知识库。');
-    return `${tjBulkToolbar('favorites', topJournalFavorites)}<div class="tj-section-note">收藏文章会作为摘要级证据纳入 AI 助手回答；它不等同于已读取全文。</div><div class="tj-article-list">${topJournalFavorites.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
+    return `${tjBulkToolbar('favorites', topJournalFavorites)}<div class="tj-section-note">收藏仅纳入摘要级证据</div><div class="tj-article-list">${topJournalFavorites.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
   }
   function renderTopJournalLibrary() {
     if (!topJournalLibrary.length) return tjEmpty('', '历史记录尚为空', '完成一次签到后，已领取的文章会保存在这里；删除只会从该视图隐藏，仍会保留去重记录。');
-    return `${tjBulkToolbar('history', topJournalLibrary)}<div class="tj-section-note">共 ${topJournalLibrary.length} 篇历史记录。批量删除不会让文章再次被推送；若已收藏，仍可在“收藏”中保留和供 AI 助手引用。</div><div class="tj-article-list">${topJournalLibrary.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
+    return `${tjBulkToolbar('history', topJournalLibrary)}<div class="tj-section-note">共 ${topJournalLibrary.length} 篇 · 批量删除不会重复推送</div><div class="tj-article-list">${topJournalLibrary.map((article) => tjArticleCard(article, { selectable: true })).join('')}</div>`;
   }
   function renderTopJournalCalendar() {
     const now = new Date();
@@ -11965,7 +11938,7 @@
     $('profileAvatar').innerHTML = avatarHtml(profile);
     $('profileName').textContent = profile.name || '研究生';
     $('homeGreet').textContent = `${greetWord()}，${profile.name || '研究生'}`;
-    $('homeSub').textContent = sub || '完善个人资料后显示学校 / 专业 / 年级';
+    $('homeSub').textContent = sub || '完善个人资料';
     $('profileSub').textContent = sub || '完善个人资料';
     const encouragements = [
       '今天先完成一个可检验的小步骤，进展不需要轰轰烈烈。',
@@ -12002,7 +11975,7 @@
         ${t.due ? `<span class="check-due${t.due < t0 ? ' over' : ''}">${t.due < t0 ? '逾期 ' : ''}${t.due.slice(5)}</span>` : ''}
         <button class="check-del" data-todaydel="${t.id}" title="删除">✕</button>
       </div>`).join('')
-      : '<div class="pr-loading">今天没有安排，去「任务安排」添加一个吧 </div>';
+      : '<div class="pr-loading">暂无安排</div>';
 
     // 科研动态（自动时间线）
     const feed = [];
@@ -12022,7 +11995,7 @@
     feed.sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
     $('feedList').innerHTML = feed.length
       ? feed.slice(0, 12).map((f) => `<div class="feed-item"><span class="feed-ico">${f.ico}</span><span class="feed-text" title="${esc(f.text)}">${esc(f.text)}</span><span class="feed-time">${fmtTime(f.ts)}</span></div>`).join('')
-      : '<div class="pr-loading">暂无动态，去上传文献或创建项目吧</div>';
+      : '<div class="pr-loading">暂无动态</div>';
 
     // 阅读热力：按页停留时长，替代原来的三态进度条
     const H = window.ReadingHeat;
@@ -12181,7 +12154,7 @@
   function renderProjects() {
     const wrap = $('projCards');
     if (!projects.length) {
-      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">${ico('folder')}</div><p>还没有项目</p><p class="empty-hint">点击「＋ 新建项目」，把文献、任务、实验记录围绕课题组织起来</p></div>`;
+      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">${ico('folder')}</div><p>暂无项目</p></div>`;
       return;
     }
     wrap.innerHTML = projects.map((p) => {
@@ -12412,7 +12385,7 @@
     const list = papers.filter((p) => p.kind === 'journal');
     const wrap = $('paperCards');
     if (!list.length) {
-      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">${ico('send-mail')}</div><p>还没有小论文记录</p><p class="empty-hint">点击「＋ 添加小论文」，跟踪从撰写、投稿、外审、返修到录用的完整流水线；期刊等级由 easyScholar 自动查询</p></div>`;
+      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">${ico('send-mail')}</div><p>暂无小论文</p></div>`;
       return;
     }
     const t0 = todayStr();
@@ -12472,7 +12445,7 @@
     const list = papers.filter((p) => p.kind === 'thesis');
     const wrap = $('thesisCards');
     if (!list.length) {
-      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">${ico('graduation')}</div><p>还没有大论文记录</p><p class="empty-hint">点击「＋ 添加大论文」，按「搭框架 → 读文献 → 找数据 → 实证分析 → 撰写 → 答辩」跟踪学位论文进度</p></div>`;
+      wrap.innerHTML = `<div class="empty-state proj-empty"><div class="empty-icon">${ico('graduation')}</div><p>暂无大论文</p></div>`;
       return;
     }
     wrap.innerHTML = list.map((p) => {
@@ -12712,11 +12685,11 @@
     </div>`;
   }
   function renderChapterEditor(chapters) {
-    $('thesisChapters').innerHTML = chapters.length ? chapters.map((c, i) => chapterRow(c, i)).join('') : '<div class="pr-loading ms-hint" style="text-align:left;padding:2px">还没有章节，点击下方按钮添加（或一键插入经管常用框架）</div>';
+    $('thesisChapters').innerHTML = chapters.length ? chapters.map((c, i) => chapterRow(c, i)).join('') : '<div class="pr-loading ms-hint" style="text-align:left;padding:2px">暂无章节</div>';
     $('thesisChapCount').textContent = chapters.length;
   }
   function renderMsEditor(milestones) {
-    $('thesisMilestones').innerHTML = milestones.length ? milestones.map((m, i) => milestoneRow(m, i)).join('') : '<div class="pr-loading ms-hint" style="text-align:left;padding:2px">还没有节点，如：开题答辩 / 中期检查 / 预答辩 / 正式答辩</div>';
+    $('thesisMilestones').innerHTML = milestones.length ? milestones.map((m, i) => milestoneRow(m, i)).join('') : '<div class="pr-loading ms-hint" style="text-align:left;padding:2px">暂无节点</div>';
     $('thesisMsCount').textContent = milestones.length;
   }
   function collectChapters() {
@@ -12802,7 +12775,7 @@
         <div class="note-card-meta"><span>${ico('calendar')}${fmtTime(n.createdAt)}</span>${proj ? `<span>${ico('folder')}${esc(clipTitle(proj.name, 14))}</span>` : ''}${paper ? `<span>${ico('send-mail')}《${esc(clipTitle(paper.title, 14))}》</span>` : ''}</div>
         <div class="note-card-preview">${esc(n.content || '（空）')}</div>
       </div>`;
-    }).join('') : `<div class="empty-state"><div class="empty-icon">${ico('flask')}</div><p>暂无研究记录</p><p class="empty-hint">按 Study 划分记录实证过程（假设 / 变量 / 数据 / 回归 / 稳健性），AI 助手生成周报与诊断时会参考</p></div>`;
+    }).join('') : `<div class="empty-state"><div class="empty-icon">${ico('flask')}</div><p>暂无研究记录</p></div>`;
   }
 
   let noteModalId = null;
@@ -13006,7 +12979,7 @@
   function renderConvList() {
     const box = $('convList');
     if (!conversations.length) {
-      box.innerHTML = '<div class="conv-empty">暂无会话<br />点击上方「＋ 新对话」开始</div>';
+      box.innerHTML = '<div class="conv-empty">暂无会话</div>';
       return;
     }
     box.innerHTML = conversations.map((c) => `
@@ -13077,7 +13050,7 @@
       ...chatAttachments.map((item) => `<span class="chat-context-pill" title="${esc(item.name || 'PDF')}" data-chat-attachment="${esc(item.id || '')}">${ico('file')}${esc(item.name || 'PDF')} <button type="button" class="chat-context-remove" data-remove-chat-attachment="${esc(item.id || '')}" aria-label="移除附件">×</button></span>`),
       ...chatKnowledge.map((item) => `<span class="chat-context-pill" title="${esc(item.title || '')}">${ico('brain')}${esc(item.title || '本地资料')} <button type="button" class="chat-context-remove" data-remove-chat-knowledge="${esc(item.id || '')}" aria-label="移除资料">×</button></span>`),
     ];
-    box.innerHTML = pills.length ? pills.join('') : '<span class="chat-context-empty">可附加 PDF 或选择本地知识库内容</span>';
+    box.innerHTML = pills.join('');
   }
 
   async function uploadChatPdf(file) {
@@ -13113,7 +13086,7 @@
     const box = $('chatKnowledgeList');
     if (!box) return;
     if (!chatKnowledgeCandidates.length) {
-      box.innerHTML = '<div class="empty">暂无可选择的本地资料。请先创建 Markdown 笔记、灵感孵化或研究记录。</div>';
+      box.innerHTML = '<div class="empty">暂无可选择的本地资料</div>';
       return;
     }
     const selected = new Set(chatKnowledge.map((item) => item.id));
@@ -13154,7 +13127,7 @@
       box.innerHTML = `<div class="chat-welcome"><div class="chat-welcome-ico">${ico('robot')}</div><b>AI 科研助手已就绪</b><p>基于你的文献知识库、项目与任务进行定制化对话。<br />支持多会话与上下文记忆，试试右侧快捷指令，或直接输入问题。</p></div>`;
       return;
     }
-    const summaryHint = activeSummary ? '<div class="chat-summary-hint">早期对话已压缩为摘要，AI 仍保留其要点记忆</div>' : '';
+    const summaryHint = activeSummary ? '<div class="chat-summary-hint">早期对话已压缩</div>' : '';
     box.innerHTML = summaryHint + chatMsgs.map((m, index) =>
       `<div class="chat-bubble ${m.role === 'user' ? 'user' : 'assistant'}${m.error ? ' error' : ''}">${m.role === 'user'
         ? esc(m.content).replace(/\n/g, '<br />')
@@ -14171,15 +14144,15 @@ a { color: #176b87; }
     $('updateVersionArrow').classList.toggle('hidden', !status.availableVersion);
 
     const copy = {
-      idle: ['↻', '准备检查更新', `点击下方按钮，从${sourceHint}检查可安装的新版本。`],
-      unsupported: ['—', '当前环境不支持自动更新', status.error || '请在安装后的 Windows 桌面版中使用此功能。'],
-      checking: ['↻', '正在检查新版本', `正在读取${sourceHint}的稳定版本信息…`],
-      available: ['↓', `发现新版本 ${available}`, '版本已通过更新清单验证。下方会显示本次更新了哪些功能。'],
-      downloading: ['↓', `正在下载 ${available}`, '可以关闭此窗口继续使用，下载会在后台进行。'],
-      downloaded: ['✓', `${available} 已准备好`, '保存当前工作后，退出应用并启动安装程序。'],
-      'not-available': ['✓', '当前已是最新版本', `当前使用的是 ${current}，暂未发现更高版本。`],
-      error: ['!', '更新检查失败', status.error || '请检查网络、代理或 GitHub Release 配置后重试。'],
-    }[phase] || ['↻', '应用更新', '可以手动检查 GitHub Releases。'];
+      idle: ['↻', '准备检查更新', '尚未检查'],
+      unsupported: ['—', '当前环境不支持自动更新', status.error || '仅安装版 Windows 支持自动更新'],
+      checking: ['↻', '正在检查新版本', ''],
+      available: ['↓', `发现新版本 ${available}`, ''],
+      downloading: ['↓', `正在下载 ${available}`, ''],
+      downloaded: ['✓', `${available} 已准备好`, '退出安装前请先保存工作。'],
+      'not-available': ['✓', '当前已是最新版本', ''],
+      error: ['!', '更新检查失败', status.error || '检查网络或代理后重试'],
+    }[phase] || ['↻', '应用更新', ''];
     $('updateStateIcon').textContent = copy[0];
     $('updateStateIcon').className = `update-state-icon phase-${phase}`;
     $('updateStateTitle').textContent = copy[1];
@@ -14257,10 +14230,10 @@ a { color: #176b87; }
       const hint = $('updateSourceHint');
       if (hint) {
         hint.textContent = !editable
-          ? '更新源设置仅在安装后的 Windows 桌面版中可用。'
+          ? '仅安装版 Windows 可设置更新源。'
           : info.builtinMirrorUrl
-            ? `软件内置镜像：${info.builtinMirrorUrl}；上方自定义地址优先，留空则沿用内置镜像。`
-            : '当前未内置镜像；填写国内镜像目录后，检查与下载会优先走镜像，失败自动回退 GitHub 官方。';
+            ? `内置镜像：${info.builtinMirrorUrl}；自定义地址优先。`
+            : '留空走 GitHub 官方；填写镜像后失败自动回退。';
       }
       return info;
     } catch (e) {
@@ -14297,8 +14270,8 @@ a { color: #176b87; }
     $('updateNotifyVersion').textContent = `v${version}`;
     const name = String(status?.releaseName || '').trim();
     $('updateNotifyText').textContent = name && name !== `v${version}`
-      ? `${name} 已发布，可查看更新内容并升级。`
-      : 'worlex 有新版本可用，建议升级。';
+      ? `${name} 已发布`
+      : '';
     $('updateNotify').classList.remove('hidden');
   }
 
@@ -14768,7 +14741,7 @@ a { color: #176b87; }
       const list = d.backups || [];
       const dirLine = `<div class="bk-dir" title="${esc(d.dataDir || '')}">${ico('folder')}${esc(d.dataDir || '')}</div>`;
       if (!list.length) {
-        wrap.innerHTML = dirLine + '<div class="bk-empty">还没有备份。点「立即备份」创建第一份，或重启应用后自动生成。</div>';
+        wrap.innerHTML = dirLine + '<div class="bk-empty">暂无备份</div>';
         return;
       }
       wrap.innerHTML = dirLine + `<div class="bk-list">${list.map((b) => `
@@ -14834,193 +14807,52 @@ a { color: #176b87; }
   const OB_VERSION = 2;
   const OB_STEPS = [
     {
-      emoji: 'sparkles', title: '欢迎使用 worlex',
-      desc: '这是为经管类硕博同学打造的<b>一站式科研助手</b>：文献管理、AI 解析、论文进度、科研日历一应俱全。接下来花 2 分钟，手把手带你完成初始设置、认识每个功能。',
-      points: [
-        { ico: '', html: '先带你<b>完善个人资料</b>、<b>配置 AI 密钥</b>（这是使用 AI 功能的前提）' },
-        { ico: '', html: '再逐个认识 <b>7 大功能模块</b>，知道每块能做什么' },
-        { ico: 'skip', html: '随时可点「跳过引导」，之后也能在 <b>设置</b> 里重新查看' },
-      ],
-      target: null, center: true,
-    },
-    {
-      emoji: 'user', title: '第 1 步 · 完善个人资料',
-      desc: '点击左下角的<b>个人资料卡片</b>，填写你的姓名、学校、专业和年级。这些信息会显示在首页横幅，学业进度条也会跟着更新。',
-      points: [
-        { ico: '', html: '<b>用户名</b>：你希望在软件里显示的名字' },
-        { ico: '', html: '<b>学校 / 院系</b> 和 <b>专业方向</b>：如「XX大学 经济学院 · 应用经济学」' },
-        { ico: '', html: '<b>学业进度</b>：拖动滑块设定当前毕业进度（0-100%）' },
-        { ico: '', html: '<b>头像</b>：填一个 emoji 即可，如 ' },
-      ],
-      target: '#profileCard', view: 'home',
-    },
-    {
-      emoji: 'key', title: '第 2 步 · 配置 AI（关键！）',
-      desc: '点击侧边栏底部的<b>「设置」</b>按钮打开 AI 设置。AI 解析、AI 助手、划词翻译都依赖这里的密钥，<b>建议优先配置</b>。',
-      points: [
-        { ico: '', html: '<b>AI 提供方</b>：默认选「硅基流动 SiliconFlow（DeepSeek）」，免费注册即可用' },
-        { ico: '', html: '<b>API 密钥</b>：到 <code>siliconflow.cn</code> 注册后，在「API 密钥」页复制 <code>sk-xxxx</code> 填到这里' },
-        { ico: '', html: '<b>模型名称</b>：保持默认 <code>deepseek-ai/DeepSeek-V4-Flash</code> 即可' },
-        { ico: '', html: '不配置也能用，但只能<b>离线规则提取</b>，AI 解析和 AI 助手不可用' },
-      ],
-      target: '#btnNavSettings', view: 'home',
-    },
-    {
-      emoji: 'award', title: '第 3 步 · 期刊等级 & 翻译',
-      desc: '仍在「设置」里，往下还有两项可选配置，让文献管理更强大。',
-      points: [
-        { ico: '', html: '<b>easyScholar SecretKey</b>：在 easyScholar 官网免费申请，填后点「期刊等级」按钮可自动查询中科院 / 新锐 / ABS / UTD24 / SSCI / FMS / CSSCI 等分区' },
-        { ico: 'globe', html: '<b>翻译提供方</b>：默认用上方 API Key（DeepSeek）；不想配密钥可改选「免费接口」' },
-        { ico: '', html: '<b>数据保存目录</b>：默认存在<b>系统用户数据目录</b>（升级不丢失），想换位置再填，如 <code>D:\\文献库</code>，留空用默认' },
-        { ico: '', html: '填完点弹窗底部<b>「保存设置」</b>生效' },
-      ],
-      target: '#btnNavSettings', view: 'home',
-    },
-    {
-      emoji: 'library', title: '文献中心 · 你的核心工作区',
-      desc: '这是最常用的模块，管理你读过的所有文献。',
-      points: [
-        { ico: '', html: '<b>批量上传 PDF</b>（或拖入窗口）：AI 自动提取标题、作者、摘要、<b>研究背景 / 方法 / 创新点</b>等字段' },
-        { ico: '', html: '<b>实证类 / 模型类文库</b>：按研究范式分区，字段自动适配' },
-        { ico: '', html: '<b>期刊等级</b>：填了 easyScholar 密钥后一键查分区' },
-        { ico: '', html: '点文献行右侧<b>「阅读」</b>进入 PDF 阅读器：<b>左划词、右翻译</b>，支持高亮和笔记' },
-      ],
-      target: '.nav-item[data-view="library"]', view: 'library',
-    },
-    {
-      emoji: 'folder', title: '项目管理 · 拆解大课题',
-      desc: '把研究方向拆成一个个项目，让文献、任务、记录互相联动。',
-      points: [
-        { ico: '', html: '点<b>「＋ 新建项目」</b>，填写项目名称、阶段与说明' },
-        { ico: '', html: '为项目<b>关联文献</b>、拆解子任务，进度一目了然' },
-        { ico: '', html: '研究记录也能挂到项目下，按项目归档' },
-      ],
-      target: '.nav-item[data-view="projects"]', view: 'projects',
-    },
-    {
-      emoji: 'check-square', title: '任务安排 · 待办与计划',
-      desc: '用任务清单管理科研节奏，配合首页日历不遗漏任何 Deadline。',
-      points: [
-        { ico: '', html: '顶部输入框<b>回车快速添加</b>任务，可设<b>优先级</b>和<b>截止日期</b>' },
-        { ico: '', html: '任务会同步到<b>首页科研日历</b>与「今日待办」' },
-        { ico: '', html: '完成后勾选，按项目 / 日期分组查看' },
-      ],
-      target: '.nav-item[data-view="tasks"]', view: 'tasks',
-    },
-    {
-      emoji: 'trending', title: '论文进度 · 投稿 + 学位论文',
-      desc: '两个子页签分别管理<b>小论文投稿</b>和<b>大论文进度</b>。',
-      points: [
-        { ico: '', html: '<b>小论文 · 投稿管理</b>：跟踪每篇论文的投稿状态（投稿中 → 外审 → 返修 → 录用），记录时间线' },
-        { ico: '', html: '<b>大论文 · 学位论文</b>：划分章节、设置<b>重要节点</b>（如开题、中期、答辩）并倒计时' },
-        { ico: 'clock', html: '重要节点会自动显示在首页「倒计时」卡片' },
-      ],
-      target: '.nav-item[data-view="papers"]', view: 'papers',
-    },
-    {
-      emoji: 'lightbulb', title: '研究记录 · 灵感与实验',
-      desc: '随时记录研究想法、实验数据、读书笔记，按 Study 划分。',
-      points: [
-        { ico: '', html: '点<b>「＋ 新建研究记录」</b>，选择记录类型（想法 / 实验 / 笔记等）' },
-        { ico: '', html: '内置<b>经管实证研究模板</b>，按 Study 组织多条记录' },
-        { ico: '', html: '支持按项目筛选，研究脉络清晰可追溯' },
-      ],
-      target: '.nav-item[data-view="notes"]', view: 'notes',
-    },
-    {
-      emoji: 'message', title: 'AI 助手 · 智能对话',
-      desc: '像 GPT 一样的多会话对话，还能结合你的文献库提问。',
-      points: [
-        { ico: '', html: '点<b>「＋ 新对话」</b>开启多个会话，左侧可随时切换、重命名、删除' },
-        { ico: '', html: '同一对话<b>记住上下文</b>；对话过长会自动<b>压缩摘要</b>，不丢关键信息' },
-        { ico: '', html: '引用<b>知识库 / 文献库</b>提问，让 AI 帮你查资料、理思路、改表达' },
-      ],
-      target: '.nav-item[data-view="ai"]', view: 'ai',
-    },
-    {
-      emoji: 'party', title: '准备就绪，开始科研之旅！',
-      desc: '你已经了解了所有功能。建议现在就去：① 配置 AI 密钥 ② 上传第一篇文献试试。',
-      points: [
-        { ico: '', html: '没配 AI 密钥？去 <b>设置 → AI 提供方</b> 补上' },
-        { ico: '', html: '去 <b>文献中心</b> 上传第一篇 PDF，体验 AI 自动解析' },
-        { ico: '', html: '想重看本引导？<b>设置 → 重新查看新手引导</b>' },
-      ],
-      target: null, center: true,
-    },
-  ];
-
-  // v2 focuses on the configuration required for every AI workflow. The previous
-  // feature tour is intentionally replaced so existing users see the new setup path once.
-  OB_STEPS.splice(0, OB_STEPS.length,
-    {
       emoji: 'key', title: '先完成 AI 配置',
-      desc: 'AI 助手、灵感孵化和模拟审稿都会使用当前激活的模型。接下来按实际设置顺序完成一条可用模型配置，再选择性接入 easyScholar。',
+      desc: '所有 AI 功能共用当前激活的模型。',
       points: [
-        { ico: '', html: 'API 密钥只保存在你的本机数据目录，不会显示在界面列表中。' },
-        { ico: '', html: '配置后先<b>测试连接</b>，再保存并设为使用中。' },
-        { ico: '', html: 'easyScholar 是可选项，仅用于提供期刊等级背景信息。' },
+        { ico: '', html: 'API 密钥只保存在本机数据目录。' },
       ], target: null, center: true,
     },
     {
       emoji: 'settings', title: '第 1 步 · 打开 AI 设置',
-      desc: '点击侧边栏底部的<b>设置</b>，所有模型、视觉模型和 easyScholar 配置都在这里管理。',
-      points: [
-        { ico: '', html: '可以保存多条模型配置，并在顶栏快速切换当前模型。' },
-        { ico: '', html: '未配置模型时，涉及 AI 的功能会提示你先完成本步骤。' },
-      ], target: '#btnNavSettings', view: 'home',
+      desc: '模型与期刊等级都在这里管理。',
+      points: [], target: '#btnNavSettings', view: 'home',
     },
     {
       emoji: 'plus', title: '第 2 步 · 添加一条模型',
-      desc: '已为你打开模型编辑表单。选择供应商后，继续填写接口地址、密钥和模型名称。',
-      points: [
-        { ico: '', html: '供应商预设会填入常见接口地址；其他 OpenAI 兼容服务可选择自定义。' },
-        { ico: '', html: '备注名称可用于区分“日常阅读”“审稿”或“看图”等用途。' },
-      ], target: '#mlEditor', view: 'home', settings: true, openModelEditor: true,
+      desc: '选择供应商，填写接口信息。',
+      points: [], target: '#mlEditor', view: 'home', settings: true, openModelEditor: true,
     },
     {
       emoji: 'list', title: '第 3 步 · 填写接口信息',
-      desc: '依次填写供应商、Base URL、API 密钥和模型名称。Base URL 填到版本根路径，例如以 <code>/v1</code> 结尾，程序会补全对话接口路径。',
+      desc: 'Base URL 填到版本根路径，模型名称须与账户可用 ID 一致。',
       points: [
-        { ico: '', html: '<b>Base URL</b>：使用模型供应商提供的 OpenAI 兼容地址。' },
-        { ico: '', html: '<b>API 密钥</b>：只填写你自己的密钥，不要把密钥写入笔记、论文或截图。' },
-        { ico: '', html: '<b>模型名称</b>：必须与该供应商账户可用的模型 ID 完全一致。' },
+        { ico: '', html: '不要把密钥写入笔记、论文或截图。' },
       ], target: '#mlBaseURL', view: 'home', settings: true, openModelEditor: true,
     },
     {
       emoji: 'plug-cable', title: '第 4 步 · 测试并保存',
-      desc: '点击<b>测试连接</b>确认地址、密钥和模型 ID 可以共同工作；成功后点击保存。若失败，请根据返回的 HTTP 状态或错误信息逐项核对。',
-      points: [
-        { ico: 'num-1', html: '先检查密钥是否有效、是否有余额或调用权限。' },
-        { ico: 'num-2', html: '再检查 Base URL 不是完整的 <code>/chat/completions</code> 地址。' },
-        { ico: 'num-3', html: '最后检查模型 ID 与供应商文档一致。' },
-      ], target: '#btnMlTest', view: 'home', settings: true, openModelEditor: true,
+      desc: '先测试连接，成功后保存。',
+      points: [], target: '#btnMlTest', view: 'home', settings: true, openModelEditor: true,
     },
     {
       emoji: 'check-circle', title: '第 5 步 · 设为使用中',
-      desc: '保存后，在模型卡片上选择<b>使用中</b>的那条配置。顶栏的模型切换菜单也会显示它。模型未激活时，AI 工作流不会猜测该使用哪条密钥。',
-      points: [
-        { ico: '', html: '需要分析图片或图表时，可在下方为“两段式看图”指定视觉模型。' },
-        { ico: 'swap', html: '切换模型不会删除其他配置，适合按任务使用不同模型。' },
-      ], target: '#mlList', view: 'home', settings: true,
+      desc: '在模型卡片上激活刚保存的配置。',
+      points: [], target: '#mlList', view: 'home', settings: true,
     },
     {
       emoji: 'star-outline', title: '第 6 步 · 可选配置 easyScholar',
-      desc: '如需显示期刊等级，在设置中填写你的 easyScholar SecretKey。模拟审稿会把查询结果作为严格度背景，不会把它当作真实期刊决定。',
+      desc: '填写 SecretKey 后可显示期刊等级。',
       points: [
-        { ico: '', html: '目标期刊名称必须由用户填写，查询不到时应核对中英文全称。' },
-        { ico: '', html: '等级数据可能更新或缺失，因此不能替代正式投稿指南和人工判断。' },
+        { ico: '', html: '等级数据不能替代正式投稿指南。' },
       ], target: '#setEasyKey', view: 'home', settings: true,
     },
     {
       emoji: 'compass', title: '配置完成后从这里开始',
-      desc: '现在可以在灵感孵化中选择实证、模型或 CCF 算法模式；在模拟审稿中拖入 PDF 或 DOCX 获取 Markdown 格式的建设性意见。',
-      points: [
-        { ico: '', html: '<b>灵感孵化</b>会明确证据缺口，并把新颖性判断标注为待文献验证。' },
-        { ico: '', html: '<b>模拟审稿</b>会流式输出，可重试并导出 Markdown 或 PDF。' },
-        { ico: '', html: '<b>Markdown 笔记</b>支持拖入 <code>.md</code> 或 <code>.markdown</code> 文件。' },
-      ], target: null, center: true,
+      desc: '上传第一篇文献，或试试灵感孵化与模拟审稿。',
+      points: [], target: null, center: true,
     },
-  );
+  ];
 
   let obActive = false;
   let obIndex = 0;

@@ -3519,7 +3519,6 @@ mark.anno-c-purple { color: var(--primary); background: none; }
 .top-journal-head { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; padding:18px 0 14px; }
 .top-journal-head h2 { margin:2px 0 5px; font-size:26px; letter-spacing:.2px; color:var(--text); }
 .top-journal-head p { margin:0; max-width:700px; color:var(--muted); font-size:13px; line-height:1.65; }
-.eyebrow { color:var(--primary); font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
 .top-journal-head-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
 .top-journal-stats { display:grid; grid-template-columns:repeat(4,minmax(130px,1fr)); gap:10px; margin-bottom:14px; }
 .tj-stat { min-height:76px; padding:13px 15px; border:1px solid var(--border); border-radius:10px; background:linear-gradient(135deg,var(--surface),var(--primary-soft)); display:flex; flex-direction:column; justify-content:space-between; }
@@ -4721,3 +4720,42 @@ html { caret-color: var(--text); scrollbar-color: var(--scrollbar) transparent; 
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------- 用布局承接解释（v1.40.1 文案精简） ----------
+   分组靠间距与细线划分，状态靠图标 / 进度条 / 就近按钮表达；
+   说明只在涉及非直觉约束时出现，且不写成教学句。 */
+
+/* 分组标题：取代每个设置区块前的整段说明。句子式小写、不追踪、不用 eyebrow。 */
+.settings-group-title {
+  margin: 24px 0 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.field-sep + .settings-group-title,
+.settings-group-title:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+
+/* 字段旁的短约束：只承载「留空会怎样」「不冷却」这类无法靠控件表达的信息 */
+.hint-text,
+.settings-inline-hint { display: block; margin: 8px 0 0; color: var(--text-3); font-size: 12px; line-height: 1.6; }
+.modal-body > .ml-field-hint { margin-bottom: 12px; }
+
+/* 空状态只留一行状态词；放大留白与图标权重，让「空」自己可读 */
+.empty-state { padding: 72px 20px; }
+.empty-state p { margin: 0; color: var(--text-2); font-size: 13px; }
+.empty-state .empty-icon { display: flex; justify-content: center; margin-bottom: 16px; opacity: .55; }
+
+/* 状态区没有补充信息时整行收起，避免留下一行空白说明 */
+#updateStateMessage:empty,
+.update-notify-text:empty,
+.cmp-start-desc:empty,
+.cmp-hint:empty,
+.pr-dir-foot:empty,
+.rm-loading-hint:empty,
+.update-source-hint:empty,
+.chat-context-empty:empty,
+.empty-hint:empty { display: none; }
