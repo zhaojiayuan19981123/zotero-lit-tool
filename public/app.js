@@ -7565,13 +7565,15 @@
     if (tr) {
       parts.push(window.CompareUtils
         ? window.CompareUtils.translationHtml(b.text, tr)
-        : `<div class="cmp-block-text">${esc(tr)}</div>`);
+        : `<div class="cmp-block-text">${esc(window.CompareUtils ? window.CompareUtils.cleanTranslation(b.text, tr) : tr)}</div>`);
     } else if (b.translatable) {
       parts.push('<div class="cmp-block-text cmp-block-missing">—（未翻译）点这一段只翻这里</div>');
     } else {
       parts.push(`<div class="cmp-block-text cmp-block-missing">—（${esc(label)}，按原样保留）</div>`);
     }
-    return `<div class="cmp-block" data-block-id="${esc(id)}" data-kind="${esc(kind)}">${parts.join('')}</div>`;
+    // 原文这一块是加粗的（假设 H10. 这类、粗体术语段）：译文也用粗体，别把强调抹平
+    const boldCls = b.bold ? ' cmp-bold' : '';
+    return `<div class="cmp-block${boldCls}" data-block-id="${esc(id)}" data-kind="${esc(kind)}">${parts.join('')}</div>`;
   }
 
   /** 文本重排里单块重绘（按需翻译完成后只动这一段，不重铺整篇） */

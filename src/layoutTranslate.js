@@ -133,7 +133,7 @@ export function headingDepth(text, label) {
  * @returns {object} { totalPages, analyzedPages, pages, stats, source:'manifest' }
  */
 export function layoutFromManifest(manifest, options = {}) {
-  const { translateReferences = false, pageSizes = null } = options;
+  const { translateReferences = false, pageSizes = null, boldByBlock = null } = options;
   const rawBlocks = Array.isArray(manifest?.blocks) ? manifest.blocks : [];
 
   // 1) 按页分组，同时过滤掉装饰块
@@ -185,7 +185,9 @@ export function layoutFromManifest(manifest, options = {}) {
         x1: (nx + nw) * size.width,
         y1: (ny + nh) * size.height,
         size: 0,
-        bold: false,
+        // 字重：版面模型不给，由 layoutBold.js 扫 PDF 字体名算出（H10. 这类假设、
+        // 粗体术语在原文里是加粗的，译文跟着加粗才对得上）。拿不到就当不加粗。
+        bold: !!(boldByBlock && (boldByBlock.get ? boldByBlock.get(String(b.id || '')) : boldByBlock[String(b.id || '')])),
         serif: null,
       };
     });
@@ -275,7 +277,8 @@ export function buildMarkdownFromManifest(pages) {
       } else if (b.kind === 'reference') {
         out.push(`- ${body}`);
       } else {
-        out.push(body, '');
+        // 原文整块加粗（假设 H1–H12、粗体术语段）：译文也用粗体，别把作者的强调抹平
+        out.push(b.bold ? `**${body}**` : body, '');
         stats.text++;
       }
     }
@@ -313,6 +316,8 @@ export function buildAlignOutput(layout, meta = {}) {
         image: b.image || '',
         caption: b.caption || '',
         translatable: !!b.translatable,
+        // 原文这一块是不是加粗：前端据此把译文也设成粗体
+        bold: !!b.bold,
       });
     }
   }

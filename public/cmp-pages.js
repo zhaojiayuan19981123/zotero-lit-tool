@@ -585,7 +585,11 @@
   }
 
   function translationOf(b) {
-    return String(b.translation || '').trim();
+    const tr = String(b.translation || '').trim();
+    if (!tr) return '';
+    // 老译文里可能有「……（原文不完整）」这类模型自我说明，显示前统一清洗
+    const clean = window.CompareUtils?.cleanTranslation;
+    return clean ? clean(b.text, tr) : tr;
   }
 
   function buildBlockEl(b, p, grow = 0) {
@@ -593,6 +597,8 @@
     el.className = 'ctp-block';
     el.dataset.id = String(b.id);
     el.dataset.kind = String(b.kind || 'body');
+    // 原文这一块是加粗的（假设 H10. 这类、粗体术语段），译文也跟着加粗
+    if (b.bold) el.dataset.bold = '1';
     el.style.left = r2(p.left) + '%';
     el.style.top = r2(p.top) + '%';
     el.style.width = r2(p.width) + '%';
@@ -640,6 +646,8 @@
     const kind = el.dataset.kind;
     const isTitle = kind === 'title';
     const isHeading = isTitle || kind === 'heading';
+    // 粗体：标题本来就粗；正文块只有「原文那一块是粗的」才粗（见 layoutBold.js）
+    const isBold = isHeading || el.dataset.bold === '1';
     const padX = w < 60 ? 2 : 4;
     const padY = h < 18 ? 1 : 2;
     textEl.style.width = Math.max(8, w - padX * 2) + 'px';
@@ -647,7 +655,7 @@
     textEl.style.boxSizing = 'border-box';
     el.style.padding = '0';
     textEl.style.fontFamily = SERIF;
-    textEl.style.fontWeight = isHeading ? '700' : '400';
+    textEl.style.fontWeight = isBold ? '700' : '400';
     textEl.style.lineHeight = isTitle ? '1.4' : isHeading ? '1.35' : '1.55';
     textEl.style.textAlign = isTitle ? 'center' : 'justify';
     // 中文按字断行本来就没问题；关掉连字符与「单词中间断行」能让英文缩写在块里不被拆开

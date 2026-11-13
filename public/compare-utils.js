@@ -176,9 +176,32 @@
 
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+  /** 模型对「半截原文」的自我说明，例如「（原文不完整，但按要求翻译到此）」 */
+  const META_NOTE = /[（(][^（）()]{0,40}(?:原文不完整|原文片段|原文内容不全|此处省略|以下省略|后略|翻译到此|未能完整|内容不完整)[^（）()]{0,40}[）)]/g;
+  const TAIL_ELLIPSIS = /\s*(?:…+|\.{3,}|。{2,})\s*$/;
+
+  /**
+   * 显示前清洗译文（与服务端 engines.polishTranslation 同一口径，这里是兜底）。
+   *
+   * 为什么前端还要再做一次：PDF 段落常在页面底部被切断，模型拿到半句话时会补一个
+   * 「……」或写一行「（原文不完整）」。服务端已经不再产生这种文本，但**历史译文**
+   * 早就存进了对照数据与本地缓存，不清洗就会一直显示给用户。
+   *
+   * 原则：原文没有的省略号，译文也不该有；说明性文字一律去掉。
+   */
+  function cleanTranslation(source, translation) {
+    let text = String(translation == null ? '' : translation);
+    if (!text.trim()) return '';
+    const src = String(source == null ? '' : source);
+    text = text.replace(META_NOTE, '');
+    if (!/(?:…+|\.{3,}|。{2,})\s*$/.test(src)) text = text.replace(TAIL_ELLIPSIS, '');
+    if (!/^\s*(?:…+|\.{3,})/.test(src)) text = text.replace(/^\s*(?:…+|\.{3,})\s*/, '');
+    return text.replace(/[ \t]{2,}/g, ' ').trim() || String(translation).trim();
+  }
+
   /** 译文块内容：逐段 = 一整段；逐句 = 原文句在上、译文句在下，一一并列。 */
   function translationHtml(source, translation) {
-    const tr = String(translation || '').trim();
+    const tr = cleanTranslation(source, translation);
     if (!tr) return '';
     if (getPairMode() !== 'sentence') return `<div class="cmp-block-text">${esc(tr)}</div>`;
     const pairs = pairSentences(source, tr);
@@ -208,6 +231,6 @@
   window.CompareUtils = {
     cacheGet, cacheSet, cacheKey, getPairMode, setPairMode,
     joinParts, isSplitPair, splitGroups, splitByWeights,
-    splitSentences, pairSentences, translationHtml, buildNote, esc,
+    splitSentences, pairSentences, translationHtml, buildNote, esc, cleanTranslation,
   };
 })();

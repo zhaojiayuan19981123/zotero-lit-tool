@@ -31,6 +31,8 @@ import { createZip, uniqueName } from './src/zip.js';
 // 版面识别结果 → 翻译管线结构 / 逐块对照数据（见 src/layoutTranslate.js）：
 // 「对照精读」在还没做过全文翻译时也要能立刻铺出大纲与原文流。
 import { readManifestFor, layoutFromManifest, buildAlignOutput } from './src/layoutTranslate.js';
+// 版面块的字重（原文加粗 → 译文加粗）：版面模型不给，从 PDF 字体名里扫，带磁盘缓存
+import { boldMapFor } from './src/layoutBold.js';
 import { queryPublicationRank, formatRank } from './src/easyscholar.js';
 import { translate } from './src/translate.js';
 import { TRANSLATE_PROVIDERS } from './src/translateProviders.js';
@@ -2238,7 +2240,7 @@ export function createApp({
   // 与翻译作业产出的「对照数据」走的是同一段代码（layoutFromManifest + buildAlignOutput），
   // 所以块 id / 切分 / 阅读顺序与翻译完成后完全一致 —— 从「结构」切到「已翻译」
   // 不会发生任何错位，只是 translation 字段被填上了。
-  app.get('/api/literature/:id/layout/align', (req, res) => {
+  app.get('/api/literature/:id/layout/align', async (req, res) => {
     const item = store.getLiterature(req.params.id);
     if (!item) return res.status(404).json({ error: '记录不存在' });
     const manifest = readManifestFor(store.getDataDir(), item.id);
@@ -2246,7 +2248,20 @@ export function createApp({
     // 用 404 会让浏览器控制台留一条红色报错，看起来像坏了。
     if (!manifest) return res.json({ ok: true, align: null });
     try {
-      const lay = layoutFromManifest(manifest, { translateReferences: false });
+      // 字重（原文加粗 → 译文加粗）。第一次要扫一遍 PDF 字体名（~0.5s / 28 页），
+      // 之后走 <数据目录>/layout/<id>/bold.json 缓存；扫失败就当全不加粗，不挡出数据。
+      let boldByBlock = null;
+      try {
+        boldByBlock = await boldMapFor({
+          dataDir: store.getDataDir(),
+          literatureId: item.id,
+          manifest,
+          pdfPath: item.filePath,
+        });
+      } catch (e) {
+        console.warn('[layout/align] 字重识别跳过：', e.message);
+      }
+      const lay = layoutFromManifest(manifest, { translateReferences: false, boldByBlock });
       const align = buildAlignOutput(lay, {
         literatureId: item.id,
         targetLang: '',

@@ -28,6 +28,8 @@ import { toUint8Array } from './util.js';
 import {
   layoutFromManifest, buildMarkdownFromManifest, buildAlignOutput, readManifestFor,
 } from '../layoutTranslate.js';
+// 版面块的字重（原文加粗 → 译文加粗）：版面模型不给，从 PDF 字体名里扫
+import { boldMapFor } from '../layoutBold.js';
 
 export { TARGET_LANGS, parseGlossary, describeFont, downloadCjkFont, platformFontHint };
 
@@ -502,10 +504,27 @@ export class PdfTranslateService extends EventEmitter {
 
     try {
       if (manifest) {
-        layout = layoutFromManifest(manifest, { translateReferences: options.translateReferences });
+        // 字重：版面模型不给，扫一遍 PDF 的字体名拿「这一块原文是不是加粗」，
+        // 译文跟着加粗（假设 H1–H12 这类内容不加粗就看不出是作者的强调）。
+        // 有磁盘缓存，同一篇只算一次；扫不出来就当全不加粗，不影响翻译本身。
+        let boldByBlock = null;
+        try {
+          boldByBlock = await boldMapFor({
+            dataDir: this.deps.getDataDir(),
+            literatureId: job.literatureId,
+            manifest,
+            pdfPath: job.filePath,
+          });
+        } catch (e) {
+          this.log(job, `字重识别跳过（${e.message}）`);
+        }
+        layout = layoutFromManifest(manifest, { translateReferences: options.translateReferences, boldByBlock });
         job.stats = { ...layout.stats };
         this.log(job, `沿用版面解析结果${layout.model ? `（${layout.model}）` : ''}：`
-          + `${layout.stats.pages} 页 / ${layout.stats.blocks} 个块，其中可翻译 ${layout.stats.translatableBlocks} 段（约 ${layout.stats.chars} 字）`);
+          + `${layout.stats.pages} 页 / ${layout.stats.blocks} 个块，其中可翻译 ${layout.stats.translatableBlocks} 段（约 ${layout.stats.chars} 字）`
+          + (boldByBlock && boldByBlock.size
+            ? `；其中 ${[...boldByBlock.values()].filter(Boolean).length} 块原文加粗，译文同步加粗`
+            : ''));
       } else {
         layout = await analyzePdf(sourceBytes, {
           pageNumbers,

@@ -371,6 +371,13 @@ export function buildLlmPrompt({ targetLabel, glossaryHint, extraRules }) {
     '- 保持原文的论证语气与逻辑连接词，不要增删信息、不要合并或拆分句子结构到影响原意；',
     '- 段落里若出现「作者观点—证据—结论」结构，译文保持同样顺序；',
     '- 不要翻译已经属于目标语言的内容，原样返回。',
+    '',
+    '【片段可能是不完整的句子，这是正常的】',
+    '片段是 PDF 里的版面块，段落常常在页面底部被切开、下一页接着写，所以：',
+    '1. 片段可能从半句开始、也可能在半句结束 —— 照原样翻译，不要补全省略的部分；',
+    '2. 不要输出「……」「...」来表示「后面还有内容」，原文有省略号才写省略号；',
+    '3. 不要输出任何说明性文字，例如「（原文不完整）」「（此处省略）」「（翻译到此）」；',
+    '4. 片段明显没写完时，把已有的部分译完就停，不要自己编后续内容。',
     glossaryHint ? `\n【术语表】以下术语必须按给定译法翻译：\n${glossaryHint}` : '',
     extraRules ? `\n【补充要求】${extraRules}` : '',
   ].filter((s) => s !== '').join('\n');
@@ -379,6 +386,43 @@ export function buildLlmPrompt({ targetLabel, glossaryHint, extraRules }) {
 /** 把若干片段拼成一次请求的正文 */
 export function formatSegments(segments) {
   return segments.map((s, i) => `${SEG_MARK(i + 1)}\n${s}`).join('\n\n');
+}
+
+/** 译文里「这不是翻译」的元话语：模型看到半截原文时爱加的自我说明 */
+const META_NOTE = /[（(][^（）()]{0,40}(?:原文不完整|原文片段|原文内容不全|此处省略|以下省略|后略|翻译到此|未能完整|内容不完整)[^（）()]{0,40}[）)]/g;
+/** 原文末尾的省略号 */
+const SRC_TAIL_ELLIPSIS = /(?:…+|\.{3,}|。{2,})\s*$/;
+/** 译文末尾的省略号 */
+const OUT_TAIL_ELLIPSIS = /\s*(?:…+|\.{3,}|。{2,})\s*$/;
+
+/**
+ * 清洗一条译文：把「模型对残缺原文的自我说明」去掉。
+ *
+ * 为什么需要：PDF 的段落常常在页面底部被切开（下一页接着写），版面路径又是
+ * 「一块一段」送翻，模型拿到的是半句话，于是会在译文末尾补一个「……」、
+ * 或者干脆写一行「（原文不完整，但按要求翻译到此）」。用户看到的就是莫名其妙的
+ * 省略号和括号说明。
+ *
+ * 处理原则：**原文没有的省略号，译文也不该有**；说明性文字一律删掉。
+ * 只动首尾的省略号，句中的省略号一律保留 —— 那通常是原文本来就有的引用省略。
+ *
+ * @param {string} src 原文片段
+ * @param {string} out 模型返回的译文
+ * @returns {string} 清洗后的译文（清空了就退回原译文，宁可有瑕疵也不留空）
+ */
+export function polishTranslation(src, out) {
+  let text = String(out == null ? '' : out);
+  if (!text.trim()) return text;
+  const source = String(src == null ? '' : src);
+
+  text = text.replace(META_NOTE, '');
+  // 末尾的「……」：原文没有就以原文为准删掉（中文省略号 / 英文三点 / 两个句号）
+  if (!SRC_TAIL_ELLIPSIS.test(source)) text = text.replace(OUT_TAIL_ELLIPSIS, '');
+  // 开头的「……」同理：原文不是从省略号开始，译文也不该
+  if (!/^\s*(?:…+|\.{3,})/.test(source)) text = text.replace(/^\s*(?:…+|\.{3,})\s*/, '');
+  text = text.replace(/[ \t]{2,}/g, ' ').replace(/\s+$/g, '').trim();
+
+  return text || String(out).trim();
 }
 
 /**
@@ -444,10 +488,16 @@ export function createLlmEngine({ settings, profileId, profile: profileArg, opti
      * 失败时抛出的错误带 retryable 标记，交给上层重试。
      */
     async translateBatch(texts, { signal } = {}) {
+      // 输出预算跟着输入走：中文译文约等于原文字符数（1 字 ≈ 1 token），再留 20% 余量。
+      // 写死 4096 时，一个 12 段 × 300 字的批次经常被截断 —— 最后几段只出来半句，
+      // 用户看到的就是「译文莫名其妙断了」。
+      const inputChars = texts.reduce((n, t) => n + String(t || '').length, 0);
+      const wantTokens = Math.round(inputChars * 1.25) + 200;
+      const budget = Math.max(1024, Math.min(8192, Math.max(maxTokens, wantTokens)));
       const body = {
         model: profile.model,
         temperature,
-        max_tokens: maxTokens,
+        max_tokens: budget,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: formatSegments(texts) },
@@ -477,10 +527,30 @@ export function createLlmEngine({ settings, profileId, profile: profileArg, opti
       const data = await res.json();
       const content = data?.choices?.[0]?.message?.content;
       if (!content) throw new Error('大模型没有返回内容' + (data?.error?.message ? `：${data.error.message}` : ''));
+      // 输出被 max_tokens 截断：末尾那几段只出来半句，前面的也未必完整。
+      // 这里必须当成「这一批失败」交给上层拆批重试 —— 早先不检查 finish_reason，
+      // 半截译文会被当成正常结果存进缓存，用户看到的就是「译文断在半句话」。
+      const finish = String(data?.choices?.[0]?.finish_reason || '');
+      if (finish === 'length') {
+        const e = new Error(`译文被输出上限截断（本批 ${texts.length} 段 / ${budget} token），拆成更小的批次重试`);
+        e.truncated = true;
+        e.retryable = false;   // 重发同样的批次只会再截断一次，直接交给上层拆批
+        throw e;
+      }
       const parsed = parseSegments(content, texts.length);
       if (!parsed) {
         const e = new Error('大模型返回的分段编号与请求不一致，已重试');
         e.raw = String(content).slice(0, 400);
+        throw e;
+      }
+      // 编号对不上时 parseSegments 会留空位：空位越多说明这一批越不可靠。
+      // 只有 1 段的请求允许兜底（原文已是完整单元）；多段请求宁可拆批重试，
+      // 也不要让英文原文混进译文栏。
+      const missing = parsed.filter((t) => !t || !t.trim()).length;
+      if (missing && texts.length > 1) {
+        const e = new Error(`返回的片段数不足（${texts.length - missing}/${texts.length}），拆成更小的批次重试`);
+        e.truncated = true;
+        e.retryable = false;
         throw e;
       }
       // 偶尔模型会「顺手」把占位符丢了，或返回空段：空段用原文兜底，避免整页缺字
@@ -846,7 +916,11 @@ export async function translateSegments(args) {
       text = item.text;
     }
     if (item.hits?.length) text = restoreGlossary(text, item.hits);
-    if (item.cacheKey && item.result != null) cache?.set(item.cacheKey, item.result);
+    // 去掉模型对「半截原文」的自我说明与凭空的省略号。缓存命中与刚翻出来的都过一遍 ——
+    // 老缓存里已经存了「……（原文不完整）」这类文本，不清洗就会一直显示给用户。
+    if (item.result != null) text = polishTranslation(item.text, text);
+    // 缓存写的是清洗后的文本：下次命中就是干净的（旧的脏条目会在下一次翻译时被覆盖）
+    if (item.cacheKey && item.result != null) cache?.set(item.cacheKey, text);
     for (const id of item.ids) map.set(id, text);
   }
 
