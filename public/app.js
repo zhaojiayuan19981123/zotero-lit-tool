@@ -7172,60 +7172,49 @@
       toast('这一块还没进对照流，稍后再试', 'error');
       return;
     }
-    // 点原文文字框：自动放大并定位到该块，同时右侧译文同步高亮 + 按需翻译
-    cmpZoomToBlock(block.id);
+    // 点原文文字框：只把译文栏定位到对应块 + 高亮，不改原文缩放
+    cmpLocateBlock(block.id);
     cmpSelectBlock(block.id, { scrollTrans: true, flash: true, translate: true });
   }
 
   /**
-   * 点原文文字框后自动放大并定位到该块：先把缩放提到一个「看得清」的档位，
-   * 再跳到该块所在页，等页面懒渲染到位后把块滚到视口居中。
-   * 已经是放大态（scale 足够）时不再重复放大，只做定位，避免连点把画面越放越大。
+   * 点原文文字框后把该块带到「原文栏」视口中央 —— **只定位，不放大**。
+   *
+   * 早先这里会自动把缩放提到 150%，用户每点一段画面就变一次大小，连点还会越放越大，
+   * 读长文献时很难受。现在保持用户当前的缩放比例不变，只做滚动定位：
+   * 目标页还没渲染就先跳到那一页（触发懒渲染），渲染到位后再把块精确居中。
    */
-  function cmpZoomToBlock(id) {
+  function cmpLocateBlock(id) {
     const b = cmp.blockById.get(id);
     if (!b || !b.page || cmp.view === 'trans') return;
-    const ZOOM_TARGET = 1.5;                 // 点一下放大到的档位（用户要求 150%，再高会横向溢出太狠）
-    let zoomed = false;
-    if (pr.scale < ZOOM_TARGET - 0.05) {
-      pr.scale = ZOOM_TARGET;
-      $('prZoomLabel').textContent = Math.round(pr.scale * 100) + '%';
-      rescaleAllPages();                     // 只重排尺寸、重画可见页，不整树重建（避免卡顿）
-      zoomed = true;
-    }
-    // 定位：跳到该块所在页（触发懒渲染），渲染到位后再把块滚到「原文栏」视口居中。
     const scroller = cmpPdfScroller();
+    if (!scroller) return;
     const locate = () => {
       const wrap = document.querySelector(`#prPages .pr-page-wrap[data-page="${b.page}"]`);
       if (!wrap) return;
-      // 页面还没渲染出来（还是占位符）就等下一帧；渲染完成后再精确定位
+      const sr = scroller.getBoundingClientRect();
+      if (!sr.width || !sr.height) return;
+      // 页面还没渲染出来（还是占位符）就先把那一页滚到栏顶，等下一帧再精确定位
       if (!pr.rendered.has(b.page)) {
-        wrap.scrollIntoView({ block: 'start' });
+        const wr0 = wrap.getBoundingClientRect();
+        scroller.scrollTop += (wr0.top - sr.top) - 8;
         requestAnimationFrame(() => setTimeout(locate, 40));
         return;
       }
       const flat = window.PrBlocks?.getBlock(id, b.page);
       const p = flat ? window.PrBlocks.blockPercent(flat) : null;
       const wr = wrap.getBoundingClientRect();
-      const sr = scroller.getBoundingClientRect();
-      if (!sr.width || !sr.height) return;
       const x = p ? wr.left + (p.left / 100) * wr.width : wr.left;
       const w = p ? (p.width / 100) * wr.width : wr.width;
       const y = p ? wr.top + (p.top / 100) * wr.height : wr.top;
       const h = p ? (p.height / 100) * wr.height : wr.height;
-      // 把块的中心对齐到「原文栏」视口的中心：水平 + 垂直都居中。双栏论文点右栏块时，
-      // 放大后页面宽度会超过栏宽，必须同步滚 scrollLeft 才能把文字框带到栏正中央，
-      // 而不是停在页面边缘看不见。
+      // 把块的中心对齐到视口中心：双栏论文点右栏块时，页面宽度可能超过栏宽，
+      // 必须同步滚 scrollLeft 才能把文字框带到栏正中央。
       scroller.scrollLeft += (x + w / 2) - (sr.left + sr.width / 2);
       scroller.scrollTop += (y + h / 2) - (sr.top + sr.height / 2);
       cmpRepaintPdfPick();
     };
-    if (zoomed) {
-      // 放大重排后页面要重新渲染，给一帧让 IntersectionObserver 生效再定位
-      requestAnimationFrame(() => setTimeout(locate, 60));
-    } else {
-      locate();
-    }
+    locate();
   }
 
   // ---------- 启动面板（引擎选择 / 进度 / 步骤） ----------
@@ -9543,6 +9532,25 @@
           layer.appendChild(u);
         }
       } else if (a.type === 'note') {
+        // 笔记也要把「所选的那几个字」标出来：只放一个小图标的话，用户回头
+        // 找不到这条笔记粘在哪句话上。底色比普通高亮再淡一点，位置留给图标。
+        const list = Array.isArray(a.rects) && a.rects.length
+          ? a.rects.map((r) => (Array.isArray(r) ? r : [r.x1, r.y1, r.x2, r.y2]))
+          : [rect];
+        for (const raw of list) {
+          const r = displayRect(raw);
+          const div = document.createElement('div');
+          div.className = 'pr-note-cover';
+          div.style.position = 'absolute';
+          div.style.left = (r.x1 * scale) + 'px';
+          div.style.top = (r.y1 * scale) + 'px';
+          div.style.width = ((r.x2 - r.x1) * scale) + 'px';
+          div.style.height = ((r.y2 - r.y1) * scale) + 'px';
+          div.style.background = HIGHLIGHT_COLORS[a.color] || '#ffe08a';
+          div.style.opacity = '0.3';
+          div.style.pointerEvents = 'none';
+          layer.appendChild(div);
+        }
         const r = displayRect(rect);
         const m = document.createElement('div');
         m.className = 'pr-note-marker';
@@ -10060,7 +10068,8 @@
         id: 'a' + base + (i ? '-' + i : ''),
         page: part.page,
         type,
-        color: type === 'note' ? '' : pr.highlightColor,
+        // 笔记同样落一份底色：划词加笔记后，原文上要能看见「记的是哪一句」
+        color: pr.highlightColor,
         rect: [x1, y1, x2, y2],
         rects,
         text: sel.text,
@@ -11214,7 +11223,7 @@
     // 有明细就铺彩色标签（与文献中心同款），只有摘要文本时退回纯文本
     if (active.journalRankDetail?.length) $('reviewRank').innerHTML = rankChips(active.journalRankDetail);
     else $('reviewRank').textContent = active.journalRank || '尚未查询 EasyScholar 等级';
-    $('reviewMeta').textContent = `${active.originalName || ''}${active.pages ? ` · ${active.pages} 页` : ''}${active.truncated ? ` · 已截取前 80,000 字符（原文 ${active.textLength} 字符）` : ''}`;
+    $('reviewMeta').textContent = `${active.originalName || ''}${active.pages ? ` · ${active.pages} 页` : ''}${active.truncated ? ` · 已截取前 160,000 字符（原文 ${active.textLength} 字符）` : ''}`;
     const busy = reviewingIds.has(active.id) || active.status === 'reviewing';
     const error = reviewErrors.get(active.id) || '';
     $('btnReviewGenerate').disabled = busy;
@@ -11281,21 +11290,49 @@
     if (!review || reviewingIds.has(review.id)) return;
     await saveActiveReview();
     reviewErrors.delete(review.id); reviewingIds.add(review.id); renderReviews();
-    let full = ''; let streamError = '';
-    const result = await streamSSE(`/api/reviews/${review.id}/generate`, withProfileId({}, 'review'), {
-      onEvent(event) {
-        if (event.error) streamError = event.error;
-        if (event.delta) {
-          full += event.delta;
-          const out = $('reviewOutput');
-          if (out) out.innerHTML = renderMarkdown(full) + '<span class="chat-cursor"></span>';
-        }
-      },
-    });
-    reviewingIds.delete(review.id);
+    let full = ''; let streamError = ''; let reasoning = 0;
+    const startedAt = Date.now();
+    // 长论文审一次要一两分钟：按钮上带秒数、输出区显示「正在推理」，用户才知道不是卡死。
+    const btn = $('btnReviewGenerate');
+    const paintBusy = () => {
+      const sec = Math.round((Date.now() - startedAt) / 1000);
+      if (btn) btn.textContent = `正在生成审稿意见… ${sec}s`;
+      const out = $('reviewOutput');
+      if (out && !full) {
+        out.innerHTML = `<p class="idea-generating">${reasoning
+          ? `模型正在推理（已思考 ${reasoning} 字），即将开始输出审稿意见…`
+          : `正在阅读文稿并生成审稿意见（已用 ${sec}s，长文稿通常需要 1~2 分钟）…`}</p>`;
+      }
+    };
+    paintBusy();
+    const ticker = setInterval(paintBusy, 1000);
+    let result = { full: '', error: '' };
+    try {
+      result = await streamSSE(`/api/reviews/${review.id}/generate`, withProfileId({}, 'review'), {
+        onEvent(event) {
+          if (event.error) streamError = event.error;
+          if (event.progress?.note) {
+            const out = $('reviewOutput');
+            if (out && !full) out.innerHTML = `<p class="idea-generating">${esc(event.progress.note)}</p>`;
+          }
+          if (event.reasoning) { reasoning += String(event.reasoning).length; if (!full) paintBusy(); }
+          if (event.delta) {
+            full += event.delta;
+            const out = $('reviewOutput');
+            if (out) out.innerHTML = renderMarkdown(full) + '<span class="chat-cursor"></span>';
+          }
+        },
+      });
+    } catch (e) {
+      // 网络层直接抛错（断网 / 服务重启）也要把忙状态收回来，否则按钮永远停在「正在生成」
+      streamError = streamError || e.message || '请求失败';
+    } finally {
+      clearInterval(ticker);
+      reviewingIds.delete(review.id);
+    }
     const error = streamError || result.error;
     if (error) reviewErrors.set(review.id, error);
-    await loadReviews();
+    await loadReviews().catch(() => renderReviews());
     if (error) toast(error, 'error');
     else if (!result.aborted) toast('模拟审稿意见已生成并保存', 'success');
   }

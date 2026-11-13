@@ -793,3 +793,91 @@ test('一行短图题仍然居中', () => {
   const cap = doc.blocks.find((b) => b.t === 'text' && b.kind === 'caption');
   assert.equal(cap.align, 'center');
 });
+
+
+// ---------------- 版面结果驱动的正文重建 ----------------
+
+/** 归一化 bounds（左上原点）→ 与 manifest 同形 */
+function bounds(x0, top, x1, bottom) {
+  return {
+    x: x0 / PW,
+    y: 1 - top / PH,
+    width: (x1 - x0) / PW,
+    height: (top - bottom) / PH,
+  };
+}
+
+/** 一个版面块（PP-DocLayoutV3 的 manifest 形态） */
+function lay(pageNum, label, box, order, text = '') {
+  const [x0, top, x1, bottom] = box;
+  return { page: pageNum, label, id: `b${order}`, order, bounds: bounds(x0, top, x1, bottom), text };
+}
+
+test('出版商的刊头图 / 徽记不进重排（有版面结果时以模型区域为准）', () => {
+  const title = block('title', [line('Exploring the core factors', { x: 40, y: 700, size: 16, w: 380 })]);
+  const authors = block('body', [line('Luming Yang, Min Xu', { x: 40, y: 660, size: 9, w: 240 })]);
+  const label = block('body', [line('Highlights', { x: 40, y: 620, size: 8, w: 60 })]);
+  const abs = block('body', [
+    line('With the continuous development of the internet and mobile', { x: 40, y: 580, size: 10, w: 520 }),
+    line('commerce, online shopping has become a daily routine for consumers.', { x: 40, y: 566, size: 10, w: 520 }),
+  ]);
+  const header = block('body', [line('Journal of Retailing and Consumer Services 64 (2022) 102784', { x: 40, y: 780, size: 8, w: 500 })]);
+  const p = page(1, [header, title, authors, label, abs]);
+  const layout = {
+    pages: 1,
+    blocks: [
+      lay(1, 'header_image', [36, 796, 96, 770], 1),
+      lay(1, 'image', [514, 662, 548, 634], 3),
+      lay(1, 'header', [40, 790, 540, 776], 5, 'Journal of Retailing and Consumer Services 64 (2022) 102784'),
+      lay(1, 'doc_title', [38, 726, 422, 698], 7, 'Exploring the core factors'),
+      lay(1, 'abstract', [38, 586, 562, 540], 9, 'With the continuous development'),
+    ],
+  };
+  const doc = toReadingDoc({ pages: [p], totalPages: 1, stats: { bodySize: 10 } }, { layout });
+  assert.equal(doc.blocks.filter((b) => b.t === 'crop').length, 0, '刊头图 / CrossMark 徽记不该变成裁图');
+  const all = doc.blocks.filter((b) => b.t === 'text').flatMap(textsOf).join(' | ');
+  assert.ok(!/Journal of Retailing/.test(all), '刊名不该进正文');
+  assert.ok(!/Highlights/.test(all), '模型没框住的短碎块（栏目标签）不该进正文');
+  const t = doc.blocks.find((b) => b.kind === 'title');
+  assert.equal(t.level, 1, '论文题目是 1 级标题');
+  assert.ok(/Exploring the core factors/.test(textsOf(t).join('')));
+  assert.ok(/online shopping has become a daily routine/.test(all), '摘要正文要留着');
+});
+
+test('版面 label 决定标题层级（不再靠字号猜）', () => {
+  const head = block('heading', [line('2.1 Data and variables', { x: 40, y: 700, size: 11, w: 220 })]);
+  const body = block('body', [line('The sample covers 1,200 stores in four provinces.', { x: 40, y: 676, size: 10, w: 480 })]);
+  const p = page(1, [head, body]);
+  const layout = {
+    pages: 1,
+    blocks: [
+      lay(1, 'paragraph_title', [38, 712, 262, 696], 1, '2.1 Data and variables'),
+      lay(1, 'text', [38, 680, 522, 660], 3, 'The sample covers 1,200 stores'),
+    ],
+  };
+  const doc = toReadingDoc({ pages: [p], totalPages: 1, stats: { bodySize: 10 } }, { layout });
+  const h = doc.blocks.find((b) => b.kind === 'heading');
+  assert.equal(h.level, 3, '「2.1」编号两段 → 3 级标题（论文题目占 1 级）');
+  const bodyNode = doc.blocks.find((b) => b.kind === 'body' && b.t === 'text');
+  assert.equal(bodyNode.level, 0);
+});
+
+test('版面判为图表的区域整块裁图，并挂上图注', () => {
+  const chart = block('body', [line('x', { x: 60, y: 700, size: 6, w: 4 })], { lines: [] });
+  chart.lines = [];
+  const caption = block('caption', [line('Figure 1. E-commerce network evolution model.', { x: 60, y: 500, size: 8, w: 380 })]);
+  const body = block('body', [line('The model is illustrated in Figure 1 and discussed below.', { x: 60, y: 460, size: 10, w: 480 })]);
+  const p = page(1, [chart, caption, body], { images: [] });
+  const layout = {
+    pages: 1,
+    blocks: [
+      lay(1, 'chart', [56, 720, 544, 540], 1),
+      lay(1, 'figure_title', [58, 512, 442, 496], 2, 'Figure 1. E-commerce network evolution model.'),
+      lay(1, 'text', [58, 470, 540, 440], 3, 'The model is illustrated'),
+    ],
+  };
+  const doc = toReadingDoc({ pages: [p], totalPages: 1, stats: { bodySize: 10 } }, { layout });
+  const crops = doc.blocks.filter((b) => b.t === 'crop');
+  assert.equal(crops.length, 1, '图表应有一张裁图');
+  assert.match(String(crops[0].caption || ''), /Figure 1\./);
+});

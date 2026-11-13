@@ -1,3 +1,106 @@
+## v1.38.4：阅读模式按版面识别结果重建正文 + 点原文只定位不放大 + 笔记同步高亮 + 修复 PDF 审稿无结果（2026-11-13）
+
+> 用户反馈：「利用现在的版面识别结果，重新制作阅读模式的内容，不显示出版商的图片，重新
+> 还原文章内容，方便阅读」「当用户点击原文段落时，只定位、不放大，保持原有缩放比例」
+> 「当用户划词添加笔记时，同样对所选中部分高亮」「同时修改一个 bug，模拟审稿功能，上传
+> pdf 无法完成审稿」（澄清后现象为：**导入成功，但生成不出结果**；样本是期刊官网下载的、
+> 带文字层的论文）。
+
+### 一、阅读模式改用「版面识别结果」重建正文
+
+在此之前，阅读模式的文字结构**完全由规则猜**：字号推标题、跨页重复推页眉页脚、缩进推
+分栏。这套规则在纯正文页够用，但遇到「模型一眼就能看出来」的东西会失手 —— 作者单位被
+当成正文、`A R T I C L E　I N F O` 这类栏目标签混进摘要、首页刊名留在第一段前面、出版商的
+刊头徽记（Elsevier 的树、SAGE 的 CrossMark）作为「插图」插进正文开头。
+
+这一版把版面解析（PP-DocLayoutV3）产出的 `manifest.json` 当成正文结构的**第一权威**：
+
+- **类型**：新增 `LAYOUT_TEXT_KIND`，`doc_title → title`、`paragraph_title → heading`、
+  `abstract / text / content → body`、`figure_title → caption`、`footnote → footnote`、
+  `reference / reference_content → reference`；不在这张表里的 label（`header` / `footer` /
+  `number` / `seal` / `header_image` …）**都不进正文**；
+- **层级**：`layoutLevelOf()` —— 论文题目固定 1 级，小节标题走 `headingDepth()`（与 Markdown
+  导出口径一致，`2.1` 那种编号自然落成 3 级）；
+- **顺序**：用 manifest 的 `order`。模型没框住的块（漏框）用 `layoutRankNear()` 插到「它
+  上方最近那个框」之后，而不是回到文档末尾；
+- **归属**：`layoutOwnerOf()` 先判「块中心落在框内」，不中再放宽到「与框重叠过半」——
+  模型给的框常常比文字行紧，首行末行会探出去一点；多个框都命中时取最矮的那个（最贴合）。
+
+**出版商的图一律不进重排**（这次的显式要求）：
+
+- `LAYOUT_IMAGE_DECOR`：`header_image / footer_image / seal / stamp / logo / qrcode /
+  barcode / aside_text` 直接跳过，连候选都不进；
+- **极小图**：占页面不到 1% 面积、且页内没有图注落在它上面的「插图」，判为徽标 / 二维码 /
+  小图标（论文真插图不会这么小）；
+- **图注命中出版商文案**：`PUBLISHER_FIGURE_CAPTION` = `check for updates` / `crossmark` /
+  `open access` / `journal homepage` / `sciencedirect` / `springer` / `wiley` / `elsevier` /
+  `download`，命中的图连图注一起剔除。
+
+配套的两处结构改动：
+
+1. **有 manifest 的页不再跑 `page.images` / `vectorFigures` 规则**。以前规则和模型两套同时
+   上，规则会把刊头 logo 重新塞回正文 —— 规则是用来补模型缺席的，不该抢模型的区域；
+2. **「没框住就丢掉」加了可信度保险** `layoutTrust`：只有「长块（≥40 字）、非装饰文案、非
+   出版商视角文案」的**字数覆盖率 ≥ 85%** 时才敢按丢弃处理；manifest 明显不可靠的页退回
+   规则路径，宁可多留也不误删正文。
+
+`READING_SCHEMA` 6 → 7：结构变了，旧的阅读缓存自动失效（不会出现「新版界面 + 旧版结构」）。
+
+### 二、点原文段落只定位，不放大
+
+`cmpZoomToBlock()` 整个换成 `cmpLocateBlock()`：删掉「先提到 150% 再定位」的逻辑，
+保持用户当前缩放比例，只做滚动定位（水平和垂直都居中，双栏右栏的块也会被带到栏中央）。
+页面还没渲染时先把那一页滚到栏顶触发懒渲染，渲染到位后再精确居中。
+
+原来「点一段变一次大小、连点越放越大」的毛病就此消失。
+
+### 三、划词加笔记，原文上也高亮
+
+- `annotationsFromSelection()` 里 `color` 不再对笔记清空（原来 `type === 'note' ? '' :
+  pr.highlightColor`），笔记同样落一份批注颜色；
+- `renderAnnotations()` 的 `note` 分支先按 `a.rects` 铺 `.pr-note-cover`（opacity 0.3、
+  `pointer-events: none`，不挡点击），再画原来的小圆点标记 —— 回头能看出这条笔记粘在哪句话上。
+
+### 四、修复：模拟审稿上传 PDF 后生成不出结果
+
+链路本身是通的（真机跑通过 24 页 PDF → 103,961 字符 → 100 秒生成 7,386 字审稿），
+失败原因在**长文**：
+
+- 原文整篇塞进对话，超出模型上下文 → 上游报错；
+- 单链路超时原来 120 秒，长文推理 + 输出常常不够 → 静默中断，前端只看到「没结果」。
+
+改法（`server.js`）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `/api/reviews/upload` | 抽文先过 `sanitizeReviewText()`：去控制字符、修 PDF 抽文里的孤立代理项、按**码点**截断到 16 万字符（`textLength` / `truncated` 一并修正） |
+| `/api/reviews/:id/generate` | 上送前过 `excerptForReview()`：开头 55% + 中段抽样 25% + 结尾 20%，预算 `BUDGETS = [80000, 36000]` 两档 |
+| 同上 | 单链路超时 `REVIEW_TIMEOUT_MS = 420000`（7 分钟），`timeoutMs` 从 `streamModelResponse` 一路贯穿到 `fetchModelCompletionOnce` |
+| 同上 | 第一次预算失败（上下文超限 / 超时）**自动按 36,000 降载重试一次**，不会一次就废 |
+| 同上 | `max_tokens: 8192`；每 5 秒推一个 `{progress:{elapsed}}` 心跳 |
+
+前端（`public/app.js` 的 `generateReview()`）：按钮上带秒数（`正在生成审稿意见… 42s`），
+输出区显示「正在阅读文稿并生成审稿意见（长文稿通常需要 1~2 分钟）」/「模型正在推理（已思考
+N 字）」；`try/catch/finally` 保证网络层抛错也会回收忙状态与计时器，不会再卡在「正在生成」。
+
+### 五、验证
+
+- 全量单测 **720 / 720 通过**（`node --test --test-concurrency=4`，22 秒），其中
+  `test/reading-mode.test.mjs` 新增 3 个用例：① 出版商刊头图 / 徽记不进重排（并断言
+  `Highlights` 栏目标签不进正文、标题 level=1）；② 版面 label 决定标题层级（`2.1` → 3 级）；
+  ③ 版面判为图表的区域整块裁图并挂图注；
+- 真浏览器 E2E（Playwright，`e2e-reading.mjs`）**38 项全过**：重排接管、页眉页脚剔除、
+  表格 / 插图裁图、图注只出现一次、裁图像素非空白、字号行距、划词工具条、高亮双向同步、
+  AI 精修提示、对照精读互切、无前端异常；
+- **真实论文的结构探针没能做成配对验证**，如实记一笔：`data/layout` 里存着一份真实的
+  13 页 Elsevier 清单（302 块，含 2 个 `header_image`），但它对应的 PDF 已不在
+  `uploads/`（按 `inputSHA256` 全量比对，只有一份 1 页清单能配上）；版面识别又依赖外部
+  PP-DocLayoutV3 子进程，离线跑不出新清单。所以「刊头图不显示」目前由单测（构造 manifest，
+  断言 `header_image` 不进重排）与 E2E（构造的双栏样张带刊头图，断言重排里没有它）覆盖，
+  **还没在「真实论文 + 真实清单」上肉眼复看**。这一步留给下次有版面服务时补。
+
+---
+
 ## v1.38.3：译文两种读法可切换 + 字体字号统一 + 译文页缩放 + 大纲改抽屉 + 解析结果打印紧凑化（2026-11-13）
 
 > 用户反馈：「译文页要给用户两种选择，1 是原来那种 HTML 重排版，2 是这种把文字嵌进 PDF

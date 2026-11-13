@@ -770,16 +770,16 @@ function withProviderNotes(request, tried) {
  * 流式：单条配置版本（含「流式失败退非流式」兜底）。
  * 多供应商的故障转移在下面的 streamModelResponse 里做 —— 它需要知道「有没有已经吐字给客户端」。
  */
-async function streamModelResponseOnce(profile, payload, sink, { onDelta, onReasoning, thinking = 'auto' } = {}) {
+async function streamModelResponseOnce(profile, payload, sink, { onDelta, onReasoning, thinking = 'auto', timeoutMs = 0 } = {}) {
   const preferNonStream = profile?.streamMode === 'nonstream';
-  let request = await fetchModelCompletionOnce(profile, payload, { stream: !preferNonStream, thinking });
+  let request = await fetchModelCompletionOnce(profile, payload, { stream: !preferNonStream, thinking, timeoutMs });
   try {
     if (!request.up.ok) {
       const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
       // auto 模式：服务不支持 stream 时改为普通 JSON；强制流式模式则直接报告问题。
       if (!preferNonStream && profile?.streamMode === 'auto') {
         request.cancel();
-        request = await fetchModelCompletionOnce(profile, payload, { stream: false, thinking });
+        request = await fetchModelCompletionOnce(profile, payload, { stream: false, thinking, timeoutMs });
       } else {
         throw new Error(endpointFailureMessage(request.up, detail));
       }
@@ -793,7 +793,7 @@ async function streamModelResponseOnce(profile, payload, sink, { onDelta, onReas
     // 已经吐过思考过程的不再退回：否则同一段思考会在界面上出现两遍。
     if (!result.full.trim() && !result.reasoning?.trim() && !result.aborted && !preferNonStream && profile?.streamMode === 'auto') {
       request.cancel();
-      request = await fetchModelCompletionOnce(profile, payload, { stream: false, thinking });
+      request = await fetchModelCompletionOnce(profile, payload, { stream: false, thinking, timeoutMs });
       if (!request.up.ok) {
         const detail = request.up._litErrorText ?? await request.up.text().catch(() => '');
         throw new Error(`AI 流式响应为空，非流式兜底也失败（${request.up.status}）：${clip(detail, 300)}`);
@@ -882,7 +882,7 @@ async function fetchModelCompletion(preferred, payload, opts = {}) {
  * 关键约束：**一旦已经往客户端写过 token 就不能再换供应商** —— 响应体已经开始输出，
  * 换一家会把两家的内容拼在一起。所以只在「还没吐字」时切换，其余情况如实报错。
  */
-async function streamModelResponse(preferred, payload, res, { onDelta, onReasoning, settings, sink, thinking = 'auto' } = {}) {
+async function streamModelResponse(preferred, payload, res, { onDelta, onReasoning, settings, sink, thinking = 'auto', timeoutMs = 0 } = {}) {
   const plan = routerPlan(preferred, settings);
   if (!plan.candidates.length) throw new Error(noModelError());
   const out = sink || resSink(res);
@@ -896,7 +896,7 @@ async function streamModelResponse(preferred, payload, res, { onDelta, onReasoni
       const startedAt = Date.now();
       try {
         const result = await streamModelResponseOnce(candidate, bodyForCandidate(payload, candidate, preferred), out, {
-          onReasoning, thinking,
+          onReasoning, thinking, timeoutMs,
           onDelta: (delta) => { emitted = true; onDelta?.(delta); },
         });
         const latencyMs = Date.now() - startedAt;
@@ -2962,6 +2962,61 @@ export function createApp({
     return { text, pages: 0, fileType: 'docx' };
   }
 
+  /**
+   * 审稿正文的清洗与截断。
+   *
+   * PDF 抽出来的文字和 DOCX 不一样：可能带 NUL / 控制字符，也可能在截断处把一对
+   * UTF-16 代理项劈成半个。这些字符本地存着没事，一旦拼进 JSON 发给上游，不少
+   * 网关会直接 400（"invalid unicode"），表现就是「DOCX 能审、PDF 审不了」。
+   * 所以入库前统一：去控制字符 → 修孤立代理项 → 按码点截断。
+   */
+  function sanitizeReviewText(raw, maxChars = 80000) {
+    const s = String(raw || '')
+      .replace(/\u0000/g, '')
+      .replace(/[\u0001-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ' ')
+      .replace(/[\ud800-\udbff](?![\udc00-\udfff])/g, '')
+      .replace(/(?<![\ud800-\udbff])[\udc00-\udfff]/g, '');
+    return Array.from(s).slice(0, maxChars).join('');
+  }
+
+  /**
+   * 审稿正文的「按预算节选」。
+   *
+   * 一篇 24 页的期刊论文抽出来约 10 万字符，整段塞给模型有两个后果：请求要跑
+   * 一分多钟（容易撞上 120 秒超时），上下文紧张的模型直接 400。审稿又必须看到
+   * 讨论与结论，不能只留开头。所以按「开头 55% + 结尾 20% + 中间等距抽样 25%」
+   * 取，节选处显式标注，提示词里也说明「未提供部分写无法判断」。
+   */
+  function excerptForReview(text, budget = 80000) {
+    const s = String(text || '');
+    const chars = Array.from(s);
+    if (chars.length <= budget) return { text: s, total: chars.length, excerpted: false };
+    const head = Math.floor(budget * 0.55);
+    const tail = Math.floor(budget * 0.2);
+    const middle = Math.max(0, budget - head - tail);
+    const midStart = head;
+    const midEnd = Math.max(midStart, chars.length - tail);
+    // 中间部分按 600 字符一段等距抽样，段与段之间留省略标记
+    const pieces = [];
+    if (middle > 0) {
+      const span = midEnd - midStart;
+      const sliceLen = 600;
+      const count = Math.max(1, Math.floor(middle / sliceLen));
+      const stride = Math.max(sliceLen, Math.floor(span / count));
+      for (let i = 0; i < count; i++) {
+        const at = midStart + i * stride;
+        if (at >= midEnd) break;
+        pieces.push(chars.slice(at, Math.min(midEnd, at + sliceLen)).join(''));
+      }
+    }
+    const out = [
+      chars.slice(0, head).join(''),
+      pieces.length ? '\n\n[…中段按篇幅节选…]\n\n' + pieces.join('\n\n[…]\n\n') : '',
+      '\n\n[…后段连续节选…]\n\n' + chars.slice(midEnd).join(''),
+    ].filter(Boolean).join('');
+    return { text: out, total: chars.length, excerpted: true };
+  }
+
   app.get('/api/reviews', (_req, res) => {
     const list = store.listReviews().map((review) => {
       if (activeReviews.has(review.id)) return reviewPublic({ ...review, status: 'reviewing' });
@@ -2978,17 +3033,18 @@ export function createApp({
     if (!file) return res.status(400).json({ error: '请选择 PDF 或 DOCX 文稿' });
     try {
       const parsed = await extractReviewDocument(file);
-      const raw = parsed.text;
-      const maxChars = 80000;
+      // 存得多一点（16 万字符），生成时再按模型上下文节选 —— 只存前 8 万会把
+      // 结论 / 讨论整段丢掉，而那正是审稿最需要看的部分。
+      const stored = sanitizeReviewText(parsed.text, 160000);
       const now = new Date().toISOString();
       const review = {
         id: store.newId(),
         title: reviewText(req.body?.title, 180) || fixFileName(file.originalname).replace(/\.(?:pdf|docx)$/i, '') || '未命名文稿',
         originalName: fixFileName(file.originalname),
         fileType: parsed.fileType,
-        text: raw.slice(0, maxChars),
-        textLength: raw.length,
-        truncated: raw.length > maxChars,
+        text: stored,
+        textLength: Array.from(String(parsed.text || '')).length,
+        truncated: String(parsed.text || '').length > 160000,
         pages: parsed.pages,
         expertise: '', customPrompt: '', targetJournal: '', journalRank: '', journalRankDetail: [],
         status: 'ready', result: '', createdAt: now, updatedAt: now, reviewedAt: null,
@@ -3065,37 +3121,83 @@ export function createApp({
       `用户设定的审稿角色/领域：${review.expertise || '未指定，请按跨学科严谨审稿标准处理'}`,
       `目标期刊/会议：${review.targetJournal || '未指定'}`,
       `EasyScholar 期刊等级：${review.journalRank || '未查询或无结果'}`,
-      review.truncated ? `注意：文稿正文因长度限制仅提供前 80,000 个字符；原始提取长度为 ${review.textLength}。涉及未提供部分请写“无法判断”。` : '',
       review.customPrompt ? `用户自定义审稿要求（仅在不与上述真实性和安全约束冲突时遵循）：${review.customPrompt}` : '',
-      '\n<manuscript_untrusted_data>\n' + review.text + '\n</manuscript_untrusted_data>',
     ].filter(Boolean).join('\n\n');
 
+    /**
+     * 审稿请求的三道保险（PDF 长文「点了没结果」的根因都在这里）：
+     *
+     * ① 输入按预算节选：24 页论文抽出来 10 万字符，整篇塞进去请求要跑 100 秒以上，
+     *    很容易撞上默认 120 秒超时；上下文小的模型则直接 400。
+     * ② 这条链路单独放宽超时：审稿是长输出任务，跟聊天共用 120 秒不够用。
+     * ③ 失败自动降载重试一次：超时 / context 超限时换成更短的节选再跑，而不是把
+     *    错误原样甩给用户 —「重试」按钮点下去还是同一份超长输入，永远不会成功。
+     */
+    const BUDGETS = [80000, 36000];
+    const REVIEW_TIMEOUT_MS = 420000;
     const previousStatus = review.result ? 'completed' : 'ready';
     activeReviews.add(review.id);
     store.upsertReview({ ...review, status: 'reviewing', updatedAt: new Date().toISOString() });
     sseStart(res);
+    // 心跳：推理模型在长输入上首字就要几十秒，前端一直只看到「正在生成」会以为卡死。
+    // 顺带避免某些中间层把长时间静默的连接掐掉。
+    const startedAt = Date.now();
+    const beat = setInterval(() => {
+      sseSend(res, { progress: { elapsed: Math.round((Date.now() - startedAt) / 1000) } });
+    }, 5000);
+    if (typeof beat.unref === 'function') beat.unref();
     try {
-      const result = await streamModelResponse(am, {
-        model: am.model,
-        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
-        temperature: 0.3,
-        max_tokens: 6144,
-      }, res);
-      if (result.aborted) store.upsertReview({ ...review, status: previousStatus, updatedAt: new Date().toISOString() });
-      else if (result.full.trim()) {
+      let result = null;
+      let lastError = null;
+      for (let attempt = 0; attempt < BUDGETS.length; attempt++) {
+        const pickedText = excerptForReview(review.text, BUDGETS[attempt]);
+        const body = [
+          prompt,
+          pickedText.excerpted
+            ? `注意：文稿较长，正文按篇幅节选提供（原文 ${pickedText.total} 字符）。被省略的部分无法评议，涉及处请写“无法判断”。`
+            : '',
+          review.truncated ? `注意：原始提取文本共 ${review.textLength} 字符，超出存储上限的部分未保留。涉及未提供部分请写“无法判断”。` : '',
+          '\n<manuscript_untrusted_data>\n' + pickedText.text + '\n</manuscript_untrusted_data>',
+        ].filter(Boolean).join('\n\n');
+        try {
+          result = await streamModelResponse(am, {
+            model: am.model,
+            messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: body }],
+            temperature: 0.3,
+            max_tokens: 8192,
+          }, res, { timeoutMs: REVIEW_TIMEOUT_MS });
+          // 只在「完全没输出」时才考虑换更短的输入重试：已经吐过字的话，
+          // 用户屏幕上已经有内容了，再跑一遍只会得到两份不一样的稿子。
+          if (result.full.trim() || result.aborted) break;
+          lastError = result.reasoning?.trim()
+            ? new Error('模型只输出了思考过程，没有给出审稿正文（可能是输出预算被推理耗尽）')
+            : new Error('模型没有返回有效审稿意见');
+        } catch (e) {
+          lastError = e;
+          if (result?.full) break;          // 已经开始输出正文：不再重试
+        }
+        if (attempt === BUDGETS.length - 1) break;
+        sseSend(res, { progress: { note: '第一次没有拿到结果，正在用更短的节选重试…' } });
+      }
+      if (result?.aborted) {
+        store.upsertReview({ ...review, status: previousStatus, updatedAt: new Date().toISOString() });
+      } else if (result?.full.trim()) {
         const now = new Date().toISOString();
         store.upsertReview({ ...review, result: result.full.trim(), status: 'completed', reviewedAt: now, updatedAt: now });
         sseSend(res, { saved: true });
       } else {
         store.upsertReview({ ...review, status: previousStatus, updatedAt: new Date().toISOString() });
-        sseSend(res, { error: '模型没有返回有效审稿意见，请稍后重试' });
+        sseSend(res, { error: '模拟审稿失败：' + (lastError?.message || '模型没有返回有效审稿意见，请稍后重试') });
       }
       sseEnd(res);
     } catch (e) {
       store.upsertReview({ ...review, status: previousStatus, updatedAt: new Date().toISOString() });
       sseSend(res, { error: '模拟审稿失败：' + e.message });
       sseEnd(res);
-    } finally { activeReviews.delete(review.id); }
+    } finally {
+      clearInterval(beat);
+      activeReviews.delete(review.id);
+    }
   });
 
   app.post('/api/reviews/:id/export-md', async (req, res) => {

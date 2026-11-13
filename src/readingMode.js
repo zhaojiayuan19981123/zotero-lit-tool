@@ -19,12 +19,12 @@ import crypto from 'node:crypto';
 
 import { analyzePdf, mathScore } from './pdfTranslate/analyze.js';
 import { readingOrder } from './pdfTranslate/reflow.js';
-import { readManifestFor } from './layoutTranslate.js';
+import { headingDepth, readManifestFor } from './layoutTranslate.js';
 import { getDataDir } from './store.js';
 import { refineReadingDoc } from './readingAi.js';
 
 /** 结构版本；结构变了就 +1，旧缓存自动失效 */
-export const READING_SCHEMA = 6;
+export const READING_SCHEMA = 7;
 
 /** 片段样式位（写进结构树的 run 第 4 位，前端据此出 <b>/<i>） */
 const STYLE_BOLD = 1;
@@ -1146,6 +1146,40 @@ const LAYOUT_ASSET_KIND = {
   display_formula: 'formula',
 };
 
+/**
+ * 版面标签 → 阅读模式的文字类型。
+ *
+ * 这是「用版面识别结果重建正文」的落点：文字块该算标题 / 小节 / 摘要 / 脚注 / 参考文献，
+ * 模型已经在 label 里给出来了，不必再让字号启发式去猜（猜出来的结果正是「作者单位被
+ * 当成正文」「A R T I C L E　I N F O 混进摘要」这类问题）。
+ * 不在这张表里的 label（页眉、页脚、页码、印章、刊头图…）都不进正文。
+ */
+const LAYOUT_TEXT_KIND = {
+  doc_title: 'title',
+  paragraph_title: 'heading',
+  abstract: 'body',
+  text: 'body',
+  content: 'body',
+  figure_title: 'caption',
+  footnote: 'footnote',
+  vision_footnote: 'footnote',
+  reference: 'reference',
+  reference_content: 'reference',
+};
+
+/**
+ * 出版商的装饰性图片：刊头徽记（Elsevier 的树、Springer 的盾徽）、封面 logo、
+ * 印章、条码。它们在版面上确实是「图」，但和论文内容无关 —— 重排里留着只会让
+ * 首页开头出现一张莫名其妙的商标。
+ */
+const LAYOUT_IMAGE_DECOR = new Set([
+  'header_image', 'footer_image', 'seal', 'stamp', 'logo', 'qrcode', 'barcode', 'aside_text',
+]);
+
+/** 图注里出现这些词，说明这张「图」是出版商的徽记 / 下载信息，不是论文插图 */
+const PUBLISHER_FIGURE_CAPTION = /check\s*for\s*updates|crossmark|open\s*access|journal\s*homepage|sciencedirect|springer|wiley|elsevier|download/i;
+
+
 /** manifest 的归一化 bounds → 页内 pt 矩形（PDF 的 y 轴向上，归一化的是向下） */
 function layoutRect(bounds, page) {
   const W = page.width || 1;
@@ -1173,8 +1207,11 @@ function layoutRect(bounds, page) {
 function layoutAssetsForPage(layout, page) {
   const out = [];
   const numbers = [];
+  const pageArea = Math.max(1, (page.width || 612) * (page.height || 792));
   for (const b of layout?.blocks || []) {
     if (Number(b.page) !== page.index) continue;
+    // 出版商徽记 / 印章 / 刊头图：模型给了明确的装饰标签，直接不进重排
+    if (LAYOUT_IMAGE_DECOR.has(String(b.label || ''))) continue;
     // 公式编号 (1) 模型是单独一块。它自己既不够大也不该单独成图，先记下来，
     // 稍后并进它上面那条公式 —— 否则重排后编号凭空消失。
     if (b.label === 'formula_number') {
@@ -1186,8 +1223,16 @@ function layoutAssetsForPage(layout, page) {
     if (!kind) continue;
     const rect = layoutRect(b.bounds, page);
     if (rect[2] - rect[0] < 6 || rect[3] - rect[1] < 4) continue;
-    out.push({ rect, kind, label: b.label, text: String(b.text || '') });
+    // 极小的「图片」（占页面不到 1%）：绝大多数是 CrossMark 徽标、二维码、小图标，
+    // 论文里的真插图不会这么小。带图注的仍然保留（有些期刊的小图配了一行图题）。
+    if (kind === 'figure' && (rect[2] - rect[0]) * (rect[3] - rect[1]) < pageArea * 0.01) {
+      const hasCaption = (page.blocks || []).some((blk) => blk.kind === 'caption'
+        && centerIn(blk, rect));
+      if (!hasCaption) continue;
+    }
+    out.push({ rect, kind, label: b.label, order: Number(b.order) || 0, text: String(b.text || '') });
   }
+
   // y 向上：先处理靠上的（rect[3] 大的）
   out.sort((a, b) => b.rect[3] - a.rect[3]);
   const merged = [];
@@ -1221,6 +1266,65 @@ function layoutAssetsForPage(layout, page) {
 /** a 是否把 b 整个包住（容差 2pt） */
 function containsRect(a, b, tol = 2) {
   return a[0] <= b[0] + tol && a[1] <= b[1] + tol && a[2] >= b[2] - tol && a[3] >= b[3] - tol;
+}
+
+// ==================== 版面结果 → 正文结构（文字块） ====================
+//
+// 阅读模式原来的文字结构完全由规则给出（字号推标题、跨页重复推页眉页脚），
+// 遇到「模型一眼就能看出来」的东西反而会失手：作者单位被当成正文、
+// 「A R T I C L E　I N F O」这类栏目标签混进摘要、首页刊名留在第一段前面。
+// 有 manifest 时改为**以模型的区域为准**：每个文字块先找它的版面归属框，
+// 类型与层级都取模型的 label，阅读顺序取 order；模型没框住的短碎块一律不进正文。
+
+/** 这一页由版面模型给出的「正文文字」框 */
+function layoutTextBlocksForPage(layout, page) {
+  const out = [];
+  for (const b of layout?.blocks || []) {
+    if (Number(b.page) !== page.index) continue;
+    const kind = LAYOUT_TEXT_KIND[String(b.label || '')];
+    if (!kind) continue;
+    const rect = layoutRect(b.bounds, page);
+    if (rect[2] - rect[0] < 4 || rect[3] - rect[1] < 3) continue;
+    out.push({ rect, kind, label: String(b.label || ''), order: Number(b.order) || 0, text: String(b.text || '') });
+  }
+  return out;
+}
+
+/**
+ * 一个 pdf.js 文字块归属于哪个版面框。
+ * 先看「中心落在框内」，再放宽到「与框重叠超过一半」—— 模型给的框常常比文字行紧，
+ * 首行 / 末行会探出去一点。
+ */
+function layoutOwnerOf(block, boxes) {
+  let best = null;
+  for (const box of boxes) {
+    if (centerIn(block, box.rect)) return box;
+    if (!overlapRatio(rectOf(block), box.rect, 0.5)) continue;
+    const h = box.rect[3] - box.rect[1];
+    if (!best || h < (best.rect[3] - best.rect[1])) best = box;
+  }
+  return best;
+}
+
+/** 没有版面归属的块（模型漏框）：插在它上方最近那个版面框之后 */
+function layoutRankNear(block, boxes) {
+  let above = null;
+  let below = null;
+  for (const box of boxes) {
+    if (box.rect[3] <= block.y1 + 1) {
+      if (!above || box.rect[3] > above.rect[3]) above = box;
+    } else if (!below || box.rect[1] < below.rect[1]) below = box;
+  }
+  if (above) return above.order + 0.4;
+  if (below) return below.order - 0.4;
+  return 0;
+}
+
+/** 版面 label → 标题层级（0 = 正文）。口径与源码 Markdown 一致：论文题目是 1 级 */
+function layoutLevelOf(text, label) {
+  if (label === 'doc_title') return 1;
+  if (label === 'paragraph_title') return headingDepth(text, label);
+  return 0;
 }
 
 // ==================== 规则兜底：数字行表格 / 公式带 ====================
@@ -1790,13 +1894,19 @@ export function toReadingDoc(analysis, opts = {}) {
   for (const page of pages) {
     // 有版面解析结果的页：区域以模型为准，规则兜底（表格区 / 数字表）不再插手 ——
     // 规则是用来补模型缺席的，两套同时上只会互相抢区域。
-    const layoutAssets = layout ? layoutAssetsForPage(layout, page) : null;
-    const layoutCovered = !!layoutAssets && layoutAssets.length > 0;
+    const layoutAssets = layout ? layoutAssetsForPage(layout, page) : [];
+    // 正文的版面框：有 manifest 时用它定「哪些字属于论文内容」以及标题层级 / 顺序
+    const layoutText = layout ? layoutTextBlocksForPage(layout, page) : [];
+    // 覆盖判定看「这一页模型有没有给出任何正文区域」——只给文字没给图的页（大多数正文页）
+    // 同样算覆盖，否则正文仍在走字号启发式，标题层级与顺序又回到「猜」。
+    const layoutCovered = layoutText.length > 0 || layoutAssets.length > 0;
     if (layoutCovered) stats.layoutPages++;
+
     if (!layoutCovered) {
       collapseTableZones(page);
       collapseNumericTableZones(page, bodySize || 10);
     }
+
     const pageBlocks = (page.blocks || []).filter((b) => b && b.kind !== 'furniture');
     // 出版商的封面 / 下载信息页（INFORMS 那种整页 "This article was downloaded by…"）：
     // 标题与作者在下一页还会完整出现一遍，整页跳过，免得 boilerplate 插进正文顺序里
@@ -1806,6 +1916,32 @@ export function toReadingDoc(analysis, opts = {}) {
     }
     const ordered = readingOrder(page);
     const decorText = decorativeTextBlocks(page, pageBlocks, bodySize);
+    const ownerOf = new Map();
+    if (layoutText.length) {
+      for (const b of ordered) {
+        const owner = layoutOwnerOf(b, layoutText);
+        if (owner) ownerOf.set(b, owner);
+      }
+    }
+    // 版面框对正文的覆盖率：模型漏框太多（<85% 字数）说明这一页的 manifest 不可靠，
+    // 这时「没被框住就丢掉」会真的丢内容，退回规则路径更安全。
+    // 只统计「长块」，且排除一眼就是出版商文案的块（刊名 / 版权行）—— 它们本来
+    // 就靠规则剔除，算进分母会让覆盖率永远偏低，等于这道保险一直关着。
+    let layoutTrust = 1;
+    if (layoutCovered && layoutText.length) {
+      let total = 0;
+      let owned = 0;
+      for (const b of ordered) {
+        if (!isTextBlock(b)) continue;
+        if (decorText.has(b)) continue;
+        const text = String(b.text || '');
+        if (text.length < 40 || matchPublisherStrong(text)) continue;
+        total += text.length;
+        if (ownerOf.has(b)) owned += text.length;
+      }
+      layoutTrust = total ? owned / total : 1;
+    }
+
     const rankOf = new Map(ordered.map((b, i) => [b, i]));
     const items = [];
     const cropRects = [];
@@ -1827,7 +1963,7 @@ export function toReadingDoc(analysis, opts = {}) {
         const rect = a.kind === 'formula'
           ? padRect(growWithInk(a.rect, page), 1.5, page)
           : a.rect;
-        cands.push({ rect, kind: a.kind, block: null, layout: true });
+        cands.push({ rect, kind: a.kind, block: null, layout: true, order: a.order });
       }
     }
     for (const b of ordered) {
@@ -1862,13 +1998,18 @@ export function toReadingDoc(analysis, opts = {}) {
       const rank = Math.min(...g.blocks.map((b) => rankOf.get(b) ?? 0));
       cands.push({ rect, kind: 'formula', rank, block: null, size: g.size });
     }
-    for (const img of page.images || []) {
-      const rect = [img.x0, img.y0, img.x1, img.y1];
-      if ((rect[2] - rect[0]) * (rect[3] - rect[1]) < MIN_FIGURE_AREA) continue;
-      cands.push({ rect, kind: 'figure', block: null });
-    }
-    for (const rect of vectorFigures(page, ordered.filter(isTextBlock))) {
-      cands.push({ rect, kind: 'figure', block: null, vector: true });
+    // 图像 XObject / 矢量插图：只在模型没覆盖这一页时启用。
+    // 有 manifest 的页，图的区域由模型给 —— 再跑一遍 XObject 会把刊头 logo、
+    // CrossMark 徽标、二维码这些「模型判为装饰」的小图重新塞回正文流。
+    if (!layoutCovered) {
+      for (const img of page.images || []) {
+        const rect = [img.x0, img.y0, img.x1, img.y1];
+        if ((rect[2] - rect[0]) * (rect[3] - rect[1]) < MIN_FIGURE_AREA) continue;
+        cands.push({ rect, kind: 'figure', block: null });
+      }
+      for (const rect of vectorFigures(page, ordered.filter(isTextBlock))) {
+        cands.push({ rect, kind: 'figure', block: null, vector: true });
+      }
     }
     // 版面已判过是图表的区域：规则再算出来的小块（图里的一条柱子、一行坐标标签）
     // 都该被那张大图吸收，否则同一张图会被裁成「整图 + 几个碎片」。
@@ -1925,6 +2066,13 @@ export function toReadingDoc(analysis, opts = {}) {
       cand.caption = String(cap.text || '').slice(0, 300);
       consumed.add(cap.block);
     }
+    // 图注反过来也能认出「这不是论文插图」：Check for updates / CrossMark / Open access
+    // 这类徽记的说明文字，是出版商的元信息，不该在阅读视图里占一张图。
+    for (let i = accepted.length - 1; i >= 0; i--) {
+      const c = accepted[i];
+      if (c.kind !== 'figure' || !c.caption) continue;
+      if (PUBLISHER_FIGURE_CAPTION.test(c.caption)) accepted.splice(i, 1);
+    }
 
     for (const cand of accepted) {
       const rect = cand.kind === 'formula' ? cand.rect : padRect(cand.rect, 1, page);
@@ -1936,11 +2084,13 @@ export function toReadingDoc(analysis, opts = {}) {
         size: cand.size,
       });
       cropRects.push(node.rect);
-      // 裁图排在「它本该出现的位置」：表格/公式用它自己的阅读顺序名次（这样被吃掉的
-      // 图注不会把它拽到上一栏去），插图用 cropRank 现算。
+      // 裁图排在「它本该出现的位置」：有版面 order 就按模型的阅读顺序，
+      // 否则退回表格/公式自己的名次或 cropRank 现算。
       const rank = Number.isFinite(cand.rank)
         ? cand.rank
-        : (cand.block ? (rankOf.get(cand.block) ?? 0) : cropRank(cand.rect, ordered, page.columns));
+        : (Number.isFinite(cand.order) && cand.order > 0
+          ? cand.order
+          : (cand.block ? (rankOf.get(cand.block) ?? 0) : cropRank(cand.rect, ordered, page.columns)));
       items.push({ rank, y: cand.rect[3], seq: items.length, el: node });
       if (cand.kind === 'table') stats.tables++;
       else if (cand.kind === 'formula') stats.formulas++;
@@ -1963,17 +2113,32 @@ export function toReadingDoc(analysis, opts = {}) {
       // 角标（作者单位编号 1 2 3、脚注星号）：几个 pt 的数字，裁成图毫无意义
       const plain = String(b.text || '').trim();
       if (plain.length <= 4 && (b.size || 0) < Math.max(6, bodySize * 0.72)) continue;
-      const node = textNode(b, levelOf(b), page, stamps);
+
+      // 版面归属：决定这一块算标题 / 小节 / 正文 / 脚注，以及它在页面上的顺序。
+      const owner = ownerOf.get(b) || null;
+      // 有 manifest 但模型没框住它：短碎块（"A R T I C L E   I N F O"、"Keywords:"、
+      // 单位编号、页脚版权行）都是出版商版式的残留，不进正文。整段的长文字则保留 ——
+      // 模型漏检一整段的代价（丢内容）比多留一行噪声大得多。
+      if (layoutCovered && !owner && layoutTrust >= 0.85) {
+        const shortFragment = plain.length <= 12 && (b.y1 - b.y0) < 30;
+        if (shortFragment || isPublisherDecorText(plain)) continue;
+      }
+
+      const kind = owner ? owner.kind : b.kind;
+      const level = owner ? layoutLevelOf(plain || owner.text, owner.label) : levelOf(b);
+      const src = owner && owner.kind !== b.kind ? { ...b, kind: owner.kind } : b;
+      const node = textNode(src, level, page, stamps);
       if (!node.lines.length) continue;
       textRects.push(node.rect);
-      if (b.kind === 'footnote') {
+      if (kind === 'footnote') {
         // 每页第一段脚注带一条分隔线，和正文分开（Zotero 用一条细线做同样的标记）
         if (!noteNodes.length) node.sep = true;
         noteNodes.push(node);
         stats.footnotes++;
         continue;
       }
-      items.push({ rank: rankOf.get(b) ?? 0, y: b.y1, seq: items.length, el: node });
+      const rank = owner ? owner.order : (layoutCovered ? layoutRankNear(b, layoutText) : (rankOf.get(b) ?? 0));
+      items.push({ rank, y: b.y1, seq: items.length, el: node });
       stats.text++;
       stats.chars += node.lines.reduce(
         (n, l) => n + l.runs.reduce((m, r) => m + r[2].length, 0), 0);
