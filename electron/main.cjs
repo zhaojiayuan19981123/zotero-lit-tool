@@ -2,6 +2,7 @@
 const { app, BrowserWindow, shell, Notification, dialog } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { shouldPrompt, PROMPT_SKIP, PROMPT_IN_APP } = require('./update-prompt.cjs');
+const updateSource = require('./update-source.cjs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { spawn } = require('child_process');
@@ -48,6 +49,11 @@ let mainWindow = null;
 let backendPort = null;
 const updateSupported = app.isPackaged && process.platform === 'win32';
 
+// 发布者级默认镜像地址，打包时随 electron/ 一起进入安装包。
+// 留空 = 未配置镜像，客户端行为与 v1.39.0 完全一致；用户仍可在「应用更新」里自行填写。
+let BUILTIN_MIRROR_URL = '';
+try { BUILTIN_MIRROR_URL = require('./update-sources.json').mirrorUrl || ''; } catch (_) { /* 缺失按未配置处理 */ }
+
 // 更新由主进程负责，页面只能通过本地 API 读取状态和发起明确动作。
 // 浏览器开发模式不具备安装权限，也不会连接 GitHub 检查更新。
 const updateState = {
@@ -70,8 +76,21 @@ const updateState = {
   // pendingPrompt：提醒应该由「页面内卡片」呈现（窗口可见时走这条路），
   // 页面取到后弹一次并回执 ackPrompt，随即落盘。
   pendingPrompt: false,
+  // ---- 更新源 ----
+  // source / sourceLabel：当前真正用于检查与下载的源，前端会展示。
+  // feed 为 null 表示 electron-updater 打包内默认的 GitHub 源。
+  source: 'github',
+  sourceLabel: 'GitHub 官方',
+  sourceUrl: '',
+  updateSourceMode: 'auto',
+  updateMirrorUrl: '',
+  builtinMirrorUrl: BUILTIN_MIRROR_URL,
 };
 let updaterReady = false;
+let updateCandidates = [];
+// 多源探测期间抑制事件副作用：中途的「无更新 / 报错」不该闪到界面上，
+// 也不该提前弹出新版本提醒；探测结束后再以选中的源正常触发一次。
+let probeQuiet = false;
 
 // 后台自动检查：启动后延迟一小会儿查一次（不打扰首屏加载），之后每 6 小时查一次。
 // 只在安装后的 Windows 桌面版有意义。
@@ -186,6 +205,83 @@ function scheduleAutoUpdateChecks() {
   if (typeof timer.unref === 'function') timer.unref();
 }
 
+// ---------- 更新源：GitHub 官方 + 可选国内镜像 ----------
+// 镜像只需是一个静态目录，放 latest.yml / 安装包 / .blockmap 三个文件。
+// generic provider 会请求 <目录>/latest.yml，并把 yml 里的相对文件名拼到同目录，
+// 因此 sha512 校验与 .blockmap 差量下载都能原样工作。
+function readSourceConfig() {
+  return updateSource.parseUpdateSourceConfig(readAppConfig(), BUILTIN_MIRROR_URL);
+}
+
+function refreshCandidates() {
+  updateCandidates = updateSource.buildCandidates(readSourceConfig());
+  return updateCandidates;
+}
+
+function applyFeed(candidate) {
+  if (!candidate || candidate.feed === null) {
+    // 置 null 后 electron-updater 会重新读取打包内的 app-update.yml，
+    // 即使之前切到过 generic，也能干净地回到官方 GitHub 源。
+    autoUpdater.clientPromise = null;
+  } else {
+    autoUpdater.setFeedURL({ provider: 'generic', url: candidate.feed });
+  }
+}
+
+function setActiveSource(candidate) {
+  if (!candidate) return;
+  Object.assign(updateState, {
+    source: candidate.id,
+    sourceLabel: candidate.label,
+    sourceUrl: candidate.url || '',
+  });
+}
+
+// 依次探测所有候选源。镜像与 GitHub 上的 latest.yml 由同一批 CI 产物同步，
+// 内容一致；若镜像滞后报「无更新」，继续查官方源可避免漏掉新版本。
+// 探测结束后再用选中的源非静默地检查一次，重建 updateInfoAndProvider，
+// 保证后续 downloadUpdate() 的下载地址与 .blockmap 都指向这个源。
+async function probeSources(candidates) {
+  if (candidates.length <= 1) {
+    applyFeed(candidates[0]);
+    setActiveSource(candidates[0]);
+    await autoUpdater.checkForUpdates();
+    return candidates[0];
+  }
+
+  const outcomes = [];
+  probeQuiet = true;
+  try {
+    for (const candidate of candidates) {
+      applyFeed(candidate);
+      setActiveSource(candidate);
+      try {
+        const result = await autoUpdater.checkForUpdates();
+        const available = Boolean(result?.isUpdateAvailable);
+        outcomes.push({ candidate, available });
+        // 镜像与 GitHub 是同一批 CI 产物。第一个报告有更新的源即可采用，
+        // 不再多等后面那个通常更慢的官方源，否则「加速」只剩下载那一半。
+        // 镜像清单滞后报「无更新」时会继续问官方，因此不会漏掉新版本。
+        if (available) break;
+      } catch (e) {
+        outcomes.push({ candidate, available: false, error: e });
+      }
+    }
+  } finally {
+    probeQuiet = false;
+  }
+
+  const withUpdate = outcomes.find((o) => o.available);
+  const lastOk = [...outcomes].reverse().find((o) => !o.error);
+  // 全部失败时用官方源兜底，让最后一次非静默检查把错误如实呈现给用户。
+  const chosen = (withUpdate || lastOk || { candidate: candidates[candidates.length - 1] }).candidate;
+  applyFeed(chosen);
+  setActiveSource(chosen);
+  Object.assign(updateState, { phase: 'checking', error: '', percent: 0 });
+  await autoUpdater.checkForUpdates();
+  return chosen;
+}
+
 function setupUpdater() {
   if (updaterReady) return;
   updaterReady = true;
@@ -197,10 +293,21 @@ function setupUpdater() {
   autoUpdater.allowPrerelease = false;
   // 上次已经提醒过的版本号（跨启动保留），决定这次还要不要弹
   updateState.promptedVersion = readPromptedVersion();
+  const config = readSourceConfig();
+  Object.assign(updateState, {
+    updateSourceMode: config.mode,
+    updateMirrorUrl: config.mirrorUrl,
+    builtinMirrorUrl: config.builtinMirrorUrl,
+  });
+  const initial = refreshCandidates();
+  applyFeed(initial[0]);
+  setActiveSource(initial[0]);
   autoUpdater.on('checking-for-update', () => {
+    if (probeQuiet) return;
     Object.assign(updateState, { phase: 'checking', error: '', percent: 0 });
   });
   autoUpdater.on('update-available', (info) => {
+    if (probeQuiet) return;
     Object.assign(updateState, {
       phase: 'available',
       availableVersion: info?.version || '',
@@ -211,6 +318,7 @@ function setupUpdater() {
     deliverUpdatePrompt(info);
   });
   autoUpdater.on('update-not-available', () => {
+    if (probeQuiet) return;
     Object.assign(updateState, {
       phase: 'not-available', availableVersion: '', releaseName: '', releaseNotes: '', error: '',
     });
@@ -235,6 +343,7 @@ function setupUpdater() {
     pokeRenderer(); // 让导航里的「待安装」立刻显示，不必等页面下次轮询
   });
   autoUpdater.on('error', (error) => {
+    if (probeQuiet) return;
     Object.assign(updateState, {
       phase: 'error',
       error: error?.message || '更新服务发生未知错误',
@@ -250,16 +359,72 @@ const updateService = {
     if (!updateSupported) throw new Error('自动更新仅在安装后的 Windows 桌面版中可用');
     if (['checking', 'downloading'].includes(updateState.phase)) return updaterSnapshot();
     Object.assign(updateState, { phase: 'checking', error: '', percent: 0 });
-    await autoUpdater.checkForUpdates();
+    await probeSources(refreshCandidates());
     return updaterSnapshot();
   },
   async download() {
     if (!updateSupported) throw new Error('自动更新仅在安装后的 Windows 桌面版中可用');
     if (updateState.phase === 'downloaded') return updaterSnapshot();
     if (updateState.phase !== 'available') throw new Error('当前没有可下载的新版本');
-    Object.assign(updateState, { phase: 'downloading', error: '', percent: 0 });
-    await autoUpdater.downloadUpdate();
-    return updaterSnapshot();
+    const candidates = updateSource.prioritize(updateCandidates, updateState.source);
+    let lastError = null;
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i];
+      Object.assign(updateState, { phase: 'downloading', error: '', percent: 0 });
+      try {
+        if (i > 0) {
+          // 切源后 updateInfoAndProvider 仍指向上一个源，必须静默重查一次，
+          // 让安装包与 .blockmap 的下载地址一起切到新源。
+          applyFeed(candidate);
+          setActiveSource(candidate);
+          probeQuiet = true;
+          try {
+            const result = await autoUpdater.checkForUpdates();
+            if (!result?.isUpdateAvailable) throw new Error('该更新源未提供可下载的新版本');
+          } finally {
+            probeQuiet = false;
+          }
+          Object.assign(updateState, { phase: 'downloading', error: '', percent: 0 });
+        }
+        await autoUpdater.downloadUpdate();
+        return updaterSnapshot();
+      } catch (e) {
+        lastError = e;
+        console.warn(`[更新] 从「${candidate.label}」下载失败：`, e?.message || e);
+      }
+    }
+    Object.assign(updateState, {
+      phase: 'error',
+      error: lastError?.message || '所有更新源均下载失败',
+    });
+    throw lastError || new Error('所有更新源均下载失败');
+  },
+  // 更新源配置：页面读取当前策略与候选列表，并可切换模式 / 填写自定义镜像地址。
+  getSources() {
+    const config = readSourceConfig();
+    return {
+      supported: updateSupported,
+      mode: config.mode,
+      mirrorUrl: config.mirrorUrl,
+      builtinMirrorUrl: config.builtinMirrorUrl,
+      effectiveMirrorUrl: updateSource.effectiveMirrorUrl(config),
+      source: updateState.source,
+      sourceLabel: updateState.sourceLabel,
+      candidates: updateSource.buildCandidates(config).map((c) => ({ id: c.id, label: c.label })),
+    };
+  },
+  setSource(payload = {}) {
+    const current = readAppConfig();
+    const rawUrl = payload.mirrorUrl === undefined
+      ? String(current.updateMirrorUrl || '')
+      : String(payload.mirrorUrl || '').trim();
+    const mirrorUrl = updateSource.normalizeMirrorUrl(rawUrl);
+    if (rawUrl && !mirrorUrl) throw new Error('镜像地址无效：请填写 https 开头、指向更新目录的完整地址');
+    const mode = updateSource.normalizeMode(payload.mode === undefined ? current.updateSourceMode : payload.mode);
+    writeAppConfig({ updateSourceMode: mode, updateMirrorUrl: mirrorUrl });
+    Object.assign(updateState, { updateSourceMode: mode, updateMirrorUrl: mirrorUrl });
+    refreshCandidates();
+    return updateService.getSources();
   },
   install() {
     if (!updateSupported) throw new Error('自动更新仅在安装后的 Windows 桌面版中可用');

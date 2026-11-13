@@ -926,7 +926,7 @@ Windows 安装配置默认不会在卸载时删除用户数据，但仍建议先
 6. 将 Release 设为普通正式版本并发布，不能保持 Draft，也不要标记为 Pre-release；客户端默认不接收预发布版本。
 7. 从 Releases 页面实际下载一次安装包，并用旧版客户端完成一次“检查、下载、退出并安装”的跨版本验证。
 
-只推送源码或只创建 tag 不会形成可安装更新。GitHub 仓库若改为私有，普通客户端无法安全地内置访问令牌，当前公开 Release 更新方案将不再直接可用，需要改用受控更新服务器。GitHub 限流、区域网络、代理和防火墙也可能导致检查失败。
+只推送源码或只创建 tag 不会形成可安装更新。GitHub 仓库若改为私有，普通客户端无法安全地内置访问令牌，当前公开 Release 更新方案将不再直接可用，需要改用受控更新服务器。GitHub 限流、区域网络、代理和防火墙也可能导致检查失败；若已配置更新镜像，检查与下载会优先走国内镜像、失败自动回退 GitHub，详见「更新镜像（国内加速）」。
 
 自动更新不会改变当前数据目录。Windows 桌面版数据通常位于 `%APPDATA%\SciTerminal\data`，旧版用户也可能仍使用 `%APPDATA%\zotero-lit-tool`；实际路径以设置页面为准。安装配置不会主动删除应用数据，但发布新版本前仍应验证迁移逻辑，并建议用户先导出备份。
 
@@ -935,6 +935,55 @@ Windows 安装配置默认不会在卸载时删除用户数据，但仍建议先
 仓库中的 `.github/workflows/release.yml` 会在推送 `v*` 标签后，分别在 GitHub 托管的 Windows 和 macOS 构建机上生成 Windows x64、macOS arm64、macOS x64 安装包，创建正式 Release，并附带 `SHA256SUMS.txt`。在没有配置 Apple 签名凭据时，工作流会明确关闭证书自动发现，产出的 macOS 包属于未签名、未公证构建。
 
 不要将本地 `data/`、`uploads/`、`node_modules/`、API Key 或用户文献上传到 Release 或源代码仓库。
+
+## 更新镜像（国内加速）
+
+自动更新默认走 GitHub Releases。安装包约 185 MB，最终下载域名
+`objects.githubusercontent.com` 在国内经常超时或限速。可以把同一批产物同步到一个
+国内可直连的静态目录，让 electron-updater 改用 generic provider 读取它。
+
+### 客户端怎么工作
+
+- 更新源分两层：发布者级写在 `electron/update-sources.json` 的 `mirrorUrl`（打包进安装包），
+  用户级写在「检查更新 → 更新下载源」，持久化到 `%APPDATA%\SciTerminal\app-config.json`。
+  用户填的地址优先；留空则沿用发布者默认值。
+- 候选顺序是 `[镜像, GitHub 官方]`。检查阶段静默探测每个源，第一个报告有新版本的胜出；
+  镜像清单滞后时会继续问官方源，避免漏掉新版本。随后用选中的源再检查一次，
+  让 `downloadUpdate()` 的安装包地址和 `.blockmap` 一起指向它。
+- 下载失败会自动切到下一个源重新下载；状态里带 `source` / `sourceLabel`，
+  界面显示当前源与实时速度。
+- **未配置镜像时只有一个候选，行为与 v1.39.0 完全一致** —— 老用户升级不会被强行换源。
+- 镜像地址只接受 https 目录 URL（本机回环可用 http），拒绝 userinfo、query、hash 与路径穿越。
+
+### 维护者配置步骤
+
+1. 在腾讯云 COS / 阿里云 OSS / Cloudflare R2 等 S3 兼容服务建一个 bucket，
+   准备一组只有写权限的密钥。对外目录必须能匿名 HTTPS GET，例如
+   `https://example.cos.ap-shanghai.myqcloud.com/worlex/releases/latest/`。
+2. 仓库 Settings → Secrets and variables → Actions：
+   - Secrets：`MIRROR_ENDPOINT`、`MIRROR_BUCKET`、`MIRROR_ACCESS_KEY_ID`、`MIRROR_SECRET_ACCESS_KEY`
+   - Variables（可选）：`MIRROR_REGION`（默认 `auto`）、`MIRROR_PREFIX`（默认
+     `worlex/releases/latest/`）、`MIRROR_PUBLIC_BASE_URL`（CDN 域名，即客户端应填的地址）
+3. 打 tag 发版。`release.yml` 的 `mirror` 作业会把 `latest.yml`、`*.exe`、
+   `*.exe.blockmap`、两个 dmg 和 `SHA256SUMS.txt` 推到固定目录。
+   没配 `MIRROR_ENDPOINT` / `MIRROR_BUCKET` 时整条跳过，同步失败也不影响 Release。
+4. 复制 CI 日志里打印的「客户端应填写的更新源目录」，两种启用方式：
+   - **所有用户默认加速**：写进 `electron/update-sources.json` 的 `mirrorUrl`，重新打包发版；
+   - **单台机器立即生效**：在「应用更新 → 更新下载源」里填入并保存，不用重装软件。
+5. 验证：用旧版客户端检查更新，界面应显示「镜像 · 域名」且下载速度明显提升；
+   把镜像地址故意填错，应自动回退 GitHub 官方源并仍能完成下载。
+
+### 约束与安全
+
+- 镜像目录只放原样文件，不要重命名。`latest.yml` 必须匿名可读且**不能被 CDN 缓存**，
+  否则用户会一直看到旧版本；带版本号的安装包可以长期强缓存。
+- `latest.yml` 缺一不可的三件套是清单、安装包、同名 `.blockmap`；同步脚本会先校验，
+  缺任意一件就拒绝上传，且清单永远最后上传。
+- 清单里的 sha512 用于校验安装包，但清单本身也来自镜像，所以镜像必须是你自己可信的
+  HTTPS 存储；不要把来路不明的公共代理设为唯一来源，GitHub 官方源始终保留为兜底。
+- 自动更新目前仅在安装版 Windows 生效；macOS 的 dmg 仍是手动下载，
+  镜像目录里同样放了 dmg，可在发布页提供直链。
+- 本地只列计划不上传：`node scripts/sync-release-mirror.mjs --assets dist --dry-run`。
 
 ## 技术栈
 

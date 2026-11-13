@@ -1,0 +1,4 @@
+{
+  "mirrorUrl": "",
+  "_comment": "把国内镜像目录的 https 地址填进 mirrorUrl 后重新打包，所有用户即可默认从镜像下载更新。地址应指向包含 latest.yml / 安装包 / .blockmap 的目录，例如 https://example.myqcloud.com/worlex/releases/latest/ 。留空时行为与旧版本一致，用户仍可在「应用更新」面板里自行填写镜像地址。"
+}

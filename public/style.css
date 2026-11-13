@@ -1358,7 +1358,22 @@ mark.anno-c-purple { color: var(--primary); background: none; }
 .update-state-copy { align-self: center; min-width: 0; }
 .update-state-copy h4 { margin: 0; font-size: 16px; color: var(--text); }
 .update-state-copy p { margin: 4px 0 0; color: var(--text-2); font-size: 12.5px; line-height: 1.6; }
-.update-progress-wrap, .update-release, .update-caution { grid-column: 1 / -1; }
+.update-progress-wrap, .update-release, .update-caution, .update-source-box { grid-column: 1 / -1; }
+.update-source-box { padding: 11px 13px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--panel-soft); }
+.update-source-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+.update-source-title { color: var(--text); font-size: 12.5px; font-weight: 700; }
+.update-source-current { color: var(--accent-coral); font-size: 11.5px; }
+.update-source-row { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.update-source-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.update-source-field.grow { flex: 1 1 220px; }
+.update-source-field > span { color: var(--text-3); font-size: 11px; }
+.update-source-field select, .update-source-field input {
+  width: 100%; height: 30px; padding: 0 8px; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: 5px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12px;
+}
+#btnUpdateSourceSave { height: 30px; flex: 0 0 auto; }
+.update-source-hint { margin: 8px 0 0; color: var(--text-3); font-size: 11px; line-height: 1.6; word-break: break-all; }
 .update-progress-track { height: 8px; overflow: hidden; border-radius: 4px; background: var(--panel-2); }
 .update-progress-track span { display: block; width: 0; height: 100%; background: var(--primary); }
 .update-progress-meta { display: flex; justify-content: space-between; margin-top: 5px; color: var(--text-3); font-size: 11px; }

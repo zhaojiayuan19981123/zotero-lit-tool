@@ -183,6 +183,7 @@
   let calendarData = { events: [], preferences: { lunar: true, solarTerms: true, festivals: true } };
   let classMoveIds = [];
   let updateStatus = null;
+  let updateSourceInfo = null;
   let updatePollTimer = null;
   let updateActionBusy = false;
   // 新版本提醒卡片：本进程内已弹过的版本 + 首屏缓冲
@@ -14162,14 +14163,17 @@ a { color: #176b87; }
     const phase = status.phase || 'idle';
     const current = status.currentVersion ? `v${status.currentVersion}` : '--';
     const available = status.availableVersion ? `v${status.availableVersion}` : '--';
+    const sourceLabel = status.sourceLabel || 'GitHub 官方';
+    const sourceHint = status.sourceLabel && status.sourceLabel !== 'GitHub 官方' ? '镜像（失败自动回退 GitHub）' : 'GitHub Releases';
+    if ($('updateSourceCurrent')) $('updateSourceCurrent').textContent = sourceLabel;
     $('updateCurrentVersion').textContent = current;
     $('updateAvailableVersion').textContent = available;
     $('updateVersionArrow').classList.toggle('hidden', !status.availableVersion);
 
     const copy = {
-      idle: ['↻', '准备检查更新', '点击下方按钮，从 GitHub Releases 检查可安装的新版本。'],
+      idle: ['↻', '准备检查更新', `点击下方按钮，从${sourceHint}检查可安装的新版本。`],
       unsupported: ['—', '当前环境不支持自动更新', status.error || '请在安装后的 Windows 桌面版中使用此功能。'],
-      checking: ['↻', '正在检查新版本', '正在读取 GitHub Releases 的稳定版本信息…'],
+      checking: ['↻', '正在检查新版本', `正在读取${sourceHint}的稳定版本信息…`],
       available: ['↓', `发现新版本 ${available}`, '版本已通过更新清单验证。下方会显示本次更新了哪些功能。'],
       downloading: ['↓', `正在下载 ${available}`, '可以关闭此窗口继续使用，下载会在后台进行。'],
       downloaded: ['✓', `${available} 已准备好`, '保存当前工作后，退出应用并启动安装程序。'],
@@ -14188,7 +14192,10 @@ a { color: #176b87; }
     $('updateProgressText').textContent = status.total
       ? `${percent.toFixed(1)}% · ${formatUpdateBytes(status.transferred)} / ${formatUpdateBytes(status.total)}`
       : `${percent.toFixed(1)}%`;
-    $('updateSpeedText').textContent = status.bytesPerSecond ? `${formatUpdateBytes(status.bytesPerSecond)}/s` : '';
+    $('updateSpeedText').textContent = [
+      status.bytesPerSecond ? `${formatUpdateBytes(status.bytesPerSecond)}/s` : '',
+      sourceLabel,
+    ].filter(Boolean).join(' · ');
 
     // 优先显示 GitHub Release 正文；若上游未提供正文，至少列出本版本已落地的变更。
     const knownChanges = status.availableVersion === '1.11.0' ? [
@@ -14233,6 +14240,48 @@ a { color: #176b87; }
     } catch (e) {
       if (!silent) toast('读取更新状态失败：' + e.message, 'error');
       return null;
+    }
+  }
+
+  // 更新源配置：自定义镜像目录地址 + 「镜像优先 / 仅官方」策略，存在主进程的 app-config.json。
+  async function loadUpdateSource() {
+    try {
+      const info = await api('/api/update/source');
+      updateSourceInfo = info;
+      const mode = $('updateSourceMode');
+      const url = $('updateMirrorUrl');
+      if (mode) mode.value = info.mode === 'official' ? 'official' : 'auto';
+      if (url) url.value = info.mirrorUrl || '';
+      const editable = Boolean(info.supported);
+      [mode, url, $('btnUpdateSourceSave')].forEach((el) => { if (el) el.disabled = !editable; });
+      const hint = $('updateSourceHint');
+      if (hint) {
+        hint.textContent = !editable
+          ? '更新源设置仅在安装后的 Windows 桌面版中可用。'
+          : info.builtinMirrorUrl
+            ? `软件内置镜像：${info.builtinMirrorUrl}；上方自定义地址优先，留空则沿用内置镜像。`
+            : '当前未内置镜像；填写国内镜像目录后，检查与下载会优先走镜像，失败自动回退 GitHub 官方。';
+      }
+      return info;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function saveUpdateSource() {
+    const payload = {
+      mode: $('updateSourceMode')?.value || 'auto',
+      mirrorUrl: $('updateMirrorUrl')?.value || '',
+    };
+    try {
+      await api('/api/update/source', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      await loadUpdateSource();
+      toast('更新源已保存，下次检查更新时生效');
+    } catch (e) {
+      toast('保存更新源失败：' + e.message, 'error');
     }
   }
 
@@ -14287,6 +14336,7 @@ a { color: #176b87; }
   async function openUpdateModal() {
     $('updateModal').classList.remove('hidden');
     await loadUpdateStatus();
+    await loadUpdateSource();
     if (['checking', 'downloading'].includes(updateStatus?.phase)) beginUpdatePolling();
   }
 
@@ -14330,6 +14380,7 @@ a { color: #176b87; }
     $('btnUpdateCancel').addEventListener('click', close);
     $('updateModal').querySelector('.modal-mask').addEventListener('click', close);
     $('btnUpdateAction').addEventListener('click', runUpdateAction);
+    $('btnUpdateSourceSave').addEventListener('click', saveUpdateSource);
     // 新版本提醒卡片：三个入口（查看更新 / 以后再说 / ×）都算「已提醒」，一律回执一次
     $('updateNotify').addEventListener('click', (e) => {
       const action = e.target.closest('[data-update-notify]')?.dataset.updateNotify;

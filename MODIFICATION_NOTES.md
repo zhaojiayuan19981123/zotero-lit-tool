@@ -1,3 +1,63 @@
+## v1.40.0：更新镜像（国内下载加速）（2026-11-13）
+
+> 用户要求：「能不能把这个项目通过镜像，加快用户更新下载速度」。
+> 澄清后确认：镜像用对象存储 / CDN 托管；这次改代码 + 跑测试 + 发 v1.40.0。
+
+### 一、现状与结论
+
+- 原链路：`build.publish.provider = github` → 打包生成 `app-update.yml` →
+  `GitHubProvider` 走 `github.com/.../releases.atom` + `/releases/latest` + 下载
+  `/releases/download/<tag>/latest.yml` 与 exe（302 到 `objects.githubusercontent.com`）。
+  安装包约 185 MB，国内卡在最后一段。自动更新仅安装版 Windows 生效。
+- 读 `electron-updater@6.6.2` 源码确认：`GenericProvider` 请求 `<baseUrl>/latest.yml`，
+  `resolveFiles()` 把 yml 里的相对文件名拼到同一 base，`.blockmap` 是同名追加。
+  所以镜像只需一个静态目录放 `latest.yml` + exe + `.blockmap`，sha512 与差量更新完全不变。
+- `AppUpdater.clientPromise = null` 会让它重新读打包内 `app-update.yml`，
+  因此切回官方源不需要复刻 `build.publish` 配置，也不会污染默认行为。
+- `doCheckForUpdates()` 只在 `isUpdateAvailable === true` 时写 `updateInfoAndProvider`，
+  故切源后必须重新 `checkForUpdates()` 才能让 `downloadUpdate()` 换下载地址与 blockmap。
+
+### 二、客户端（electron / server / public）
+
+- 新增 `electron/update-source.cjs`（纯函数、可单测）：模式 `auto` / `official`、
+  镜像 URL 规范化（仅 https、回环可 http、拒绝 userinfo/query/hash/路径穿越）、
+  候选源构造、下载回退排序。
+- 新增 `electron/update-sources.json`：发布者级默认镜像，初始 `mirrorUrl: ""`，
+  **留空时行为与 v1.39.0 完全一致**。
+- `electron/main.cjs`：`probeSources()` 静默探测多源（中途事件用 `probeQuiet` 抑制，
+  避免闪错误状态 / 重复弹提醒），第一个报告有更新的源胜出；镜像清单滞后会继续问官方，
+  不漏版本。选中后再非静默检查一次重建 `updateInfoAndProvider`。
+  `download()` 按当前源优先逐个尝试，切源时静默重查并换源下载。
+  新增 `getSources()` / `setSource()`，配置写进 `app-config.json`。
+- `server.js` 新增 `/api/update/source` GET / POST；`public/index.html`、`app.js`、`style.css`
+  在「应用更新」面板加策略下拉、镜像地址输入、保存按钮、当前源标签；
+  下载进度行显示「速度 · 当前源」。
+
+### 三、镜像同步与 CI
+
+- 新增 `scripts/sync-release-mirror.mjs`：零新增依赖，Node 内置 crypto 实现 AWS SigV4，
+  内置 fetch 做 PUT；支持 path-style 与 bucket 在 hostname 的 COS 形态。
+  `planFiles()` 只挑更新所需文件并强制 `latest.yml` 最后上传；
+  `assertComplete()` 缺清单 / exe / blockmap 就拒绝同步；
+  清单 `no-cache`、安装包 `immutable`；支持 `--dry-run`。
+- `.github/workflows/release.yml` 新增可选 `mirror` 作业：`needs.release.result == 'success'`，
+  secrets 不能用在 job 级 `if`，改为 job 级 `env.MIRROR_CONFIGURED` + 各步骤判断；
+  `continue-on-error: true` 保证镜像失败不拖垮发版。
+
+### 四、踩坑与验证
+
+- **键名不匹配（严重）**：`buildCandidates()` 收到的是 `parseUpdateSourceConfig()` 的结果
+  （键名 `mode` / `mirrorUrl`），但最初 `parse` 只认持久化原始键
+  （`updateSourceMode` / `updateMirrorUrl`），二次解析会把自定义镜像静默丢掉。
+  单测抓到后让 parse 同时接受两套键名，保证幂等。
+- `new URL()` 会规范化 `/../`，路径穿越必须在解析**前**用原始字符串判断；
+  `normalizePrefix()` 末尾斜杠会产生空段，逐段校验前要先去掉。
+- 本机 Node 22 跑全量 `node --test` 会被沙箱 SIGTERM，需加 `--test-concurrency=2`；
+  Node 20 直接跑正常。两者均 **744/744** 通过（新增 16 项）。
+- 文档：`README.md` 新增「更新镜像（国内加速）」，`release-body.md` 与本文补 v1.40.0 段落。
+
+---
+
 ## v1.39.0：更名 worlex + Hallmark 简约风界面重设计（2026-11-13）
 
 > 用户要求：「用 hallmark 重设计这个软件的界面，整体呈现简约风，参考 willo，

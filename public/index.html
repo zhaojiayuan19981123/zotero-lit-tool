@@ -1494,6 +1494,27 @@
           <div class="update-release-title" id="updateReleaseName">本次更新内容</div>
           <div id="updateReleaseNotes" class="md-render update-release-notes"></div>
         </div>
+        <div class="update-source-box">
+          <div class="update-source-head">
+            <span class="update-source-title">更新下载源</span>
+            <span id="updateSourceCurrent" class="update-source-current">GitHub 官方</span>
+          </div>
+          <div class="update-source-row">
+            <label class="update-source-field">
+              <span>策略</span>
+              <select id="updateSourceMode">
+                <option value="auto">自动 · 镜像优先，失败回退官方</option>
+                <option value="official">仅 GitHub 官方</option>
+              </select>
+            </label>
+            <label class="update-source-field grow">
+              <span>镜像目录地址</span>
+              <input id="updateMirrorUrl" type="url" spellcheck="false" autocomplete="off" placeholder="https://…/worlex/releases/latest/" />
+            </label>
+            <button id="btnUpdateSourceSave" class="btn btn-ghost" type="button">保存</button>
+          </div>
+          <p id="updateSourceHint" class="update-source-hint">留空则使用软件内置的镜像地址；未配置镜像时始终从 GitHub 官方下载。</p>
+        </div>
         <p class="update-caution">安装前建议完成正在编辑的内容。下载完成后，应用将退出并启动安装程序；辅助式安装包在部分系统上仍可能要求确认安装选项。</p>
       </div>
       <div class="modal-foot">

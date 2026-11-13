@@ -1477,6 +1477,25 @@ export function createApp({
       res.status(500).json({ error: e.message || '读取更新状态失败' });
     }
   });
+  // 更新源（GitHub 官方 / 国内镜像）：浏览器开发模式也允许查看，保存仅限桌面版。
+  app.get('/api/update/source', (_req, res) => {
+    try {
+      res.json(updateService?.getSources?.() || {
+        supported: false, mode: 'auto', mirrorUrl: '', builtinMirrorUrl: '',
+        effectiveMirrorUrl: '', source: 'github', sourceLabel: 'GitHub 官方', candidates: [],
+      });
+    } catch (e) {
+      res.status(500).json({ error: e.message || '读取更新源配置失败' });
+    }
+  });
+  app.post('/api/update/source', (req, res) => {
+    try {
+      if (!updateService?.setSource) return res.status(409).json({ error: browserUpdateStatus.error });
+      res.json(updateService.setSource(req.body || {}));
+    } catch (e) {
+      res.status(400).json({ error: e.message || '保存更新源配置失败' });
+    }
+  });
   // ---------- 模型路由：故障转移 / 熔断 / 用量统计 ----------
   // 供应商清单（供「模型路由」面板选择备用队列）：包含全部配置，未填 Key 的也列出来，
   // 但标记 hasKey=false —— 面板上禁用勾选并提示，而不是让它悄悄消失。

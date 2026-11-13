@@ -156,3 +156,55 @@ jobs:
           generate_release_notes: false
           body_path: .github/release-body.md
           files: release-assets/*
+
+  # 可选：把同一批产物同步到国内对象存储，供客户端「镜像优先」更新源使用。
+  # 未配置 MIRROR_ENDPOINT / MIRROR_BUCKET 时所有步骤跳过，不影响发版结果；
+  # 同步失败也只标记本作业失败，不会把整条流水线判红。
+  # 需要在仓库 Secrets 里配置：MIRROR_ENDPOINT、MIRROR_BUCKET、
+  # MIRROR_ACCESS_KEY_ID、MIRROR_SECRET_ACCESS_KEY；
+  # 可在 Variables 里配置：MIRROR_REGION、MIRROR_PREFIX、MIRROR_PUBLIC_BASE_URL。
+  mirror:
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.release.result == 'success'
+    needs:
+      - windows
+      - macos
+      - release
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      # secrets 不能用在 job 级 if 里，这里转成 env，再由各步骤判断。
+      MIRROR_CONFIGURED: ${{ secrets.MIRROR_ENDPOINT != '' && secrets.MIRROR_BUCKET != '' }}
+      MIRROR_ENDPOINT: ${{ secrets.MIRROR_ENDPOINT }}
+      MIRROR_BUCKET: ${{ secrets.MIRROR_BUCKET }}
+    steps:
+      - name: Check out source
+        if: env.MIRROR_CONFIGURED == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        if: env.MIRROR_CONFIGURED == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.0"
+
+      - name: Download release artifacts
+        if: env.MIRROR_CONFIGURED == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Sync update mirror
+        if: env.MIRROR_CONFIGURED == 'true'
+        env:
+          MIRROR_ASSETS_DIR: release-assets
+          MIRROR_ACCESS_KEY_ID: ${{ secrets.MIRROR_ACCESS_KEY_ID }}
+          MIRROR_SECRET_ACCESS_KEY: ${{ secrets.MIRROR_SECRET_ACCESS_KEY }}
+          MIRROR_REGION: ${{ vars.MIRROR_REGION || 'auto' }}
+          MIRROR_PREFIX: ${{ vars.MIRROR_PREFIX || 'worlex/releases/latest/' }}
+          MIRROR_PUBLIC_BASE_URL: ${{ vars.MIRROR_PUBLIC_BASE_URL }}
+        run: node scripts/sync-release-mirror.mjs
+
+      - name: Mirror not configured
+        if: env.MIRROR_CONFIGURED != 'true'
+        run: echo "未配置 MIRROR_ENDPOINT / MIRROR_BUCKET，跳过镜像同步（GitHub Release 不受影响）"
