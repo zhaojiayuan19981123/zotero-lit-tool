@@ -3,7 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>一站式科研终端（经管版）</title>
+  <meta name="description" content="worlex — 本地文献解析、PDF 精读、翻译与管理的一体化科研工作台" />
+  <title>worlex</title>
+  <link rel="icon" type="image/svg+xml" href="worlex.svg" />
   <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="stylesheet" href="vendor/katex/katex.min.css" />
   <!-- 思维导图（simple-mind-map，MIT，XMind 风格）：仅笔记模式的思维导图视图使用 -->
@@ -144,7 +146,7 @@
     <div class="brand">
       <img src="favicon.png" alt="" class="brand-logo-img" />
       <div class="brand-copy">
-        <h1>一站式科研终端（经管版）</h1>
+        <h1>worlex</h1>
       </div>
     </div>
     <div class="topbar-actions">
@@ -221,9 +223,9 @@
       </nav>
 
       <div class="side-foot">
-        <div class="side-progress-row"><span class="dot dot-done"></span>今日阅读 <b id="cntTodayHeat">0秒</b></div>
-        <div class="side-progress-row"><span class="dot dot-reading"></span>累计停留 <b id="cntTotalHeat">0秒</b></div>
-        <div class="side-progress-row"><span class="dot dot-unread"></span>最热页 <b id="cntHottestPage">—</b></div>
+        <div class="side-progress-row">今日阅读 <b id="cntTodayHeat">0秒</b></div>
+        <div class="side-progress-row">累计停留 <b id="cntTotalHeat">0秒</b></div>
+        <div class="side-progress-row">最热页 <b id="cntHottestPage">—</b></div>
         <div class="side-foot-actions">
           <button id="btnNavSettings" class="side-icon-btn" type="button" title="设置" aria-label="设置">
             <svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>
@@ -1347,7 +1349,7 @@
           <label class="ml-switch"><input type="checkbox" id="setAiEnabled" /> 启用 AI（关闭后全部走规则离线提取，不消耗额度）</label>
         </label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:#fff7e6">easyScholar 期刊等级查询（免费开放接口，需 SecretKey；可在已有文献与模拟审稿中查询等级）。</p>
+        <p class="modal-desc" style="background:var(--primary-soft)">easyScholar 期刊等级查询（免费开放接口，需 SecretKey；可在已有文献与模拟审稿中查询等级）。</p>
         <label class="field"><span>easyScholar SecretKey</span><input id="setEasyKey" class="tb-input" type="password" placeholder="在 easyScholar 官网获取，留空则不查询等级" /></label>
         <div class="field-sep"></div>
         <p class="modal-desc" style="background:var(--primary-soft)">划词翻译（PDF 阅读器内选中文字自动翻译）。网页版火山 / 有道免密钥开箱即用；需要更高质量可配置 DeepL 或云厂商机器翻译。</p>
@@ -1438,7 +1440,7 @@
           </select>
         </label>
         <div class="field-sep"></div>
-        <p class="modal-desc" style="background:#e6f6ec">数据保存位置（默认存在<b>系统用户数据目录</b>，与安装位置分离，<b>升级/覆盖安装不会丢失</b>文献与配置；也可手动指定自定义目录）。</p>
+        <p class="modal-desc" style="background:var(--green-soft)">数据保存位置（默认存在<b>系统用户数据目录</b>，与安装位置分离，<b>升级/覆盖安装不会丢失</b>文献与配置；也可手动指定自定义目录）。</p>
         <label class="field"><span>数据保存目录</span><input id="setDataDir" class="tb-input" placeholder="留空 = 系统用户数据目录；例如 D:\文献库" /></label>
 
         <div class="field-sep"></div>
@@ -1495,7 +1497,7 @@
         <p class="update-caution">安装前建议完成正在编辑的内容。下载完成后，应用将退出并启动安装程序；辅助式安装包在部分系统上仍可能要求确认安装选项。</p>
       </div>
       <div class="modal-foot">
-        <a class="btn btn-ghost" href="https://github.com/zhaojiayuan19981123/zotero-lit-tool/releases" target="_blank" rel="noopener noreferrer">查看发布页</a>
+        <a class="btn btn-ghost" href="https://github.com/zhaojiayuan19981123/worlex/releases" target="_blank" rel="noopener noreferrer">查看发布页</a>
         <span class="ob-spacer"></span>
         <button id="btnUpdateAction" class="btn btn-primary">检查更新</button>
         <button id="btnUpdateCancel" class="btn">关闭</button>
@@ -1510,7 +1512,7 @@
       <p class="update-notify-title">发现新版本 <b id="updateNotifyVersion">--</b></p>
       <button class="update-notify-close" id="btnUpdateNotifyClose" data-update-notify="dismiss" title="关闭">×</button>
     </div>
-    <p class="update-notify-text" id="updateNotifyText">一站式科研终端（经管版）有新版本可用，建议升级。</p>
+    <p class="update-notify-text" id="updateNotifyText">worlex 有新版本可用，建议升级。</p>
     <div class="update-notify-actions">
       <button class="btn btn-primary btn-sm" id="btnUpdateNotifyOpen" data-update-notify="open">查看更新</button>
       <button class="btn btn-sm" id="btnUpdateNotifyLater" data-update-notify="dismiss">以后再说</button>

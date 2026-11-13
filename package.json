@@ -1,7 +1,7 @@
 {
-  "name": "zotero-lit-tool",
-  "version": "1.38.5",
-  "description": "一站式科研终端（经管版） —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
+  "name": "worlex",
+  "version": "1.39.0",
+  "description": "worlex —— 文献 AI 解析、PDF 阅读、项目管理、论文进度、AI 助手",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -51,7 +51,7 @@
   },
   "build": {
     "appId": "com.research.sciterminal",
-    "productName": "一站式科研终端（经管版）",
+    "productName": "worlex",
     "asar": false,
     "npmRebuild": false,
     "afterPack": "scripts/after-pack.cjs",
@@ -62,7 +62,7 @@
       {
         "provider": "github",
         "owner": "zhaojiayuan19981123",
-        "repo": "zotero-lit-tool",
+        "repo": "worlex",
         "releaseType": "release"
       }
     ],
@@ -86,14 +86,14 @@
       "target": [
         "dmg"
       ],
-      "artifactName": "zotero-lit-tool-${version}-macos-${arch}.dmg",
+      "artifactName": "worlex-${version}-macos-${arch}.dmg",
       "files": [
         "!node_modules/onnxruntime-node/bin/napi-v6/win32/**",
         "!node_modules/onnxruntime-node/bin/napi-v6/linux/**"
       ]
     },
     "dmg": {
-      "title": "一站式科研终端（经管版）",
+      "title": "worlex",
       "icon": "build/icon.icns",
       "contents": [
         {
@@ -118,7 +118,7 @@
           ]
         }
       ],
-      "artifactName": "zotero-lit-tool-setup-${version}.exe",
+      "artifactName": "worlex-setup-${version}.exe",
       "files": [
         "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
         "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
@@ -132,13 +132,13 @@
       "include": "build/installer.nsh",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "一站式科研终端（经管版）",
+      "shortcutName": "worlex",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true,
-      "artifactName": "zotero-lit-tool-setup-${version}.exe"
+      "artifactName": "worlex-setup-${version}.exe"
     }
   }
 }

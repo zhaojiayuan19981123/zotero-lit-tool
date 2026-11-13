@@ -160,7 +160,7 @@ export async function syncJournals(stateInput, journalIds, { fetchImpl = globalT
       try {
         const params = new URLSearchParams({ filter: 'type:journal-article', sort: 'published', order: 'desc', rows: String(Math.max(1, Math.min(100, rows))) });
         const response = await fetchImpl(`${CROSSREF_API}/${encodeURIComponent(journal.issn)}/works?${params}`, {
-          headers: { Accept: 'application/json', 'User-Agent': 'zotero-lit-tool/1.9 (mailto:research@example.invalid)' },
+          headers: { Accept: 'application/json', 'User-Agent': 'worlex/1.9 (mailto:research@example.invalid)' },
         });
         if (!response.ok) throw new Error(`Crossref ${response.status}`);
         const payload = await response.json();

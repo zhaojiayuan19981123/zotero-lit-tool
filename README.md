@@ -1,10 +1,10 @@
-# 一站式科研终端（经管版）（SciTerminal）
+# worlex
 
-一站式科研终端（经管版）是一款面向科研人员的本地桌面应用，覆盖文献收集、AI 解析、PDF 精读、分类管理、灵感孵化、模拟审稿、Markdown 写作与项目管理等常见研究流程。
+worlex 是一款面向科研人员的本地桌面应用，覆盖文献收集、AI 解析、PDF 精读、分类管理、灵感孵化、模拟审稿、Markdown 写作与项目管理等常见研究流程。
 
 应用提供「实证类文库」和「模型类文库」两套文献结构。用户可以导入 PDF，由大模型提取结构化信息，在阅读器中翻译、标注和记录笔记，也可以把研究过程中产生的想法保存为灵感卡片，再通过大模型孵化为可检验、可执行的初步创新点。
 
-> 当前源码版本：`v1.38.5`（**译文里的「……」不再凭空出现**：PDF 段落常在页面底部被切开，两半各自送翻，模型看到半句就补省略号、甚至写一行「（原文不完整，但按要求翻译到此）」；现在长文按「开头 + 中段抽样 + 结尾」以外还给模型讲清了「片段可能从半句开始、到半句结束」，译文末尾不再无故出现省略号，说明性文字一律清掉；同时**补上了输出截断检测** —— 以前一批译文被 `max_tokens` 截断时，末尾几段只出来半句还会被当成正常结果，现在检测到就自动拆小批次重翻。**原文加粗的内容，译文同样加粗**：版面模型不给字重，改成扫 PDF 的字体名（`TimesNewRomanPS-BoldMT` 这类）算出每个版面块的粗体占比，假设（H10. / H11. / H12.）、粗体术语段在「版面还原」和「文本重排」两种读法里都保持加粗，导出的 Markdown 也用粗体。其余为 v1.38.4 的内容：阅读模式按版面识别结果重建正文（出版商的刊头图、徽记不进重排，标题层级与阅读顺序用模型给的 label 与 order）、点原文段落只定位不放大、划词加笔记原文同步高亮、修复模拟审稿上传 PDF 后生成不出结果；更早版本见 `MODIFICATION_NOTES.md`）。
+> 当前源码版本：`v1.39.0`（**软件正式更名为 worlex**：界面、安装包、GitHub 仓库与图标全部换新。图标是你给的 W 字标（深墨蓝 + 暖橙），界面按 willo 的简约风重做 —— 暖白纸底、深墨文字，橙色只用在「主按钮 / 当前选中 / 进度」上；去掉原来的靛紫主色、横贯的渐变装饰线、彩色状态点与层层阴影，字标用衬线、界面统一无衬线，浅色 / 深色 / 护眼三套主题同步换色。**改名只动显示名与仓库名**：`appId`、数据目录、`localStorage` 键和旧目录迁移路径一律不动，覆盖安装后文献与设置原样保留。其余为 v1.38.5 的内容：译文不再凭空出现省略号、原文加粗译文也加粗；更早版本见 `MODIFICATION_NOTES.md`）。
 >
 > 运行方式：Windows 桌面应用，或 Node.js + 浏览器
 >
@@ -14,7 +14,7 @@
 
 Windows 用户无需安装 Node.js，可直接下载安装程序：
 
-- [下载最新正式版本](https://github.com/zhaojiayuan19981123/zotero-lit-tool/releases/latest)
+- [下载最新正式版本](https://github.com/zhaojiayuan19981123/worlex/releases/latest)
 
 > 注意：仓库源码可能先于 Releases 中的安装包。请以 Release 页面列出的功能与附件为准；仅推送源码不会自动替换已有安装包。
 
@@ -22,7 +22,7 @@ Windows 用户无需安装 Node.js，可直接下载安装程序：
 
 1. 下载并运行 Windows x64 安装程序。
 2. 按安装向导选择安装目录。
-3. 安装完成后，从桌面快捷方式或开始菜单启动「一站式科研终端（经管版）」。
+3. 安装完成后，从桌面快捷方式或开始菜单启动 worlex。
 4. 首次启动后，进入「AI 设置」添加模型并填写自己的 API Key。
 5. 如需期刊等级，在同一设置页面填写 EasyScholar SecretKey。
 
@@ -34,10 +34,10 @@ GitHub Releases 同时提供两种 macOS 安装包：
 
 | 文件 | 适用设备 |
 |---|---|
-| `zotero-lit-tool-1.6.0-macos-arm64.dmg` | Apple Silicon（M1、M2、M3、M4 等）Mac |
-| `zotero-lit-tool-1.6.0-macos-x64.dmg` | Intel 处理器 Mac |
+| `worlex-1.6.0-macos-arm64.dmg` | Apple Silicon（M1、M2、M3、M4 等）Mac |
+| `worlex-1.6.0-macos-x64.dmg` | Intel 处理器 Mac |
 
-下载与处理器架构对应的 DMG，打开后将「一站式科研终端（经管版）」拖入 Applications。当前 macOS 构建未使用 Apple Developer ID 签名，也未经过 Apple 公证，因此 Gatekeeper 可能阻止首次直接启动。请仅从本仓库 Releases 下载，并在确认校验值后，通过「系统设置 → 隐私与安全性」允许打开。正式面向更广泛用户分发前，应配置 Apple Developer ID 签名和公证。
+下载与处理器架构对应的 DMG，打开后将 worlex 拖入 Applications。当前 macOS 构建未使用 Apple Developer ID 签名，也未经过 Apple 公证，因此 Gatekeeper 可能阻止首次直接启动。请仅从本仓库 Releases 下载，并在确认校验值后，通过「系统设置 → 隐私与安全性」允许打开。正式面向更广泛用户分发前，应配置 Apple Developer ID 签名和公证。
 
 macOS 版本目前不支持应用内自动更新。升级时需从 Releases 下载对应架构的新 DMG；Windows 安装版可以使用侧边栏中的「检查更新」。
 
@@ -830,8 +830,8 @@ npm run dist
 构建产物位于 `dist/`。当前使用 electron-builder 和 NSIS，生成 Windows x64 安装程序，支持选择安装目录并创建桌面与开始菜单快捷方式。用于自动更新的正式构建应同时生成并保留：
 
 ```text
-zotero-lit-tool-setup-1.6.0.exe
-zotero-lit-tool-setup-1.6.0.exe.blockmap
+worlex-setup-1.6.0.exe
+worlex-setup-1.6.0.exe.blockmap
 latest.yml
 ```
 
@@ -846,7 +846,7 @@ npm run dist:dir
 ## 项目结构
 
 ```text
-zotero-lit-tool/
+worlex/
 |-- server.js                 # Express 服务、API 与桌面后端入口
 |-- package.json              # 依赖、脚本和 Electron 构建配置
 |-- electron/

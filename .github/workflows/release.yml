@@ -51,8 +51,8 @@ jobs:
           name: windows-release
           if-no-files-found: error
           path: |
-            dist/zotero-lit-tool-setup-*.exe
-            dist/zotero-lit-tool-setup-*.exe.blockmap
+            dist/worlex-setup-*.exe
+            dist/worlex-setup-*.exe.blockmap
             dist/latest.yml
 
   macos:
@@ -103,7 +103,7 @@ jobs:
         with:
           name: macos-${{ matrix.arch }}-release
           if-no-files-found: error
-          path: dist/zotero-lit-tool-*-macos-${{ matrix.arch }}.dmg
+          path: dist/worlex-*-macos-${{ matrix.arch }}.dmg
 
   release:
     # 必须等 macOS 作业跑完：v1.35.0 实测，`needs: [windows]` 时 release 在 macOS 还没传
@@ -145,7 +145,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: 一站式科研终端 ${{ github.ref_name }}
+          name: worlex ${{ github.ref_name }}
           draft: false
           prerelease: false
           make_latest: true

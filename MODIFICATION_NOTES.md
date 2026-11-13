@@ -1,3 +1,58 @@
+## v1.39.0：更名 worlex + Hallmark 简约风界面重设计（2026-11-13）
+
+> 用户要求：「用 hallmark 重设计这个软件的界面，整体呈现简约风，参考 willo，
+> 将软件改名为 worlex，并更名项目仓库名称」，并附上 `worlex.svg` 作为新图标。
+> 澄清后确认：视觉走 willo.farm 的暖白 + 墨黑 + 单一强调色；GitHub 远端仓库也改。
+
+### 一、品牌与命名
+
+- **新图标**：`public/worlex.svg` 是原始矢量稿（深墨蓝 W 字标，左下角一块暖橙，带眼睛与微笑）。
+  经透明底渲染后交给 `build/make-icons.py` 生成全套：`build/icon.png / icon.ico / icon.icns /
+  icon-256.png`、`public/favicon.png`、`electron/icon.png`，四角 alpha 校验全部通过。
+  标签页图标优先用 SVG，界面左上角仍用透明底 PNG（沿用既有单测约定）。
+- **改名范围**：产品显示名、`package.json` 的 name / productName / artifactName / publish.repo、
+  `package-lock.json`、CI 产物通配、Release 标题、安装包说明、README、about / 更新提示 / 打印页脚 /
+  document.title / AI 系统提示词 / 本地网关与 User-Agent、发布页链接，全部改成 worlex。
+- **GitHub 远端**：通过 API 把 `zhaojiayuan19981123/zotero-lit-tool` 重命名为
+  `zhaojiayuan19981123/worlex`，本地 `origin` 同步更新。旧地址返回 301 到新地址，
+  `/releases/latest` 与历史 Release 链接不会断（改名后实测重定向到
+  `/zhaojiayuan19981123/worlex/releases/tag/v1.38.5`）。
+- **刻意不改的清单**（改了会丢用户数据）：`build.appId = com.research.sciterminal`、
+  `electron/main.cjs` 的 `stableRoot = SciTerminal` 与 `legacyRoot = zotero-lit-tool` 迁移路径、
+  `USERDATA_MARKER`、所有 `sciterminal.*` localStorage 键、`test/pdf-translate.test.mjs` 的字体搜索路径，
+  以及 MODIFICATION_NOTES / release-body 里历史版本的具体安装包文件名（那是史实）。
+  本地仓库目录名也不改 —— 一堆 E2E 脚本里写的是绝对路径。
+
+### 二、视觉系统（Hallmark · redesign full · scope app）
+
+现有 4601 行 CSS 已有完整 token 架构，所以走「换令牌 + 外壳覆盖层」，不重构任何组件树：
+
+- **三套主题令牌整体重写**：iOS System Indigo → 暖白纸 `#f7f6f2` / 深墨 `#15262f` / 橙棕
+  `#b0551f`（白字 5.0:1），图标原色 `#e68a42` 只作装饰与进度；深色模式反过来用亮橙底 +
+  墨色字；护眼模式暖米底 + 橙棕。阴影压到几乎看不见，分层靠 1px 线。
+- **字标 / 字体**：新增 `--font-display`（Georgia 系）只给拉丁字标 worlex；UI 默认回落从
+  `--font`（Times New Roman）改成 `--font-ui`（系统无衬线），阅读内容仍保留用户要求的
+  西文 Times New Roman + 中文宋体。用户显式设置的 `--app-font` 照旧优先。
+- **外壳**：顶栏去掉 4px 粗色条与四个描边按钮（改幽灵按钮，只留一个橙色实心主按钮），
+  字标与页面标题之间补一条 1px 竖分隔；侧栏换成与纸面同色、分组标签去掉字距与粗体、
+  选中态改橙色细条 + 极淡底；首页横幅去掉顶部粗色条；进度条与统计卡去掉渐变；
+  侧栏页脚三颗彩色装饰圆点从标记里移除。
+- **Floor 清理**：21 处 `transition: all` 改成明确属性列表，4 处 `100vw` 改 `100%`，
+  `html/body` 加 `overflow-x: clip`；5 处 width 过渡删除；补全局 `:focus-visible`、
+  `prefers-reduced-motion`、`caret-color / scrollbar-color`、meta description；
+  高亮四色与热力图色阶改用令牌（深色/护眼主题自动适配），旧品牌紫蓝 rgba 换成语义令牌；
+  2 处内联色值改 `var()`。CSS 第一行是 Hallmark 构建戳与 critique 行，随后是 waiver 行。
+- **保持**：所有 id、class、data-view、事件绑定、脚本、路由与 15 个视图结构一律未动。
+
+### 三、验证
+
+- 单测 **728/728**（Node 22.22 与 Node 20.10 两遍）；
+- 真浏览器 `e2e-reading.mjs` **38/38**、`e2e-cmp-bold.mjs` **17/17**；
+- 改造前后截图存 `.hallmark/before/` 与 `.hallmark/after/`（首页 / 文献中心 / 模拟审稿 /
+  AI 助手 / 设置 / 深色模式）；
+- Hallmark `sloplint --scope app --tier floor` 从 274 FAIL 降到 110，剩余项是 4600 行历史组件层
+  的硬编码阴影色、主题演示卡的固定色，以及 linter 对中文「·」与 CJK 字形的误判（已在 stamp 记录）。
+
 ## v1.38.5：译文不再凭空出现省略号 + 原文加粗的内容译文也加粗（2026-11-13）
 
 > 用户反馈：「首先，为什么全文翻译会出现省略号的情况，其次，我更希望原文加粗的字体，

@@ -30,7 +30,9 @@ import sys
 from PIL import Image
 
 # 设计稿：允许命令行覆盖，默认用最近给的那张
-SRC = sys.argv[1] if len(sys.argv) > 1 else r"D:\desktop\icon-256.png"
+# 默认用 worlex 的透明底母图（原始矢量稿是 public/worlex.svg）。
+# 想换图标：把新 SVG 渲染成透明底 1024x1024 PNG 覆盖这个文件，再直接跑本脚本即可。
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "worlex-master.png")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.join(ROOT, "build")
 PUBLIC = os.path.join(ROOT, "public")

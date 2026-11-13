@@ -1,7 +1,7 @@
 # processor —— PDF 版面解析子进程
 
 这个目录**不是本仓库原创**，代码取自开源项目 [`cynicalight/reader`](https://github.com/cynicalight/reader)
-的 `apps/processor`，用于给「一站式科研终端」补齐 PDF **版面结构解析**能力：
+的 `apps/processor`，用于给 worlex 补齐 PDF **版面结构解析**能力：
 把每一页切成标题 / 段落 / 图表 / 表格 / 公式等区域，并给出每个区域的位置、类型与文字。
 
 它被设计成**独立的 Node 命令行程序**（不是库），由主服务 `src/layout.js` 以子进程方式调用，

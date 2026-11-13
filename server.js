@@ -3788,7 +3788,7 @@ export function createApp({
       : '（暂无大论文记录）';
 
     return [
-      `你是「一站式科研终端（经管版）」内置的 AI 科研助手（底层模型 DeepSeek），服务于一位硕博研究人员。今天是 ${new Date().toISOString().slice(0, 10)}。`,
+      `你是 worlex 内置的 AI 科研助手（底层模型 DeepSeek），服务于一位硕博研究人员。今天是 ${new Date().toISOString().slice(0, 10)}。`,
       `\n## 用户资料\n姓名：${profile.name || '研究生'}${profile.field ? '；方向：' + profile.field : ''}${profile.grade ? '；' + profile.grade : ''}${profile.school ? '；' + profile.school : ''}`,
       `\n## 进行中的科研项目\n${projBlock}`,
       `\n## 未完成任务\n${taskBlock}`,
@@ -4988,7 +4988,7 @@ if (isMain) {
   startServer({ port, startGateway: true }).then(({ port: p }) => {
     console.log('');
     console.log('  ┌──────────────────────────────────────────────┐');
-    console.log('  │   一站式科研终端 · 已启动                    │');
+    console.log('  │   worlex · 已启动                    │');
     console.log('  └──────────────────────────────────────────────┘');
     console.log(`  访问： http://localhost:${p}`);
     console.log('');

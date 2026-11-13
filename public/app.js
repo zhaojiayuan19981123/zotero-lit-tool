@@ -10396,7 +10396,7 @@
     doc.innerHTML = `
       <h1 class="pd-title">${esc(it.title || '（未命名文献）')}</h1>
       ${body || '<div class="pd-empty">这篇文献还没有解析结果。先在右侧「解析结果」里跑一次解析，再来打印。</div>'}
-      <div class="pd-foot">一站式科研终端（经管版）· 文献解析结果 · ${stamp}</div>`;
+      <div class="pd-foot">worlex · 文献解析结果 · ${stamp}</div>`;
     box.appendChild(doc);
   }
 
@@ -11866,7 +11866,7 @@
       const t = $('topbarPageTitle');
       // 顶栏只保留页面主标题：副标题属冗余小字，已随「减少无谓标签」一并移除。
       if (t) t.querySelector('b').textContent = page.name;
-      document.title = `${page.name} · 一站式科研终端（经管版）`;
+      document.title = `${page.name} · worlex`;
     }
     const isLib = v === 'library';
     // 文献中心：主区固定不滚动，表格容器内滚动（横向滚动条贴可视区底部）
@@ -14192,7 +14192,7 @@ a { color: #176b87; }
 
     // 优先显示 GitHub Release 正文；若上游未提供正文，至少列出本版本已落地的变更。
     const knownChanges = status.availableVersion === '1.11.0' ? [
-      '应用名称为《一站式科研终端（经管版）》；',
+      '应用名称为 worlex；',
       '顶刊追踪 AI 分析记录支持持久化、历史查看和一键保存至 Markdown 笔记，并在分析前压缩较大的本地知识库上下文；',
       'AI 助手支持上传并阅读 PDF，也可以多选 Markdown 笔记、研究记录、灵感孵化、论文进度和收藏顶刊文章作为上下文；',
       '模型请求增强 Chat Completions / Responses API 兼容与无回复兜底，避免“测试连通但实际对话/翻译无返回”；',
@@ -14249,7 +14249,7 @@ a { color: #176b87; }
     const name = String(status?.releaseName || '').trim();
     $('updateNotifyText').textContent = name && name !== `v${version}`
       ? `${name} 已发布，可查看更新内容并升级。`
-      : '一站式科研终端（经管版）有新版本可用，建议升级。';
+      : 'worlex 有新版本可用，建议升级。';
     $('updateNotify').classList.remove('hidden');
   }
 
@@ -14783,7 +14783,7 @@ a { color: #176b87; }
   const OB_VERSION = 2;
   const OB_STEPS = [
     {
-      emoji: 'sparkles', title: '欢迎使用一站式科研终端',
+      emoji: 'sparkles', title: '欢迎使用 worlex',
       desc: '这是为经管类硕博同学打造的<b>一站式科研助手</b>：文献管理、AI 解析、论文进度、科研日历一应俱全。接下来花 2 分钟，手把手带你完成初始设置、认识每个功能。',
       points: [
         { ico: '', html: '先带你<b>完善个人资料</b>、<b>配置 AI 密钥</b>（这是使用 AI 功能的前提）' },

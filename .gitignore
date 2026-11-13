@@ -32,3 +32,6 @@ _vision_*_test_data/
 Thumbs.db
 .idea/
 .vscode/
+
+# Hallmark 重设计证据（改造前后截图与 lint 记录，仅本地保留）
+.hallmark/

@@ -133,7 +133,7 @@ function showUpdateNotification(info) {
     if (!Notification.isSupported()) return false;
     const notification = new Notification({
       title: version ? `发现新版本 v${version}` : '发现新版本',
-      body: '一站式科研终端（经管版）有新版本可用，点击查看更新内容。',
+      body: 'worlex 有新版本可用，点击查看更新内容。',
       icon: path.join(__dirname, 'icon.png'),
     });
     notification.on('click', () => {
@@ -317,7 +317,7 @@ function markHome() {
     fs.mkdirSync(root, { recursive: true });
     const marker = path.join(root, USERDATA_MARKER);
     if (!fs.existsSync(marker)) {
-      fs.writeFileSync(marker, JSON.stringify({ markedAt: new Date().toISOString(), app: '一站式科研终端（经管版）' }, null, 2), 'utf-8');
+      fs.writeFileSync(marker, JSON.stringify({ markedAt: new Date().toISOString(), app: 'worlex' }, null, 2), 'utf-8');
     }
   } catch (e) { console.error('写入数据目录标记失败：', e.message); }
 }
@@ -563,7 +563,7 @@ function createWindow() {
     height: 920,
     minWidth: 960,
     minHeight: 600,
-    title: '一站式科研终端（经管版）',
+    title: 'worlex',
     icon: path.join(__dirname, 'icon.png'),
     autoHideMenuBar: true,
     backgroundColor: '#f4f6f3',

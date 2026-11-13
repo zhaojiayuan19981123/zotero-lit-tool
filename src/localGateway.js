@@ -254,7 +254,7 @@ export function createLocalGateway({ getConfig, handleChat, listModels, onEvent 
     }
 
     if (path === '/health' && method === 'GET') {
-      json(res, 200, { ok: true, service: 'zotero-lit-tool local gateway' });
+      json(res, 200, { ok: true, service: 'worlex local gateway' });
       return;
     }
 

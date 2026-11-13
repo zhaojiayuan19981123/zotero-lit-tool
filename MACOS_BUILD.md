@@ -1,4 +1,4 @@
-# 在 macOS 上打包「一站式科研终端」
+# 在 macOS 上打包 worlex
 
 本项目是跨平台的 Electron 应用（Node.js + Express + 纯前端），源码在 macOS 上可直接运行和打包。
 
@@ -11,7 +11,7 @@
 ```bash
 # 1. 安装 Node.js（建议 18 或 20+，https://nodejs.org）
 # 2. 进入项目目录
-cd zotero-lit-tool
+cd worlex
 
 # 3. 安装依赖（会自动下载对应 mac 平台的 electron）
 npm install
@@ -42,7 +42,7 @@ npm run dist:mac
 打包产物在 `dist/` 目录下：
 
 ```
-dist/一站式科研终端-1.0.0-macOS-arm64.dmg
+dist/worlex-1.0.0-macOS-arm64.dmg
 ```
 
 ## 四、关于代码签名（重要）
@@ -54,7 +54,7 @@ dist/一站式科研终端-1.0.0-macOS-arm64.dmg
 对方首次打开时，右键点击 App →「打开」，或执行：
 
 ```bash
-sudo xattr -rd com.apple.quarantine /Applications/一站式科研终端.app
+sudo xattr -rd com.apple.quarantine /Applications/worlex.app
 ```
 
 ### 方式 2：正式签名（对外分发）
