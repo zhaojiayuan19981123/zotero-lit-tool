@@ -1597,14 +1597,14 @@ mark.anno-c-purple { color: var(--primary); background: none; }
    这样块高亮绝不会挡住 textLayer 的划词，这是第一优先级。 */
 .pr-block-hover {
   position: absolute; pointer-events: none; z-index: 3; box-sizing: border-box;
-  border: 1.5px dashed var(--border); background: var(--panel-2);
+  border: 1.5px dashed var(--border); background: color-mix(in srgb, var(--ink) 8%, transparent);
   border-radius: 3px;
 }
 /* 带裁图的块（图表 / 表格 / 公式）实线框 —— 它们是「可点开看原图」的，
    与只能划词的正文块区分开，不必让用户去猜边界在哪 */
 .pr-block-hover[data-kind="asset"] {
   border-style: solid; border-color: var(--text-3);
-  background: var(--panel-2);
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
 }
 .pr-block-badge {
   position: absolute; pointer-events: none; z-index: 4;
