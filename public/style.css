@@ -1618,7 +1618,7 @@ mark.anno-c-purple { color: var(--primary); background: none; }
    与悬停高亮刻意做出区分 —— 实线 + 无徽标 + 更实的底色，一眼能看出「这个是选中的」。 */
 .cmp-pdf-pick {
   position: absolute; pointer-events: none; z-index: 3; box-sizing: border-box;
-  border: 1.5px solid var(--ink); background: var(--panel-2);
+  border: 1.5px solid var(--ink); background: color-mix(in srgb, var(--ink) 12%, transparent);
   border-radius: 3px;
   box-shadow: 0 0 0 1px var(--surface);
 }
